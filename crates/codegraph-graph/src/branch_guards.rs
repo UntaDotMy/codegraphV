@@ -2036,6 +2036,1424 @@ impl RuleSet for CRules {
     }
 }
 
+/// Load the grammars the file readers need. Native grammars are linked into
+/// the binary, so this is a no-op kept for API parity with the TypeScript
+/// engine's warm-up hook.
+pub fn warm_branch_guard_grammars(_only: Option<&[&str]>) {}
+
+// =============================================================================
+// Call sites — what is called, and with what
+// =============================================================================
+
+const MAX_ARGS_TEXT: usize = 96;
+const MAX_ARG_TEXT: usize = 40;
+const MAX_OBJECT_KEYS: usize = 4;
+const MAX_CALLEE_TEXT: usize = 96;
+const MAX_DECORATOR_TEXT: usize = 80;
+
+const CALL_TYPES: &[&str] = &[
+    "call_expression",
+    "new_expression",
+    "call",
+    "method_invocation",
+    "object_creation_expression",
+    "invocation_expression",
+    "constructor_invocation",
+];
+const ARGUMENT_CONTAINERS: &[&str] = &["arguments", "value_arguments", "argument_list"];
+const STRING_TYPES: &[&str] = &[
+    "string",
+    "template_string",
+    "line_string_literal",
+    "multi_line_string_literal",
+    "raw_string_literal",
+    "string_literal",
+    "interpreted_string_literal",
+    "concatenated_string",
+    "verbatim_string_literal",
+    "interpolated_string_expression",
+    "char_literal",
+];
+const OBJECT_TYPES: &[&str] = &["object", "object_expression", "dictionary", "anonymous_object_creation_expression"];
+const ARRAY_TYPES: &[&str] = &[
+    "array",
+    "array_literal",
+    "dictionary_literal",
+    "list",
+    "tuple",
+    "set",
+    "list_comprehension",
+    "array_creation_expression",
+    "array_initializer",
+    "initializer_list",
+    "collection_expression",
+    "collection_literal",
+];
+const FUNCTION_TYPES: &[&str] = &[
+    "arrow_function",
+    "function_expression",
+    "function",
+    "lambda",
+    "lambda_expression",
+    "func_literal",
+    "anonymous_function",
+    "anonymous_method_expression",
+];
+
+/// One call site, both halves: what is called, as written, and what it is passed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallSiteText {
+    pub callee: String,
+    pub args: String,
+    pub arg_list: Vec<String>,
+    pub status: Option<u32>,
+    pub span: Option<CallSpan>,
+    pub within: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSpan {
+    pub start_line: u32,
+    pub start_column: usize,
+    pub end_line: u32,
+    pub end_column: usize,
+}
+
+fn arguments_of<'t>(call: Node<'t>) -> Option<Node<'t>> {
+    if let Some(field) = call.child_by_field_name("arguments") {
+        return Some(field);
+    }
+    for child in named_children(call) {
+        if ARGUMENT_CONTAINERS.contains(&child.kind()) {
+            return Some(child);
+        }
+        if child.kind() == "call_suffix" {
+            for inner in named_children(child) {
+                if ARGUMENT_CONTAINERS.contains(&inner.kind()) || inner.kind() == "lambda_literal" {
+                    return Some(inner);
+                }
+            }
+            return Some(child);
+        }
+    }
+    None
+}
+
+fn callee_text(call: Node<'_>, source: &str) -> Option<String> {
+    let callee = call
+        .child_by_field_name("function")
+        .or_else(|| call.child_by_field_name("constructor"))?;
+    Some(cut(&collapse(text(callee, source)), 40))
+}
+
+fn last_segment(text: Option<&str>) -> Option<String> {
+    let text = text?;
+    let m = re!(r"([A-Za-z_$][\w$]*)\s*$").captures(text)?;
+    Some(m.text(1).unwrap_or(text).to_owned())
+}
+
+/// The text of a call before its arguments, normalised to a member chain.
+fn callee_chain_text(call: Node<'_>, container: Node<'_>, source: &str) -> String {
+    let mut end = container.start_byte();
+    if let Some(parent) = container.parent() {
+        if parent.kind() == "call_suffix" {
+            end = parent.start_byte();
+        }
+    }
+    let end = end.max(call.start_byte());
+    let mut text = collapse(&source[call.start_byte()..end]);
+    text = re!(r"^(?:await|new|yield|return)\s+")
+        .replace_first(&text, |_| String::new());
+    text = re!(r"^(?:await|new)\s+").replace_first(&text, |_| String::new());
+    // Empty every nested argument list, innermost first: `a(b(c)).d` → `a().d`
+    // — keeping one short literal or name.
+    let nested = re!(r"\(([^()]*)\)");
+    for _ in 0..6 {
+        if !nested.is_match(&text) {
+            break;
+        }
+        text = nested.replace_all(&text, |caps| {
+            let inner = caps.text(1).unwrap_or("");
+            if re!(r"^\s*[\w.]{1,28}\s*$").is_match(inner) {
+                Some(format!("({})", inner.trim()))
+            } else {
+                Some("()".to_owned())
+            }
+        });
+    }
+    text = text.replace("?.", ".").replace("!.", ".");
+    text.retain(|c| !c.is_whitespace());
+    text = re!(r"<[^<>]*>").replace_all_str(&text, "");
+    text = re!(r"\([^()]*\)$").replace_first(&text, |_| String::new());
+    cut(&text, MAX_CALLEE_TEXT)
+}
+
+fn status_property_in(node: Node<'_>, source: &str, depth: usize) -> Option<u32> {
+    if depth > 2 {
+        return None;
+    }
+    for child in named_children(node) {
+        if matches!(
+            child.kind(),
+            "pair"
+                | "keyword_argument"
+                | "named_argument"
+                | "property_assignment"
+                | "object_property"
+        ) {
+            let key = child
+                .child_by_field_name("key")
+                .or_else(|| child.child_by_field_name("name"))
+                .or_else(|| child.named_child(0));
+            let value = child
+                .child_by_field_name("value")
+                .or_else(|| last_named(child));
+            if let (Some(key), Some(value)) = (key, value) {
+                let key_text = re!(r#"['"]"#).replace_all_str(text(key, source), "");
+                let value_text = text(value, source);
+                if re!(r"^(?:status|statusCode|status_code|code)$").is_match(&key_text)
+                    && re!(r"^[1-5]\d{2}$").is_match(value_text)
+                {
+                    return value_text.parse().ok();
+                }
+            }
+        }
+        if let Some(inner) = status_property_in(child, source, depth + 1) {
+            return Some(inner);
+        }
+    }
+    None
+}
+
+const STATEMENT_BLOCKS: &[&str] = &["statement_block", "program", "block", "class_body", "module"];
+const STATUS_LOOKBACK: usize = 6;
+
+fn status_set_before(call: Node<'_>, callee: &str, source: &str) -> Option<u32> {
+    let bare = re!(r"\([^()]*\)").replace_all_str(callee, "");
+    if !re!(r"^(?:res|response|reply|rep|ctx|c|context)\.(?:json|jsonp|send|render|sendFile|download|end|text|html|body)$")
+        .is_match(&bare)
+        || re!(r"\b(?:status|code|sendStatus|writeHead)\(").is_match(callee)
+    {
+        return None;
+    }
+    let receiver = bare.split('.').next().unwrap_or("");
+    let mut statement = call;
+    while let Some(parent) = statement.parent() {
+        if STATEMENT_BLOCKS.contains(&parent.kind()) {
+            break;
+        }
+        statement = parent;
+    }
+    let pattern = format!(
+        r"^\s*(?:await\s+)?{}\s*\.\s*(?:status|code)\s*\(\s*([1-5]\d{{2}})\s*\)\s*;?\s*$|^\s*{}\s*\.\s*statusCode\s*=\s*([1-5]\d{{2}})\s*;?\s*$",
+        codegraph_jsre::escape_regex(receiver),
+        codegraph_jsre::escape_regex(receiver)
+    );
+    let re = codegraph_jsre::Re::cached(&pattern, "");
+    let mut prev = statement.prev_named_sibling();
+    for _ in 0..STATUS_LOOKBACK {
+        let Some(node) = prev else { break };
+        if node.kind() != "comment" {
+            if let Some(caps) = re.captures(text(node, source)) {
+                let value = caps.text(1).or_else(|| caps.text(2))?;
+                return value.parse().ok();
+            }
+        }
+        prev = node.prev_named_sibling();
+    }
+    None
+}
+
+fn enclosing_call_text(call: Node<'_>, source: &str) -> Option<String> {
+    let boundary = re!(r"function|lambda|closure|block|statement|body|declaration");
+    let mut node = call.parent();
+    for _ in 0..12 {
+        let Some(current) = node else { return None };
+        if boundary.is_match(current.kind()) {
+            return None;
+        }
+        if CALL_TYPES.contains(&current.kind()) {
+            let container = arguments_of(current)?;
+            if container.start_byte() <= call.start_byte() && call.end_byte() <= container.end_byte() {
+                return Some(callee_chain_text(current, container, source));
+            }
+            return None;
+        }
+        node = current.parent();
+    }
+    None
+}
+
+fn abbreviate_argument(node: Node<'_>, source: &str) -> String {
+    let kind = node.kind();
+    if kind == "keyword_argument" {
+        let name = node.child_by_field_name("name");
+        let value = node.child_by_field_name("value");
+        return format!(
+            "{}={}",
+            name.map(|n| text(n, source)).unwrap_or(""),
+            value.map(|v| abbreviate_argument(v, source)).unwrap_or_default()
+        );
+    }
+    if kind == "argument" {
+        let name = node.child_by_field_name("name");
+        let inner = last_named(node);
+        let value = match inner {
+            Some(inner) => abbreviate_argument(inner, source),
+            None => cut(&collapse(text(node, source)), MAX_ARG_TEXT),
+        };
+        return match (name, inner) {
+            (Some(name), Some(inner)) if name != inner => {
+                format!("{}: {value}", text(name, source))
+            }
+            _ => value,
+        };
+    }
+    if kind == "composite_literal" {
+        let t = node.child_by_field_name("type");
+        return format!(
+            "{}{{…}}",
+            t.map(|n| cut(&collapse(text(n, source)), 24)).unwrap_or_default()
+        );
+    }
+    if STRING_TYPES.contains(&kind) {
+        return cut(&collapse(text(node, source)), MAX_ARG_TEXT);
+    }
+    if OBJECT_TYPES.contains(&kind) {
+        return object_keys(node, source);
+    }
+    if ARRAY_TYPES.contains(&kind) {
+        return "[…]".to_owned();
+    }
+    if FUNCTION_TYPES.contains(&kind) {
+        return "() => …".to_owned();
+    }
+    if kind == "lambda_literal" {
+        return "{ … }".to_owned();
+    }
+    if kind == "spread_element" {
+        return cut(&collapse(text(node, source)), MAX_ARG_TEXT);
+    }
+    if kind == "await_expression" {
+        return match node.named_child(0) {
+            Some(inner) => format!("await {}", abbreviate_argument(inner, source)),
+            None => "await …".to_owned(),
+        };
+    }
+    if CALL_TYPES.contains(&kind) {
+        let callee = node
+            .child_by_field_name("function")
+            .or_else(|| node.child_by_field_name("constructor"))
+            .or_else(|| node.named_child(0));
+        let name = callee
+            .map(|c| cut(&collapse(text(c, source)), 28))
+            .unwrap_or_default();
+        let prefix = if kind == "new_expression" { "new " } else { "" };
+        return format!("{prefix}{name}(…)");
+    }
+    if kind == "value_argument" {
+        let named = named_children(node);
+        if named.len() >= 2
+            && matches!(named[0].kind(), "simple_identifier" | "value_argument_label")
+        {
+            return format!(
+                "{}: {}",
+                text(named[0], source),
+                abbreviate_argument(*named.last().unwrap(), source)
+            );
+        }
+        return named
+            .last()
+            .map(|n| abbreviate_argument(*n, source))
+            .unwrap_or_else(|| cut(&collapse(text(node, source)), MAX_ARG_TEXT));
+    }
+    if matches!(kind, "lambda_argument" | "trailing_closure" | "annotated_lambda") {
+        return "{ … }".to_owned();
+    }
+    cut(&collapse(text(node, source)), MAX_ARG_TEXT)
+}
+
+fn object_keys(node: Node<'_>, source: &str) -> String {
+    let mut keys = Vec::new();
+    let mut more = 0;
+    for child in named_children(node) {
+        if child.kind() == "comment" {
+            continue;
+        }
+        let key: Option<String> = match child.kind() {
+            "pair" => child
+                .child_by_field_name("key")
+                .map(|n| text(n, source).to_owned()),
+            "shorthand_property_identifier" | "shorthand_property_identifier_pattern" => {
+                Some(text(child, source).to_owned())
+            }
+            "spread_element" => Some(collapse(text(child, source))),
+            "method_definition" => child
+                .child_by_field_name("name")
+                .map(|n| text(n, source).to_owned()),
+            _ => None,
+        };
+        let Some(key) = key else { continue };
+        if keys.len() >= MAX_OBJECT_KEYS {
+            more += 1;
+            continue;
+        }
+        keys.push(cut(&key, 24));
+    }
+    if keys.is_empty() {
+        return "{…}".to_owned();
+    }
+    format!(
+        "{{ {}{} }}",
+        keys.join(", "),
+        if more > 0 { ", …" } else { "" }
+    )
+}
+
+fn call_at<'t>(
+    root: Node<'t>,
+    source: &str,
+    line: u32,
+    column: Option<u32>,
+    want: Option<&str>,
+) -> Option<Node<'t>> {
+    let row = line.checked_sub(1)? as usize;
+    let first_col = first_non_blank_column(source, row);
+    let columns: Vec<usize> = match column {
+        None => vec![first_col],
+        Some(c) => {
+            let c = c as usize;
+            vec![c, c + 1, c.saturating_sub(1), first_col]
+        }
+    };
+    let want_last = want.map(|w| w.split(['.', ':']).next_back().unwrap_or(w).to_owned());
+    for col in columns {
+        let Some(start) = innermost_at(root, row, col) else {
+            continue;
+        };
+        let mut node = Some(start);
+        let mut first = None;
+        for _ in 0..10 {
+            let Some(current) = node else { break };
+            if CALL_TYPES.contains(&current.kind()) {
+                if first.is_none() {
+                    first = Some(current);
+                }
+                if want_last.is_none() {
+                    return Some(current);
+                }
+                let chain = arguments_of(current)
+                    .map(|container| callee_chain_text(current, container, source))
+                    .unwrap_or_default();
+                let stripped = re!(r"\([^()]*\)").replace_all_str(&chain, "");
+                let last = stripped.split(['.', ':']).next_back().unwrap_or("");
+                if want_last.as_deref() == Some(last) {
+                    return Some(current);
+                }
+            }
+            node = current.parent();
+        }
+        if let Some(first) = first {
+            return Some(first);
+        }
+    }
+    None
+}
+
+pub fn call_site_in_tree(
+    root: Node<'_>,
+    source: &str,
+    line: u32,
+    column: Option<u32>,
+    want: Option<&str>,
+) -> Option<CallSiteText> {
+    let call = call_at(root, source, line, column, want)?;
+    let container = arguments_of(call)?;
+    let callee = callee_chain_text(call, container, source);
+    if container.kind() == "lambda_literal" {
+        return Some(CallSiteText {
+            callee,
+            args: "{ … }".to_owned(),
+            arg_list: vec!["{ … }".to_owned()],
+            status: None,
+            span: None,
+            within: None,
+        });
+    }
+    let mut parts = Vec::new();
+    let mut status = None;
+    for child in named_children(container) {
+        if child.kind() == "comment" {
+            continue;
+        }
+        parts.push(abbreviate_argument(child, source));
+        if status.is_none() {
+            status = status_property_in(child, source, 0);
+        }
+    }
+    let text_joined = parts.join(", ");
+    if status.is_none() {
+        status = status_set_before(call, &callee, source);
+    }
+    let start = call.start_position();
+    let end = call.end_position();
+    Some(CallSiteText {
+        args: cut(&text_joined, MAX_ARGS_TEXT),
+        arg_list: parts,
+        span: Some(CallSpan {
+            start_line: start.row as u32 + 1,
+            start_column: start.column,
+            end_line: end.row as u32 + 1,
+            end_column: end.column,
+        }),
+        within: enclosing_call_text(call, source),
+        status,
+        callee,
+    })
+}
+
+pub fn call_arguments_in_tree(
+    root: Node<'_>,
+    source: &str,
+    line: u32,
+    column: Option<u32>,
+) -> Option<String> {
+    call_site_in_tree(root, source, line, column, None).map(|site| site.args)
+}
+
+pub fn call_arguments_in_source(
+    source: &str,
+    language: &str,
+    line: u32,
+    column: Option<u32>,
+) -> Option<String> {
+    if !supports_branch_guards(language) {
+        return None;
+    }
+    let tree = parse_tree(source, language)?;
+    call_arguments_in_tree(tree.root_node(), source, line, column)
+}
+
+pub fn call_arguments_for_file(
+    abs_path: &str,
+    language: &str,
+    sites: &[CallSite],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if !supports_branch_guards(language) || sites.is_empty() {
+        return out;
+    }
+    let Ok(metadata) = std::fs::metadata(abs_path) else {
+        return out;
+    };
+    if metadata.len() > MAX_PARSE_BYTES {
+        return out;
+    }
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        return out;
+    };
+    let Some(tree) = parse_tree(&source, language) else {
+        return out;
+    };
+    let root = tree.root_node();
+    for site in sites {
+        let key = site_key(site);
+        out.entry(key).or_insert_with(|| {
+            call_arguments_in_tree(root, &source, site.line, site.column).unwrap_or_default()
+        });
+        if out.get(&site_key(site)).is_some_and(|v| v.is_empty()) {
+            out.remove(&site_key(site));
+        }
+    }
+    out
+}
+
+pub fn call_sites_for_file(
+    abs_path: &str,
+    language: &str,
+    sites: &[CallSite],
+) -> std::collections::HashMap<String, CallSiteText> {
+    let mut out = std::collections::HashMap::new();
+    if !supports_branch_guards(language) || sites.is_empty() {
+        return out;
+    }
+    let Ok(metadata) = std::fs::metadata(abs_path) else {
+        return out;
+    };
+    if metadata.len() > MAX_PARSE_BYTES {
+        return out;
+    }
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        return out;
+    };
+    let Some(tree) = parse_tree(&source, language) else {
+        return out;
+    };
+    let root = tree.root_node();
+    for site in sites {
+        let key = site_key(site);
+        if out.contains_key(&key) {
+            continue;
+        }
+        if let Some(found) =
+            call_site_in_tree(root, &source, site.line, site.column, site.callee.as_deref())
+        {
+            out.insert(key, found);
+        }
+    }
+    out
+}
+
+// =============================================================================
+// Triggers — what fires a site
+// =============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerKind {
+    Prop,
+    Option,
+    Callback,
+    Request,
+    Decorator,
+    Load,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteTrigger {
+    pub kind: TriggerKind,
+    pub name: String,
+    pub of: Option<String>,
+    pub after: Option<Vec<String>>,
+}
+
+const LATER_CALLEES: &[&str] = &[
+    "useEffect",
+    "useLayoutEffect",
+    "useFocusEffect",
+    "useImperativeHandle",
+    "setTimeout",
+    "setInterval",
+    "requestAnimationFrame",
+    "requestIdleCallback",
+    "runAfterInteractions",
+    "addListener",
+    "addEventListener",
+    "on",
+    "once",
+    "subscribe",
+    "then",
+    "catch",
+    "finally",
+    "runOnJS",
+    "runOnUI",
+    "scheduleOnRN",
+];
+const TRIGGER_BOUNDARIES: &[&str] = &[
+    "function_declaration",
+    "method_definition",
+    "class_declaration",
+    "class_body",
+    "program",
+];
+const MAX_TRIGGER_CLIMB: usize = 24;
+
+fn is_js_family(language: &str) -> bool {
+    matches!(language, "typescript" | "tsx" | "javascript" | "jsx")
+}
+
+pub fn trigger_in_tree(
+    root: Node<'_>,
+    source: &str,
+    line: u32,
+    column: Option<u32>,
+) -> Option<SiteTrigger> {
+    let row = line.checked_sub(1)? as usize;
+    let col = column
+        .map(|c| c as usize)
+        .unwrap_or_else(|| first_non_blank_column(source, row));
+    let mut node = innermost_at(root, row, col);
+    let mut prev: Option<Node<'_>> = None;
+    let mut deferred = false;
+    for _ in 0..MAX_TRIGGER_CLIMB {
+        let Some(current) = node else { return None };
+        let kind = current.kind();
+        if TRIGGER_BOUNDARIES.contains(&kind) {
+            return None;
+        }
+        if kind == "arrow_function" || kind == "function_expression" {
+            if let Some(parent) = current.parent() {
+                if parent.kind() == "variable_declarator" {
+                    return None;
+                }
+                if parent.kind() == "arguments" {
+                    if let Some(grand) = parent.parent() {
+                        let callee = last_segment(callee_text(grand, source).as_deref());
+                        if matches!(
+                            callee.as_deref(),
+                            Some("useCallback" | "useMemo" | "useEffectEvent" | "useEvent")
+                        ) {
+                            return None;
+                        }
+                    }
+                }
+            }
+            deferred = true;
+        }
+        if kind == "jsx_attribute" {
+            let name = current.named_child(0);
+            let prop_name = name.map(|n| text(n, source)).unwrap_or("prop");
+            if !deferred && !re!(r"^on[A-Z]").is_match(prop_name) {
+                return None;
+            }
+            let element = current.parent();
+            let tag = element.and_then(|e| e.child_by_field_name("name"));
+            return Some(SiteTrigger {
+                kind: TriggerKind::Prop,
+                name: prop_name.to_owned(),
+                of: tag.map(|t| collapse(text(t, source))),
+                after: None,
+            });
+        }
+        if kind == "pair" {
+            let key = current.child_by_field_name("key");
+            let key_text = key
+                .map(|k| re!(r#"^['"`]|['"`]$"#).replace_all_str(text(k, source), ""))
+                .unwrap_or_default();
+            if re!(r"^on[A-Z]\w*$").is_match(&key_text) {
+                let mut holder = current.parent();
+                for _ in 0..4 {
+                    let Some(h) = holder else { break };
+                    if !matches!(h.kind(), "object" | "array" | "pair") {
+                        break;
+                    }
+                    holder = h.parent();
+                }
+                let call = holder.filter(|h| h.kind() == "arguments").and_then(|h| h.parent());
+                return Some(SiteTrigger {
+                    kind: TriggerKind::Option,
+                    name: key_text,
+                    of: call
+                        .filter(|c| CALL_TYPES.contains(&c.kind()))
+                        .and_then(|c| callee_text(c, source)),
+                    after: None,
+                });
+            }
+        }
+        if kind == "arguments" && prev.is_some() {
+            if let Some(parent) = current.parent() {
+                if CALL_TYPES.contains(&parent.kind()) {
+                    let callee = last_segment(callee_text(parent, source).as_deref());
+                    if let Some(callee) = callee.filter(|c| LATER_CALLEES.contains(&c.as_str())) {
+                        let first = current.named_child(0);
+                        let of = first
+                            .filter(|f| STRING_TYPES.contains(&f.kind()))
+                            .map(|f| cut(&collapse(text(f, source)), MAX_ARG_TEXT));
+                        return Some(SiteTrigger {
+                            kind: TriggerKind::Callback,
+                            name: callee,
+                            of,
+                            after: None,
+                        });
+                    }
+                }
+            }
+        }
+        prev = Some(current);
+        node = current.parent();
+    }
+    None
+}
+
+pub fn trigger_in_source(
+    source: &str,
+    language: &str,
+    line: u32,
+    column: Option<u32>,
+) -> Option<SiteTrigger> {
+    if !is_js_family(language) {
+        return None;
+    }
+    let tree = parse_tree(source, language)?;
+    trigger_in_tree(tree.root_node(), source, line, column)
+}
+
+pub fn triggers_for_file(
+    abs_path: &str,
+    language: &str,
+    sites: &[CallSite],
+) -> std::collections::HashMap<String, SiteTrigger> {
+    let mut out = std::collections::HashMap::new();
+    if !is_js_family(language) || sites.is_empty() {
+        return out;
+    }
+    let Ok(metadata) = std::fs::metadata(abs_path) else {
+        return out;
+    };
+    if metadata.len() > MAX_PARSE_BYTES {
+        return out;
+    }
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        return out;
+    };
+    let Some(tree) = parse_tree(&source, language) else {
+        return out;
+    };
+    let root = tree.root_node();
+    for site in sites {
+        let key = site_key(site);
+        if out.contains_key(&key) {
+            continue;
+        }
+        if let Some(trigger) = trigger_in_tree(root, &source, site.line, site.column) {
+            out.insert(key, trigger);
+        }
+    }
+    out
+}
+
+// =============================================================================
+// Loops — how often a site runs
+// =============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopKind {
+    Each,
+    While,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteLoop {
+    pub text: String,
+    pub kind: LoopKind,
+    pub branch: String,
+}
+
+fn loop_kind(kind: &str) -> Option<LoopKind> {
+    match kind {
+        "for_statement" | "for_in_statement" | "for_of_statement" | "for_each_statement"
+        | "enhanced_for_statement" | "foreach_statement" | "for_range_loop" | "for_expression" => {
+            Some(LoopKind::Each)
+        }
+        "while_statement" | "while_expression" | "do_statement" | "do_while_statement"
+        | "repeat_while_statement" => Some(LoopKind::While),
+        _ => None,
+    }
+}
+
+pub fn loops_in_tree(
+    root: Node<'_>,
+    source: &str,
+    language: &str,
+    line: u32,
+    column: Option<u32>,
+) -> Vec<SiteLoop> {
+    let Some(rules) = rules_for(language) else {
+        return Vec::new();
+    };
+    let Some(row) = line.checked_sub(1) else {
+        return Vec::new();
+    };
+    let row = row as usize;
+    let col = column
+        .map(|c| c as usize)
+        .unwrap_or_else(|| first_non_blank_column(source, row));
+    let Some(mut node) = innermost_at(root, row, col) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    while let Some(parent) = node.parent() {
+        if rules.boundaries().contains(&parent.kind()) {
+            break;
+        }
+        if rules.inline_functions().contains(&parent.kind()) {
+            let holder = parent.parent().map(|p| p.kind()).unwrap_or("");
+            if rules.binding_parents().contains(&holder) {
+                break;
+            }
+            node = parent;
+            continue;
+        }
+        if let Some(kind) = loop_kind(parent.kind()) {
+            if !is_field(parent, "condition", node) && !is_field(parent, "value", node) {
+                let text = loop_header(parent, source);
+                if !text.is_empty() {
+                    found.push(SiteLoop {
+                        text,
+                        kind,
+                        branch: branch_key(parent),
+                    });
+                }
+            }
+        }
+        node = parent;
+    }
+    found.reverse();
+    found
+}
+
+fn loop_header(loop_node: Node<'_>, source: &str) -> String {
+    let body = loop_node
+        .child_by_field_name("body")
+        .or_else(|| named_children(loop_node).into_iter().find(|c| BLOCKISH.contains(&c.kind())));
+    let raw = match body {
+        Some(body) if body.start_byte() > loop_node.start_byte() => {
+            &source[loop_node.start_byte()..body.start_byte()]
+        }
+        _ => text(loop_node, source),
+    };
+    let mut text = collapse(raw);
+    text = re!(r"^(?:for|foreach|while|do|repeat)\b\s*", "i").replace_first(&text, |_| String::new());
+    text = re!(r"[{:]\s*$").replace_first(&text, |_| String::new());
+    text = text.trim().to_owned();
+    let inner = re!(r"^\((.*)\)$", "s")
+        .captures(&text)
+        .and_then(|c| c.text(1).map(|s| s.trim().to_owned()));
+    if let Some(inner) = inner {
+        text = inner;
+    }
+    text = re!(r"^(?:const|let|var|val|final)\s+").replace_first(&text, |_| String::new());
+    cut(&text, 60)
+}
+
+pub fn loops_in_source(
+    source: &str,
+    language: &str,
+    line: u32,
+    column: Option<u32>,
+) -> Vec<SiteLoop> {
+    if !supports_branch_guards(language) {
+        return Vec::new();
+    }
+    let Some(tree) = parse_tree(source, language) else {
+        return Vec::new();
+    };
+    loops_in_tree(tree.root_node(), source, language, line, column)
+}
+
+pub fn loops_for_file(
+    abs_path: &str,
+    language: &str,
+    sites: &[CallSite],
+) -> std::collections::HashMap<String, Vec<SiteLoop>> {
+    let mut out = std::collections::HashMap::new();
+    if !supports_branch_guards(language) || sites.is_empty() {
+        return out;
+    }
+    let Ok(metadata) = std::fs::metadata(abs_path) else {
+        return out;
+    };
+    if metadata.len() > MAX_PARSE_BYTES {
+        return out;
+    }
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        return out;
+    };
+    let Some(tree) = parse_tree(&source, language) else {
+        return out;
+    };
+    let root = tree.root_node();
+    for site in sites {
+        let key = site_key(site);
+        out.entry(key)
+            .or_insert_with(|| loops_in_tree(root, &source, language, site.line, site.column));
+    }
+    out
+}
+
+// =============================================================================
+// Returns, decorators, member types
+// =============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnSite {
+    pub line: u32,
+    pub column: usize,
+    pub expression: String,
+    pub value: Option<String>,
+}
+
+const NESTED_SCOPE_TYPES: &[&str] = &[
+    "lambda_expression",
+    "class_body",
+    "lambda_literal",
+    "anonymous_function",
+    "object_literal",
+    "arrow_function",
+    "function_expression",
+    "function_declaration",
+    "function_definition",
+    "method_declaration",
+    "method_definition",
+    "lambda",
+];
+
+const DEFINITION_TYPES: &[&str] = &[
+    "function_declaration",
+    "function_definition",
+    "method_definition",
+    "method_declaration",
+    "constructor_declaration",
+    "class_declaration",
+    "class_definition",
+    "decorated_definition",
+    "local_function_statement",
+    "lexical_declaration",
+    "variable_declaration",
+    "public_field_definition",
+];
+
+const CLASS_TYPES: &[&str] = &[
+    "class_declaration",
+    "class_definition",
+    "class",
+    "object_declaration",
+    "struct_declaration",
+    "record_declaration",
+];
+
+fn find_ancestor<'t>(mut node: Option<Node<'t>>, kinds: &[&str], limit: usize) -> Option<Node<'t>> {
+    for _ in 0..limit {
+        let current = node?;
+        if kinds.contains(&current.kind()) {
+            return Some(current);
+        }
+        node = current.parent();
+    }
+    None
+}
+
+pub fn returns_in_tree(root: Node<'_>, source: &str, line: u32) -> Vec<ReturnSite> {
+    let Some(row) = line.checked_sub(1) else {
+        return Vec::new();
+    };
+    let row = row as usize;
+    let Some(start) = innermost_at(root, row, first_non_blank_column(source, row)) else {
+        return Vec::new();
+    };
+    let Some(definition) = find_ancestor(Some(start), DEFINITION_TYPES, 12) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    fn visit(
+        node: Node<'_>,
+        source: &str,
+        out: &mut Vec<ReturnSite>,
+    ) {
+        for child in named_children(node) {
+            if NESTED_SCOPE_TYPES.contains(&child.kind()) {
+                continue;
+            }
+            let is_return = child.kind() == "return_statement"
+                || (child.kind() == "jump_expression"
+                    && re!(r"^return\b").is_match(text(child, source)));
+            if is_return {
+                if let Some(expr) = child.named_child(0) {
+                    let start = child.start_position();
+                    out.push(ReturnSite {
+                        line: start.row as u32 + 1,
+                        column: start.column,
+                        expression: collapse(text(expr, source)),
+                        value: None,
+                    });
+                }
+                continue;
+            }
+            visit(child, source, out);
+        }
+    }
+    visit(definition, source, &mut out);
+
+    // A bare name: the string a same-class constant holds.
+    let cls = find_ancestor(definition.parent(), CLASS_TYPES, 6);
+    if let Some(cls) = cls {
+        let mut strings: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        fn collect(
+            node: Node<'_>,
+            source: &str,
+            strings: &mut std::collections::HashMap<String, String>,
+        ) {
+            for child in named_children(node) {
+                if child.kind() == "variable_declarator" {
+                    let name = child.child_by_field_name("name");
+                    let value = child.child_by_field_name("value");
+                    if let (Some(name), Some(value)) = (name, value) {
+                        if value.kind() == "string_literal" {
+                            strings.insert(
+                                text(name, source).to_owned(),
+                                re!(r#"^"|"$"#).replace_all_str(text(value, source), ""),
+                            );
+                        }
+                    }
+                } else if child.kind() == "field_declaration" || child.kind() == "class_body" {
+                    collect(child, source, strings);
+                }
+            }
+        }
+        collect(cls, source, &mut strings);
+        for site in &mut out {
+            if re!(r"^[A-Za-z_$][\w$]*$").is_match(&site.expression) {
+                if let Some(value) = strings.get(&site.expression) {
+                    site.value = Some(value.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn returns_in_source(source: &str, language: &str, line: u32) -> Vec<ReturnSite> {
+    if !supports_branch_guards(language) {
+        return Vec::new();
+    }
+    let Some(tree) = parse_tree(source, language) else {
+        return Vec::new();
+    };
+    returns_in_tree(tree.root_node(), source, line)
+}
+
+pub fn returns_for_file(abs_path: &str, language: &str, line: u32) -> Vec<ReturnSite> {
+    if !supports_branch_guards(language) {
+        return Vec::new();
+    }
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        return Vec::new();
+    };
+    let Some(tree) = parse_tree(&source, language) else {
+        return Vec::new();
+    };
+    returns_in_tree(tree.root_node(), &source, line)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DefinitionDecorators {
+    pub own: Vec<String>,
+    pub class: Vec<String>,
+}
+
+const DECORATOR_TYPES: &[&str] = &["decorator", "annotation", "marker_annotation", "attribute"];
+
+fn decorator_text(node: Node<'_>, source: &str) -> String {
+    let mut text = re!(r"^@\s*").replace_first(&collapse(text(node, source)), |_| String::new());
+    if node.kind() == "attribute_list" {
+        text = re!(r"^\[|\]$").replace_all_str(&text, "");
+    }
+    cut(&text, MAX_DECORATOR_TEXT)
+}
+
+fn decorators_on(definition: Node<'_>, source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    fn add(node: Node<'_>, source: &str, out: &mut Vec<String>) {
+        if node.kind() == "attribute_list" {
+            for attribute in named_children(node) {
+                if attribute.kind() == "attribute" {
+                    out.push(decorator_text(attribute, source));
+                }
+            }
+        } else if DECORATOR_TYPES.contains(&node.kind()) {
+            out.push(decorator_text(node, source));
+        }
+    }
+    for child in named_children(definition) {
+        if child.kind() == "modifiers" {
+            for modifier in named_children(child) {
+                add(modifier, source, &mut out);
+            }
+        } else {
+            add(child, source, &mut out);
+        }
+    }
+    // JS: decorators are siblings that precede the member in the class body.
+    if out.is_empty() {
+        if let Some(parent) = definition.parent() {
+            for sibling in preceding_siblings(parent, definition).into_iter().rev() {
+                if sibling.kind() != "decorator" {
+                    break;
+                }
+                out.insert(0, decorator_text(sibling, source));
+            }
+        }
+    }
+    out
+}
+
+pub fn decorators_in_tree(
+    root: Node<'_>,
+    source: &str,
+    line: u32,
+) -> Option<DefinitionDecorators> {
+    let row = line.checked_sub(1)? as usize;
+    let start = innermost_at(root, row, first_non_blank_column(source, row))?;
+    let definition = find_ancestor(Some(start), DEFINITION_TYPES, 12)?;
+    let holder = definition
+        .parent()
+        .filter(|p| p.kind() == "decorated_definition")
+        .unwrap_or(definition);
+    let own = decorators_on(holder, source);
+    let cls = find_ancestor(holder.parent(), CLASS_TYPES, 6);
+    let class = cls
+        .map(|c| {
+            let cls_holder = c
+                .parent()
+                .filter(|p| p.kind() == "decorated_definition")
+                .unwrap_or(c);
+            decorators_on(cls_holder, source)
+        })
+        .unwrap_or_default();
+    Some(DefinitionDecorators { own, class })
+}
+
+pub fn decorators_in_source(
+    source: &str,
+    language: &str,
+    line: u32,
+) -> Option<DefinitionDecorators> {
+    if !supports_branch_guards(language) {
+        return None;
+    }
+    let tree = parse_tree(source, language)?;
+    decorators_in_tree(tree.root_node(), source, line)
+}
+
+pub fn decorators_for_file(
+    abs_path: &str,
+    language: &str,
+    lines: &[u32],
+) -> std::collections::HashMap<u32, DefinitionDecorators> {
+    let mut out = std::collections::HashMap::new();
+    if !supports_branch_guards(language) || lines.is_empty() {
+        return out;
+    }
+    let Ok(metadata) = std::fs::metadata(abs_path) else {
+        return out;
+    };
+    if metadata.len() > MAX_PARSE_BYTES {
+        return out;
+    }
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        return out;
+    };
+    let Some(tree) = parse_tree(&source, language) else {
+        return out;
+    };
+    let root = tree.root_node();
+    for line in lines {
+        if out.contains_key(line) {
+            continue;
+        }
+        if let Some(found) = decorators_in_tree(root, &source, *line) {
+            out.insert(*line, found);
+        }
+    }
+    out
+}
+
+const CLASS_BODY_TYPES: &[&str] = &["class_body", "declaration_list", "field_declaration_list"];
+
+fn type_text(node: Option<Node<'_>>, source: &str) -> String {
+    node.map(|n| {
+        re!(r"^:\s*")
+            .replace_first(&collapse(text(n, source)), |_| String::new())
+            .trim()
+            .to_owned()
+    })
+    .unwrap_or_default()
+}
+
+pub fn member_types_in_tree(
+    root: Node<'_>,
+    source: &str,
+    line: u32,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(row) = line.checked_sub(1) else {
+        return out;
+    };
+    let row = row as usize;
+    let Some(start) = innermost_at(root, row, first_non_blank_column(source, row)) else {
+        return out;
+    };
+    let Some(cls) = find_ancestor(Some(start), CLASS_TYPES, 16) else {
+        return out;
+    };
+    fn visit_params(
+        params: Option<Node<'_>>,
+        source: &str,
+        out: &mut std::collections::HashMap<String, String>,
+    ) {
+        let Some(params) = params else { return };
+        for p in named_children(params) {
+            match p.kind() {
+                "required_parameter" | "optional_parameter" => {
+                    let decorated = named_children(p).iter().any(|c| {
+                        matches!(c.kind(), "accessibility_modifier" | "override_modifier")
+                    }) || re!(r"^\s*(?:public|private|protected|readonly)\b")
+                        .is_match(text(p, source));
+                    if !decorated {
+                        continue;
+                    }
+                    put_param(
+                        out,
+                        p.child_by_field_name("pattern").map(|n| text(n, source)),
+                        type_text(p.child_by_field_name("type"), source),
+                    );
+                }
+                "class_parameter" => {
+                    let kids = named_children(p);
+                    let name = kids.iter().find(|c| c.kind() == "simple_identifier");
+                    let ty = kids
+                        .iter()
+                        .find(|c| matches!(c.kind(), "user_type" | "nullable_type"));
+                    if kids.iter().any(|c| c.kind() == "binding_pattern_kind") {
+                        put_param(
+                            out,
+                            name.map(|n| text(*n, source)),
+                            type_text(ty.copied(), source),
+                        );
+                    }
+                }
+                "parameter" | "formal_parameter" => put_param(
+                    out,
+                    p.child_by_field_name("name").map(|n| text(n, source)),
+                    type_text(p.child_by_field_name("type"), source),
+                ),
+                _ => {}
+            }
+        }
+    }
+    // Kotlin's primary constructor sits on the class node itself.
+    for child in named_children(cls) {
+        if child.kind() == "primary_constructor" {
+            let params = named_children(child)
+                .into_iter()
+                .find(|n| n.kind() == "class_parameters")
+                .unwrap_or(child);
+            visit_params(Some(params), source, &mut out);
+        }
+    }
+    let body = named_children(cls)
+        .into_iter()
+        .find(|c| CLASS_BODY_TYPES.contains(&c.kind()))
+        .or_else(|| cls.child_by_field_name("body"));
+    let Some(body) = body else {
+        return out;
+    };
+    for member in named_children(body) {
+        match member.kind() {
+            "public_field_definition" | "field_definition" => put_param(
+                &mut out,
+                member.child_by_field_name("name").map(|n| text(n, source)),
+                type_text(member.child_by_field_name("type"), source),
+            ),
+            "method_definition" => {
+                if member
+                    .child_by_field_name("name")
+                    .is_some_and(|n| text(n, source) == "constructor")
+                {
+                    visit_params(member.child_by_field_name("parameters"), source, &mut out);
+                }
+            }
+            "field_declaration" => {
+                if let Some(ty) = member.child_by_field_name("type") {
+                    for declarator in named_children(member) {
+                        if declarator.kind() == "variable_declarator" {
+                            put_param(
+                                &mut out,
+                                declarator.child_by_field_name("name").map(|n| text(n, source)),
+                                type_text(Some(ty), source),
+                            );
+                        }
+                    }
+                } else if let Some(decl) = named_children(member)
+                    .into_iter()
+                    .find(|c| c.kind() == "variable_declaration")
+                {
+                    let ty = decl.child_by_field_name("type");
+                    for declarator in named_children(decl) {
+                        if declarator.kind() == "variable_declarator" {
+                            put_param(
+                                &mut out,
+                                declarator.child_by_field_name("name").map(|n| text(n, source)),
+                                type_text(ty, source),
+                            );
+                        }
+                    }
+                }
+            }
+            "property_declaration" => {
+                if let Some(cs_type) = member.child_by_field_name("type") {
+                    put_param(
+                        &mut out,
+                        member.child_by_field_name("name").map(|n| text(n, source)),
+                        type_text(Some(cs_type), source),
+                    );
+                } else if let Some(decl) = named_children(member)
+                    .into_iter()
+                    .find(|c| c.kind() == "variable_declaration")
+                {
+                    let kids = named_children(decl);
+                    let name = kids.iter().find(|c| c.kind() == "simple_identifier");
+                    let ty = kids
+                        .iter()
+                        .find(|c| matches!(c.kind(), "user_type" | "nullable_type"));
+                    put_param(
+                        &mut out,
+                        name.map(|n| text(*n, source)),
+                        type_text(ty.copied(), source),
+                    );
+                }
+            }
+            "constructor_declaration" => {
+                visit_params(member.child_by_field_name("parameters"), source, &mut out)
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn put_param(
+    out: &mut std::collections::HashMap<String, String>,
+    name: Option<&str>,
+    ty: String,
+) {
+    if let Some(name) = name.filter(|n| !n.is_empty()) {
+        if !ty.is_empty() {
+            out.entry(name.to_owned()).or_insert(ty);
+        }
+    }
+}
+
+pub fn member_types_in_source(
+    source: &str,
+    language: &str,
+    line: u32,
+) -> std::collections::HashMap<String, String> {
+    if !supports_branch_guards(language) {
+        return std::collections::HashMap::new();
+    }
+    let Some(tree) = parse_tree(source, language) else {
+        return std::collections::HashMap::new();
+    };
+    member_types_in_tree(tree.root_node(), source, line)
+}
+
+pub fn member_types_for_file(
+    abs_path: &str,
+    language: &str,
+    line: u32,
+) -> std::collections::HashMap<String, String> {
+    if !supports_branch_guards(language) {
+        return std::collections::HashMap::new();
+    }
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        return std::collections::HashMap::new();
+    };
+    let Some(tree) = parse_tree(&source, language) else {
+        return std::collections::HashMap::new();
+    };
+    member_types_in_tree(tree.root_node(), &source, line)
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -2273,6 +3691,101 @@ mod tests {
         for language in BRANCH_GUARD_LANGUAGES {
             assert!(supports_branch_guards(language), "{language}");
         }
+    }
+
+    #[test]
+    fn reads_a_call_site_and_its_arguments() {
+        let source = [
+            "function go() {",
+            "  prisma.article.findFirst({ where: { id } });",
+            "}",
+        ]
+        .join("\n");
+        let site = call_site_in_tree(
+            parse_tree(&source, "typescript").unwrap().root_node(),
+            &source,
+            2,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(site.callee, "prisma.article.findFirst");
+        assert_eq!(site.args, "{ where }");
+        assert_eq!(site.span.unwrap().start_line, 2);
+    }
+
+    #[test]
+    fn abbreviates_arguments_the_way_a_reader_scans_them() {
+        let source = "function go(values) {\n  SecureStore.setItemAsync('userEmail', values.email);\n}";
+        let args = call_arguments_in_source(source, "typescript", 2, None).unwrap();
+        assert_eq!(args, "'userEmail', values.email");
+    }
+
+    #[test]
+    fn reads_an_onx_option_trigger() {
+        let source = [
+            "function Form() {",
+            "  useFormik({ onSubmit: () => go() });",
+            "}",
+        ]
+        .join("\n");
+        let trigger = trigger_in_source(&source, "typescript", 2, Some(30)).unwrap();
+        assert_eq!(trigger.kind, TriggerKind::Option);
+        assert_eq!(trigger.name, "onSubmit");
+        assert_eq!(trigger.of.as_deref(), Some("useFormik"));
+    }
+
+    #[test]
+    fn reads_a_runs_later_callback_trigger() {
+        let source = [
+            "function go() {",
+            "  setTimeout(() => work(), 10);",
+            "}",
+        ]
+        .join("\n");
+        let trigger = trigger_in_source(&source, "typescript", 2, Some(16)).unwrap();
+        assert_eq!(trigger.kind, TriggerKind::Callback);
+        assert_eq!(trigger.name, "setTimeout");
+        assert_eq!(trigger.of, None);
+    }
+
+    #[test]
+    fn reads_the_loop_a_site_is_inside() {
+        let source = [
+            "function go(items) {",
+            "  for (const item of items) {",
+            "    a();",
+            "  }",
+            "}",
+        ]
+        .join("\n");
+        let loops = loops_in_source(&source, "typescript", 3, None);
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].text, "item of items");
+        assert_eq!(loops[0].kind, LoopKind::Each);
+    }
+
+    #[test]
+    fn reads_a_functions_returns() {
+        let source = "function f() {\n  return \"x\";\n}\n";
+        let returns = returns_in_source(source, "typescript", 2);
+        assert_eq!(returns.len(), 1);
+        assert_eq!(returns[0].expression, "\"x\"");
+        assert_eq!(returns[0].line, 2);
+    }
+
+    #[test]
+    fn reads_a_python_decorator() {
+        let source = "@app.route('/x')\ndef f():\n    pass\n";
+        let decorators = decorators_in_source(source, "python", 2).unwrap();
+        assert_eq!(decorators.own, vec!["app.route('/x')"]);
+    }
+
+    #[test]
+    fn reads_a_class_members_declared_types() {
+        let source = "class A {\n  private readonly users: UsersService;\n}\n";
+        let types = member_types_in_source(source, "typescript", 1);
+        assert_eq!(types.get("users").map(String::as_str), Some("UsersService"));
     }
 
     #[test]
