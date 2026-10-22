@@ -166,8 +166,6 @@ pub fn is_erlang_app_file(file_path: &str) -> bool {
 
 const SHOPIFY_THEME_MARKERS: [&str; 2] = ["layout/theme.liquid", "config/settings_schema.json"];
 
-static SHOPIFY_THEME_FOLDERS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(assets|blocks|config|layout|locales|sections|snippets|templates)$").unwrap());
 static SHOPIFY_TEMPLATE_FOLDERS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(templates|sections)$").unwrap());
 static SHOPIFY_JSON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)(^|/)(templates|sections)/.+\.json$").unwrap());
 

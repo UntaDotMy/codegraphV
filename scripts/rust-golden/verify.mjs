@@ -26,6 +26,7 @@ const suffix = process.platform === 'win32' ? '.exe' : '';
 run(process.execPath, ['scripts/rust-golden/graph.mjs', `target/debug/examples/graph_probe${suffix}`, '--write']);
 run(process.execPath, ['scripts/rust-golden/query-paths.mjs', `target/debug/examples/query_paths_probe${suffix}`, '--write']);
 run(process.execPath, ['scripts/rust-golden/sfc.mjs', `target/debug/examples/sfc_probe${suffix}`, '--write', path.join(oracleRoot, 'ui/src'), ...process.argv.slice(2)]);
+run(process.execPath, ['scripts/rust-golden/templates.mjs', `target/debug/examples/sfc_probe${suffix}`, '--write', ...process.argv.slice(2)]);
 run('cargo', ['test', '--workspace', '--quiet']);
 recordValidated(commands);
-console.log('\nImplemented graph/search and component extraction validated against the latest TypeScript sources; checkpoint recorded.');
+console.log('\nImplemented graph/search, component and template extraction validated against the latest TypeScript sources; checkpoint recorded.');

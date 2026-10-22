@@ -1,0 +1,11 @@
+[package]
+name = "codegraph-text"
+description = "Comment/string stripping shared by extraction, resolution and query-time derivations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+codegraph-types.workspace = true
+regex.workspace = true

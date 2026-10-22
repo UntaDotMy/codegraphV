@@ -5,13 +5,13 @@
  */
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { isDeepStrictEqual } from 'node:util';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { root, oracleRoot, snapshot } from './check-upstream.mjs';
+import { normalize, compare } from './extraction-compare.mjs';
 const require = createRequire(import.meta.url);
 const { initGrammars, loadGrammarsForLanguages } = require(path.join(oracleRoot, 'dist/extraction/grammars.js'));
 const { SvelteExtractor } = require(path.join(oracleRoot, 'dist/extraction/svelte-extractor.js'));
@@ -85,33 +85,8 @@ function collect(directory, base = directory) {
   }
 }
 for (const arg of process.argv.slice(3).filter(p => !p.startsWith('--'))) collect(path.resolve(arg));
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().filter(k => !['durationMs', 'updatedAt'].includes(k) && value[k] !== null && value[k] !== undefined).map(k => [k, canonical(value[k])]));
-  return value;
-}
-function normalize(result) {
-  return Object.fromEntries(['nodes', 'edges', 'unresolvedReferences', 'errors'].map(k => [k, result[k].map(x => JSON.stringify(canonical(x))).sort()]));
-}
 const expected = cases.map(c => normalize(new extractors[c.language](c.file, c.source).extract()));
-const native = spawnSync(binary, [], { input: cases.map(c => JSON.stringify(c)).join('\n') + '\n', encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 120000, windowsHide: true });
-if (native.status !== 0) throw Error(native.stderr || native.error);
-const actual = native.stdout.trim().split(/\r?\n/).map(s => normalize(JSON.parse(s)));
-if (actual.length !== cases.length) throw Error(`expected ${cases.length} results, got ${actual.length}`);
-for (let i = 0; i < cases.length; i++) {
-  if (!isDeepStrictEqual(actual[i], expected[i])) {
-    console.error(JSON.stringify(cases[i]));
-    for (const kind of Object.keys(expected[i])) {
-      const expectedBag = [...expected[i][kind]], actualBag = [...actual[i][kind]];
-      for (let j = expectedBag.length - 1; j >= 0; j--) {
-        const index = actualBag.indexOf(expectedBag[j]);
-        if (index >= 0) { expectedBag.splice(j, 1); actualBag.splice(index, 1); }
-      }
-      if (expectedBag.length || actualBag.length) console.error(kind, { expectedOnly: expectedBag.slice(0, 5), nativeOnly: actualBag.slice(0, 5) });
-    }
-    throw Error(`SFC parity mismatch at ${i}`);
-  }
-}
+compare(binary, cases, expected);
 if (process.argv.includes('--write')) {
   const destination = path.join(root, 'crates/codegraph-extract/tests/golden/sfc.json');
   fs.mkdirSync(path.dirname(destination), { recursive: true });

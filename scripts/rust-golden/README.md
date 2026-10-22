@@ -35,12 +35,15 @@ This runs, in order:
 5. Compare Svelte/Vue/Astro extraction, including delegated scripts, against
    current reference regressions and the viewer's real Svelte files; persist
    independent native fixtures and late-export boundary vectors.
-6. Run `cargo test --workspace` against the persisted vectors.
-7. Record revision, commands and SHA-256 source/native fingerprints on success.
+6. Compare the grammar-free template extractors (Liquid, Razor, MyBatis XML,
+   DFM) and the config languages they sit beside, including the literal inputs
+   of the MyBatis robustness suite; persist their fixtures.
+7. Run `cargo test --workspace` against the persisted vectors.
+8. Record revision, commands and SHA-256 source/native fingerprints on success.
 
-The checkpoint validates implemented graph/search and Svelte/Vue/Astro extraction;
-it does not attest to the rest of extraction/resolution/CLI/MCP/viewer parity.
-Their existing differential scripts
+The checkpoint validates implemented graph/search, Svelte/Vue/Astro extraction
+and the grammar-free template extractors; it does not attest to the rest of
+extraction/resolution/CLI/MCP/viewer parity. Their existing differential scripts
 and regression suites remain required as each area lands. Test the new upstream
 TypeScript regression files too, especially those outside the implemented Rust
 surface. Never run Cargo builds concurrently with a probe executable on Windows.

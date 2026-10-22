@@ -24,7 +24,10 @@ macro_rules! stack_guard {
 
 mod buffers;
 pub mod commonjs;
-pub mod strip_comments;
+/// Kept at this path for the resolver, which imports
+/// `codegraph_extract::strip_comments`; the implementation lives in
+/// `codegraph-text` so query-time crates can share it without the parser.
+pub use codegraph_text as strip_comments;
 mod ccpp;
 pub mod cfnptr;
 mod csharp;
@@ -48,6 +51,8 @@ mod scala;
 pub mod sfc;
 pub mod scan;
 mod stack;
+mod source;
+pub mod templates;
 mod ts;
 mod swift;
 mod textutil;
@@ -124,6 +129,14 @@ fn warn_if_parse_left_nothing(result: &mut ExtractionResult, file_path: &str) {
 pub fn extract_source(file_path: &str, source: &str, language: Language) -> Result<ExtractionResult, String> {
     if matches!(language, Language::Svelte | Language::Astro | Language::Vue) {
         return Ok(sfc::extract_component(file_path, source, language));
+    }
+    match language {
+        Language::Liquid => return Ok(templates::extract_liquid(file_path, source)),
+        Language::Razor => return Ok(templates::extract_razor(file_path, source)),
+        Language::Xml => return Ok(templates::extract_mybatis(file_path, source)),
+        Language::Yaml | Language::Twig | Language::Properties => return Ok(ExtractionResult::default()),
+        Language::Pascal if matches!(codegraph_types::nodepath::extname(file_path).to_lowercase().as_str(), ".dfm" | ".fmx") => return Ok(templates::extract_dfm(file_path, source)),
+        _ => {}
     }
     let pre = pre_parse(file_path, source, language);
     let mut result = extract_file(file_path, &pre, language)?;

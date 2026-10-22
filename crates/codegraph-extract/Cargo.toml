@@ -10,6 +10,7 @@ publish.workspace = true
 codegraph-types.workspace = true
 codegraph-jsre.workspace = true
 codegraph-search.workspace = true
+codegraph-text = { path = "../codegraph-text" }
 serde_json.workspace = true
 indexmap.workspace = true
 sha2.workspace = true

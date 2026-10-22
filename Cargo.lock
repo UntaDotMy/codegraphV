@@ -73,6 +73,7 @@ dependencies = [
  "cc",
  "codegraph-jsre",
  "codegraph-search",
+ "codegraph-text",
  "codegraph-types",
  "indexmap",
  "libc",
@@ -104,6 +105,7 @@ dependencies = [
  "codegraph-db",
  "codegraph-jsre",
  "codegraph-search",
+ "codegraph-text",
  "codegraph-types",
  "icu_collator",
  "indexmap",
@@ -148,6 +150,14 @@ dependencies = [
  "serde_json",
  "unicode-general-category",
  "unicode-normalization",
+]
+
+[[package]]
+name = "codegraph-text"
+version = "1.6.2"
+dependencies = [
+ "codegraph-types",
+ "regex",
 ]
 
 [[package]]
