@@ -242,7 +242,21 @@ pub fn supports_branch_guards(language: &str) -> bool {
 }
 
 /// The languages with rules here.
-pub const BRANCH_GUARD_LANGUAGES: &[&str] = &["typescript", "tsx", "javascript", "jsx"];
+pub const BRANCH_GUARD_LANGUAGES: &[&str] = &[
+    "typescript",
+    "tsx",
+    "javascript",
+    "jsx",
+    "swift",
+    "python",
+    "java",
+    "kotlin",
+    "csharp",
+    "go",
+    "c",
+    "cpp",
+    "objc",
+];
 
 // =============================================================================
 // Entry points
@@ -569,8 +583,57 @@ fn push(out: &mut Vec<BranchGuard>, guard: Option<BranchGuard>) {
 fn rules_for(language: &str) -> Option<&'static dyn RuleSet> {
     match language {
         "typescript" | "tsx" | "javascript" | "jsx" => Some(&JS_RULES),
+        "swift" => Some(&SWIFT_RULES),
+        "python" => Some(&PYTHON_RULES),
+        "java" => Some(&JAVA_RULES),
+        "kotlin" => Some(&KOTLIN_RULES),
+        "csharp" => Some(&CSHARP_RULES),
+        "go" => Some(&GO_RULES),
+        "c" | "cpp" | "objc" => Some(&C_RULES),
         _ => None,
     }
+}
+
+fn named_children<'t>(node: Node<'t>) -> Vec<Node<'t>> {
+    (0..node.named_child_count())
+        .filter_map(|i| node.named_child(i))
+        .collect()
+}
+
+fn index_of(parent: Node<'_>, child: Node<'_>) -> Option<usize> {
+    (0..parent.child_count()).find(|&i| parent.child(i) == Some(child))
+}
+
+fn has_child_kind(node: Node<'_>, kind: &str) -> bool {
+    (0..node.child_count()).any(|i| node.child(i).is_some_and(|c| c.kind() == kind))
+}
+
+fn first_named_kind<'t>(node: Node<'t>, kind: &str) -> Option<Node<'t>> {
+    named_children(node).into_iter().find(|n| n.kind() == kind)
+}
+
+/// A preceding `if` with no else whose body always leaves: an early-return guard.
+fn early_if(
+    out: &mut Vec<BranchGuard>,
+    statement: Node<'_>,
+    cond: Option<Node<'_>>,
+    text: String,
+    body: Option<Node<'_>>,
+    negated: bool,
+    source: &str,
+) {
+    push(
+        out,
+        guard(
+            GuardForm::Guard,
+            cond,
+            negated,
+            Some(text),
+            Some(statement),
+            exit_kind_or(body, true, source),
+            source,
+        ),
+    );
 }
 
 // ----------------------------------------------------------------------- JS --
@@ -759,6 +822,1220 @@ impl RuleSet for JsRules {
     }
 }
 
+// -------------------------------------------------------------------- Swift --
+
+fn swift_always_exits(node: Option<Node<'_>>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if node.kind() == "control_transfer_statement" {
+        return true;
+    }
+    if node.kind() == "statements" {
+        return swift_always_exits(last_named(node));
+    }
+    false
+}
+
+/// For a Swift `if`: is `child` after the `else` keyword?
+fn after_else(parent: Node<'_>, child: Node<'_>) -> bool {
+    let mut seen_else = false;
+    for i in 0..parent.child_count() {
+        let Some(c) = parent.child(i) else {
+            continue;
+        };
+        if c == child {
+            return seen_else;
+        }
+        if c.kind() == "else" {
+            seen_else = true;
+        }
+    }
+    false
+}
+
+/// All `condition` fields of a Swift `if`/`guard`, joined — `if let x, y > 0`.
+fn swift_conditions<'t>(node: Node<'t>, source: &str) -> (Option<Node<'t>>, String) {
+    let parts: Vec<Node<'_>> = (0..node.child_count())
+        .filter(|&i| node.field_name_for_child(i) == Some("condition"))
+        .filter_map(|i| node.child(i))
+        .collect();
+    let Some(&first) = parts.first() else {
+        return (None, String::new());
+    };
+    let last = *parts.last().unwrap();
+    let text = collapse(&source[first.start_byte()..last.end_byte()]);
+    if re!(r"^(?:let|var|case|try|await)$").is_match(&text) {
+        return (None, String::new());
+    }
+    (Some(first), cut(&text, MAX_TEXT))
+}
+
+struct SwiftRules;
+static SWIFT_RULES: SwiftRules = SwiftRules;
+
+impl RuleSet for SwiftRules {
+    fn boundaries(&self) -> &'static [&'static str] {
+        &[
+            "function_declaration",
+            "init_declaration",
+            "deinit_declaration",
+            "class_declaration",
+            "protocol_declaration",
+            "computed_property",
+            "source_file",
+        ]
+    }
+    fn inline_functions(&self) -> &'static [&'static str] {
+        &["lambda_literal"]
+    }
+    fn binding_parents(&self) -> &'static [&'static str] {
+        &["property_declaration", "assignment"]
+    }
+    fn blocks(&self) -> &'static [&'static str] {
+        &["statements", "function_body"]
+    }
+
+    fn enclosing(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        match parent.kind() {
+            "if_statement" => {
+                if index_of(parent, child)
+                    .and_then(|i| parent.field_name_for_child(i))
+                    == Some("condition")
+                {
+                    return;
+                }
+                let (cond, text) = swift_conditions(parent, source);
+                let negated = after_else(parent, child);
+                push(
+                    out,
+                    guard(
+                        if negated { GuardForm::Else } else { GuardForm::If },
+                        cond,
+                        negated,
+                        Some(text),
+                        None,
+                        None,
+                        source,
+                    ),
+                );
+            }
+            "guard_statement" => {
+                if index_of(parent, child)
+                    .and_then(|i| parent.field_name_for_child(i))
+                    == Some("condition")
+                {
+                    return;
+                }
+                let (cond, text) = swift_conditions(parent, source);
+                push(
+                    out,
+                    guard(GuardForm::Else, cond, true, Some(text), None, None, source),
+                );
+            }
+            "ternary_expression" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "if_true", child) {
+                    push(out, guard(GuardForm::Ternary, cond, false, None, None, None, source));
+                } else if is_field(parent, "if_false", child) {
+                    push(out, guard(GuardForm::Ternary, cond, true, None, None, None, source));
+                }
+            }
+            "switch_entry" => {
+                let stmt = parent.parent();
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("expr")), source);
+                let pattern = first_named_kind(parent, "switch_pattern");
+                if pattern == Some(child) {
+                    return;
+                }
+                let is_default = has_child_kind(parent, "default_keyword");
+                let value = pattern.map(|p| cond_text(Some(p), source)).unwrap_or_default();
+                let text = if is_default {
+                    if subject.is_empty() {
+                        "default".to_owned()
+                    } else {
+                        format!("{subject}: default")
+                    }
+                } else if subject.is_empty() {
+                    value
+                } else {
+                    format!("{subject} == {value}")
+                };
+                push(
+                    out,
+                    guard(
+                        GuardForm::Case,
+                        pattern.or_else(|| stmt.and_then(|s| s.child_by_field_name("expr"))),
+                        false,
+                        Some(text),
+                        stmt,
+                        None,
+                        source,
+                    ),
+                );
+            }
+            "catch_block" => push(
+                out,
+                guard(
+                    GuardForm::Catch,
+                    None,
+                    false,
+                    Some("on error".to_owned()),
+                    None,
+                    None,
+                    source,
+                ),
+            ),
+            _ => {}
+        }
+    }
+
+    fn early_exits(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        for s in preceding_siblings(parent, child).into_iter().rev() {
+            if s.kind() == "guard_statement" {
+                let (cond, text) = swift_conditions(s, source);
+                let body = first_named_kind(s, "statements");
+                early_if(out, s, cond, text, body, false, source);
+            } else if s.kind() == "if_statement" && !has_child_kind(s, "else") {
+                let body = first_named_kind(s, "statements");
+                if !swift_always_exits(body) {
+                    continue;
+                }
+                let (cond, text) = swift_conditions(s, source);
+                early_if(out, s, cond, text, body, true, source);
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------- Python --
+
+const PY_EXITS: &[&str] = &[
+    "return_statement",
+    "raise_statement",
+    "break_statement",
+    "continue_statement",
+];
+
+fn py_always_exits(node: Option<Node<'_>>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if PY_EXITS.contains(&node.kind()) {
+        return true;
+    }
+    if node.kind() == "block" {
+        return py_always_exits(last_named(node));
+    }
+    false
+}
+
+fn py_operator<'a>(node: Node<'_>, source: &'a str) -> &'a str {
+    if let Some(field) = node.child_by_field_name("operator") {
+        return text(field, source);
+    }
+    for i in 0..node.child_count() {
+        let Some(c) = node.child(i) else {
+            continue;
+        };
+        if !c.is_named() {
+            let t = text(c, source);
+            if t == "and" || t == "or" {
+                return t;
+            }
+        }
+    }
+    ""
+}
+
+struct PythonRules;
+static PYTHON_RULES: PythonRules = PythonRules;
+
+impl RuleSet for PythonRules {
+    fn boundaries(&self) -> &'static [&'static str] {
+        &["function_definition", "class_definition", "module"]
+    }
+    fn inline_functions(&self) -> &'static [&'static str] {
+        &["lambda"]
+    }
+    fn binding_parents(&self) -> &'static [&'static str] {
+        &["assignment", "augmented_assignment"]
+    }
+    fn blocks(&self) -> &'static [&'static str] {
+        &["block", "module"]
+    }
+
+    fn enclosing(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        match parent.kind() {
+            "if_statement" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::If, cond, false, None, None, None, source));
+                } else if child.kind() == "elif_clause" || child.kind() == "else_clause" {
+                    push(out, guard(GuardForm::Else, cond, true, None, None, None, source));
+                    for s in preceding_siblings(parent, child) {
+                        if s.kind() == "elif_clause" {
+                            push(
+                                out,
+                                guard(
+                                    GuardForm::Else,
+                                    s.child_by_field_name("condition"),
+                                    true,
+                                    None,
+                                    None,
+                                    None,
+                                    source,
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            "elif_clause" => {
+                if is_field(parent, "consequence", child) {
+                    push(
+                        out,
+                        guard(
+                            GuardForm::If,
+                            parent.child_by_field_name("condition"),
+                            false,
+                            None,
+                            None,
+                            None,
+                            source,
+                        ),
+                    );
+                }
+            }
+            "conditional_expression" => {
+                let kids = named_children(parent);
+                if kids.len() < 3 {
+                    return;
+                }
+                if child == kids[0] {
+                    push(out, guard(GuardForm::Ternary, Some(kids[1]), false, None, None, None, source));
+                } else if child == kids[2] {
+                    push(out, guard(GuardForm::Ternary, Some(kids[1]), true, None, None, None, source));
+                }
+            }
+            "case_clause" => {
+                if !is_field(parent, "consequence", child) {
+                    return;
+                }
+                let stmt = parent.parent().and_then(|p| p.parent());
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("subject")), source);
+                let pattern = first_named_kind(parent, "case_pattern");
+                let value = pattern.map(|p| cond_text(Some(p), source)).unwrap_or_default();
+                let is_default = value == "_" || value.is_empty();
+                let text = if is_default {
+                    if subject.is_empty() {
+                        "default".to_owned()
+                    } else {
+                        format!("{subject}: default")
+                    }
+                } else if subject.is_empty() {
+                    value
+                } else {
+                    format!("{subject} == {value}")
+                };
+                push(
+                    out,
+                    guard(GuardForm::Case, pattern, false, Some(text), stmt, None, source),
+                );
+            }
+            "boolean_operator" => {
+                if !is_field(parent, "right", child) {
+                    return;
+                }
+                let op = py_operator(parent, source);
+                let left = parent.child_by_field_name("left");
+                match op {
+                    "and" => push(out, guard(GuardForm::And, left, false, None, None, None, source)),
+                    "or" => push(out, guard(GuardForm::Or, left, true, None, None, None, source)),
+                    _ => {}
+                }
+            }
+            "except_clause" | "except_group_clause" => {
+                if child.kind() == "block" {
+                    push(
+                        out,
+                        guard(
+                            GuardForm::Catch,
+                            None,
+                            false,
+                            Some("on error".to_owned()),
+                            None,
+                            None,
+                            source,
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn early_exits(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        for s in preceding_siblings(parent, child).into_iter().rev() {
+            if s.kind() != "if_statement" {
+                continue;
+            }
+            if named_children(s)
+                .iter()
+                .any(|n| n.kind() == "elif_clause" || n.kind() == "else_clause")
+            {
+                continue;
+            }
+            let body = s.child_by_field_name("consequence");
+            if !py_always_exits(body) {
+                continue;
+            }
+            let cond = s.child_by_field_name("condition");
+            early_if(out, s, cond, cond_text(cond, source), body, true, source);
+        }
+    }
+}
+
+// --------------------------------------------------------------------- Java --
+
+const JAVA_EXITS: &[&str] = &[
+    "return_statement",
+    "throw_statement",
+    "break_statement",
+    "continue_statement",
+    "yield_statement",
+];
+
+fn java_always_exits(node: Option<Node<'_>>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if JAVA_EXITS.contains(&node.kind()) {
+        return true;
+    }
+    if node.kind() == "block" {
+        return java_always_exits(last_named(node));
+    }
+    false
+}
+
+fn java_case_text(labels: &[Node<'_>], subject: &str, source: &str) -> String {
+    let values: Vec<String> = labels
+        .iter()
+        .map(|label| {
+            named_children(*label)
+                .iter()
+                .map(|n| cond_text(Some(*n), source))
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|v| !v.is_empty())
+        .collect();
+    if values.is_empty() {
+        return if subject.is_empty() {
+            "default".to_owned()
+        } else {
+            format!("{subject}: default")
+        };
+    }
+    let value = values.join(", ");
+    if subject.is_empty() {
+        value
+    } else {
+        format!("{subject} == {value}")
+    }
+}
+
+struct JavaRules;
+static JAVA_RULES: JavaRules = JavaRules;
+
+impl RuleSet for JavaRules {
+    fn boundaries(&self) -> &'static [&'static str] {
+        &[
+            "method_declaration",
+            "constructor_declaration",
+            "class_declaration",
+            "class_body",
+            "interface_declaration",
+            "enum_declaration",
+            "record_declaration",
+            "program",
+        ]
+    }
+    fn inline_functions(&self) -> &'static [&'static str] {
+        &["lambda_expression"]
+    }
+    fn binding_parents(&self) -> &'static [&'static str] {
+        &["variable_declarator", "assignment_expression", "field_declaration"]
+    }
+    fn blocks(&self) -> &'static [&'static str] {
+        &["block", "switch_block_statement_group", "program", "constructor_body"]
+    }
+
+    fn enclosing(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        match parent.kind() {
+            "if_statement" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::If, cond, false, None, None, None, source));
+                } else if is_field(parent, "alternative", child) {
+                    push(out, guard(GuardForm::Else, cond, true, None, None, None, source));
+                }
+            }
+            "ternary_expression" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::Ternary, cond, false, None, None, None, source));
+                } else if is_field(parent, "alternative", child) {
+                    push(out, guard(GuardForm::Ternary, cond, true, None, None, None, source));
+                }
+            }
+            "switch_block_statement_group" | "switch_rule" => {
+                if child.kind() == "switch_label" {
+                    return;
+                }
+                let stmt = parent.parent().and_then(|p| p.parent());
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("condition")), source);
+                let labels: Vec<Node<'_>> = named_children(parent)
+                    .into_iter()
+                    .filter(|n| n.kind() == "switch_label")
+                    .collect();
+                let text = java_case_text(&labels, &subject, source);
+                push(
+                    out,
+                    guard(
+                        GuardForm::Case,
+                        labels.first().copied(),
+                        false,
+                        Some(text),
+                        stmt,
+                        None,
+                        source,
+                    ),
+                );
+            }
+            "binary_expression" => {
+                if !is_field(parent, "right", child) {
+                    return;
+                }
+                let op = parent
+                    .child_by_field_name("operator")
+                    .map(|n| text(n, source))
+                    .unwrap_or("");
+                let left = parent.child_by_field_name("left");
+                match op {
+                    "&&" => push(out, guard(GuardForm::And, left, false, None, None, None, source)),
+                    "||" => push(out, guard(GuardForm::Or, left, true, None, None, None, source)),
+                    _ => {}
+                }
+            }
+            "catch_clause" => {
+                if is_field(parent, "body", child) {
+                    push(
+                        out,
+                        guard(
+                            GuardForm::Catch,
+                            None,
+                            false,
+                            Some("on error".to_owned()),
+                            None,
+                            None,
+                            source,
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn early_exits(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        for s in preceding_siblings(parent, child).into_iter().rev() {
+            if s.kind() != "if_statement" || s.child_by_field_name("alternative").is_some() {
+                continue;
+            }
+            let body = s.child_by_field_name("consequence");
+            if !java_always_exits(body) {
+                continue;
+            }
+            let cond = s.child_by_field_name("condition");
+            early_if(out, s, cond, cond_text(cond, source), body, true, source);
+        }
+    }
+}
+
+// ------------------------------------------------------------------- Kotlin --
+
+fn kt_always_exits(node: Option<Node<'_>>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if node.kind() == "jump_expression" {
+        return true;
+    }
+    if node.kind() == "control_structure_body" || node.kind() == "statements" {
+        return kt_always_exits(last_named(node));
+    }
+    false
+}
+
+fn kt_arms(if_expr: Node<'_>) -> Vec<Node<'_>> {
+    named_children(if_expr)
+        .into_iter()
+        .filter(|n| n.kind() == "control_structure_body")
+        .collect()
+}
+
+fn strip_outer_parens(s: &str) -> String {
+    if s.len() >= 2 && s.starts_with('(') && s.ends_with(')') {
+        s[1..s.len() - 1].to_owned()
+    } else {
+        s.to_owned()
+    }
+}
+
+struct KotlinRules;
+static KOTLIN_RULES: KotlinRules = KotlinRules;
+
+impl RuleSet for KotlinRules {
+    fn boundaries(&self) -> &'static [&'static str] {
+        &[
+            "function_declaration",
+            "secondary_constructor",
+            "class_declaration",
+            "class_body",
+            "object_declaration",
+            "getter",
+            "setter",
+            "source_file",
+        ]
+    }
+    fn inline_functions(&self) -> &'static [&'static str] {
+        &["lambda_literal", "anonymous_function"]
+    }
+    fn binding_parents(&self) -> &'static [&'static str] {
+        &["property_declaration", "assignment"]
+    }
+    fn blocks(&self) -> &'static [&'static str] {
+        &["statements", "function_body", "source_file"]
+    }
+
+    fn enclosing(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        match parent.kind() {
+            "if_expression" => {
+                let kids = named_children(parent);
+                let cond = kids.first().copied();
+                if cond == Some(child) {
+                    return;
+                }
+                let arms = kt_arms(parent);
+                if arms.first() == Some(&child) {
+                    push(out, guard(GuardForm::If, cond, false, None, None, None, source));
+                } else if arms.get(1) == Some(&child) {
+                    push(out, guard(GuardForm::Else, cond, true, None, None, None, source));
+                }
+            }
+            "when_entry" => {
+                if child.kind() != "control_structure_body" {
+                    return;
+                }
+                let when = parent.parent();
+                let subject = when
+                    .map(|w| {
+                        strip_outer_parens(&cond_text(first_named_kind(w, "when_subject"), source))
+                    })
+                    .unwrap_or_default();
+                let conds: Vec<Node<'_>> = named_children(parent)
+                    .into_iter()
+                    .filter(|n| n.kind() == "when_condition")
+                    .collect();
+                if conds.is_empty() {
+                    let text = if subject.is_empty() {
+                        "else".to_owned()
+                    } else {
+                        format!("{subject}: else")
+                    };
+                    push(out, guard(GuardForm::Case, None, false, Some(text), when, None, source));
+                } else {
+                    let value = conds
+                        .iter()
+                        .map(|c| cond_text(Some(*c), source))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let text = if subject.is_empty() {
+                        value
+                    } else {
+                        format!("{subject} == {value}")
+                    };
+                    push(
+                        out,
+                        guard(
+                            GuardForm::Case,
+                            conds.first().copied(),
+                            false,
+                            Some(text),
+                            when,
+                            None,
+                            source,
+                        ),
+                    );
+                }
+            }
+            "conjunction_expression" | "disjunction_expression" => {
+                let kids = named_children(parent);
+                if kids.len() < 2 || *kids.last().unwrap() != child {
+                    return;
+                }
+                let left = kids[0];
+                if parent.kind() == "conjunction_expression" {
+                    push(out, guard(GuardForm::And, Some(left), false, None, None, None, source));
+                } else {
+                    push(out, guard(GuardForm::Or, Some(left), true, None, None, None, source));
+                }
+            }
+            "catch_block" => {
+                if child.kind() == "statements" {
+                    push(
+                        out,
+                        guard(
+                            GuardForm::Catch,
+                            None,
+                            false,
+                            Some("on error".to_owned()),
+                            None,
+                            None,
+                            source,
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn early_exits(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        for s in preceding_siblings(parent, child).into_iter().rev() {
+            if s.kind() != "if_expression" {
+                continue;
+            }
+            let arms = kt_arms(s);
+            if arms.len() <= 1 {
+                continue;
+            }
+            let body = arms.first().copied();
+            if !kt_always_exits(body) {
+                continue;
+            }
+            let cond = named_children(s).first().copied();
+            early_if(out, s, cond, cond_text(cond, source), body, true, source);
+        }
+    }
+}
+
+// ----------------------------------------------------------------------- C# --
+
+const CS_EXITS: &[&str] = &[
+    "return_statement",
+    "throw_statement",
+    "break_statement",
+    "continue_statement",
+];
+
+fn cs_always_exits(node: Option<Node<'_>>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if CS_EXITS.contains(&node.kind()) {
+        return true;
+    }
+    if node.kind() == "block" {
+        return cs_always_exits(last_named(node));
+    }
+    false
+}
+
+fn is_cs_switch_label(node: Node<'_>) -> bool {
+    node.kind().ends_with("pattern") || node.kind().ends_with("switch_label")
+}
+
+struct CSharpRules;
+static CSHARP_RULES: CSharpRules = CSharpRules;
+
+impl RuleSet for CSharpRules {
+    fn boundaries(&self) -> &'static [&'static str] {
+        &[
+            "method_declaration",
+            "constructor_declaration",
+            "local_function_statement",
+            "class_declaration",
+            "struct_declaration",
+            "record_declaration",
+            "interface_declaration",
+            "declaration_list",
+            "property_declaration",
+            "accessor_declaration",
+            "compilation_unit",
+        ]
+    }
+    fn inline_functions(&self) -> &'static [&'static str] {
+        &["lambda_expression", "anonymous_method_expression"]
+    }
+    fn binding_parents(&self) -> &'static [&'static str] {
+        &["variable_declarator", "assignment_expression", "equals_value_clause"]
+    }
+    fn blocks(&self) -> &'static [&'static str] {
+        &["block", "switch_section", "compilation_unit"]
+    }
+
+    fn enclosing(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        match parent.kind() {
+            "if_statement" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::If, cond, false, None, None, None, source));
+                } else if is_field(parent, "alternative", child) {
+                    push(out, guard(GuardForm::Else, cond, true, None, None, None, source));
+                }
+            }
+            "conditional_expression" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::Ternary, cond, false, None, None, None, source));
+                } else if is_field(parent, "alternative", child) {
+                    push(out, guard(GuardForm::Ternary, cond, true, None, None, None, source));
+                }
+            }
+            "switch_section" => {
+                if is_cs_switch_label(child) {
+                    return;
+                }
+                let stmt = parent.parent().and_then(|p| p.parent());
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("value")), source);
+                let labels: Vec<Node<'_>> = named_children(parent)
+                    .into_iter()
+                    .filter(|n| is_cs_switch_label(*n))
+                    .collect();
+                let value = labels
+                    .iter()
+                    .map(|l| cond_text(Some(*l), source))
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let text = if value.is_empty() {
+                    if subject.is_empty() {
+                        "default".to_owned()
+                    } else {
+                        format!("{subject}: default")
+                    }
+                } else if subject.is_empty() {
+                    value
+                } else {
+                    format!("{subject} == {value}")
+                };
+                push(
+                    out,
+                    guard(
+                        GuardForm::Case,
+                        labels.first().copied(),
+                        false,
+                        Some(text),
+                        stmt,
+                        None,
+                        source,
+                    ),
+                );
+            }
+            "switch_expression_arm" => {
+                if !is_field(parent, "expression", child) {
+                    return;
+                }
+                let stmt = parent.parent();
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("value")), source);
+                let pattern = parent.child_by_field_name("pattern");
+                let value = cond_text(pattern, source);
+                let text = if value == "_" || value.is_empty() {
+                    if subject.is_empty() {
+                        "default".to_owned()
+                    } else {
+                        format!("{subject}: default")
+                    }
+                } else if subject.is_empty() {
+                    value
+                } else {
+                    format!("{subject} == {value}")
+                };
+                push(
+                    out,
+                    guard(GuardForm::Case, pattern, false, Some(text), stmt, None, source),
+                );
+            }
+            "binary_expression" => {
+                if !is_field(parent, "right", child) {
+                    return;
+                }
+                let op = parent
+                    .child_by_field_name("operator")
+                    .map(|n| text(n, source))
+                    .unwrap_or("");
+                let left = parent.child_by_field_name("left");
+                match op {
+                    "&&" => push(out, guard(GuardForm::And, left, false, None, None, None, source)),
+                    "||" => push(out, guard(GuardForm::Or, left, true, None, None, None, source)),
+                    _ => {}
+                }
+            }
+            "catch_clause" => {
+                if is_field(parent, "body", child) {
+                    push(
+                        out,
+                        guard(
+                            GuardForm::Catch,
+                            None,
+                            false,
+                            Some("on error".to_owned()),
+                            None,
+                            None,
+                            source,
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn early_exits(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        for s in preceding_siblings(parent, child).into_iter().rev() {
+            if s.kind() != "if_statement" || s.child_by_field_name("alternative").is_some() {
+                continue;
+            }
+            let body = s.child_by_field_name("consequence");
+            if !cs_always_exits(body) {
+                continue;
+            }
+            let cond = s.child_by_field_name("condition");
+            early_if(out, s, cond, cond_text(cond, source), body, true, source);
+        }
+    }
+}
+
+// ----------------------------------------------------------------------- Go --
+
+const GO_EXITS: &[&str] = &[
+    "return_statement",
+    "break_statement",
+    "continue_statement",
+    "goto_statement",
+];
+
+fn call_function_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
+    let Some(call) = node.named_child(0) else {
+        return "";
+    };
+    if call.kind() != "call_expression" {
+        return "";
+    }
+    call.child_by_field_name("function")
+        .map(|f| text(f, source))
+        .unwrap_or("")
+}
+
+fn go_always_exits(node: Option<Node<'_>>, source: &str) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if GO_EXITS.contains(&node.kind()) {
+        return true;
+    }
+    if node.kind() == "block" {
+        return go_always_exits(last_named(node), source);
+    }
+    if node.kind() == "expression_statement" {
+        return matches!(
+            call_function_text(node, source),
+            "panic" | "os.Exit" | "log.Fatal" | "log.Fatalf" | "log.Fatalln"
+        );
+    }
+    false
+}
+
+struct GoRules;
+static GO_RULES: GoRules = GoRules;
+
+impl RuleSet for GoRules {
+    fn boundaries(&self) -> &'static [&'static str] {
+        &["function_declaration", "method_declaration", "source_file"]
+    }
+    fn inline_functions(&self) -> &'static [&'static str] {
+        &["func_literal"]
+    }
+    fn binding_parents(&self) -> &'static [&'static str] {
+        &["short_var_declaration", "var_spec", "assignment_statement", "const_spec"]
+    }
+    fn blocks(&self) -> &'static [&'static str] {
+        &[
+            "block",
+            "expression_case",
+            "default_case",
+            "type_case",
+            "communication_case",
+            "source_file",
+        ]
+    }
+
+    fn enclosing(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        match parent.kind() {
+            "if_statement" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::If, cond, false, None, None, None, source));
+                } else if is_field(parent, "alternative", child) {
+                    push(out, guard(GuardForm::Else, cond, true, None, None, None, source));
+                }
+            }
+            "expression_case" | "type_case" | "communication_case" => {
+                let value = parent
+                    .child_by_field_name("value")
+                    .or_else(|| parent.child_by_field_name("type"))
+                    .or_else(|| parent.child_by_field_name("communication"));
+                if value == Some(child) {
+                    return;
+                }
+                let stmt = parent.parent();
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("value")), source);
+                let v = cond_text(value, source);
+                let text = if parent.kind() == "communication_case" {
+                    v
+                } else if subject.is_empty() {
+                    v
+                } else {
+                    format!("{subject} == {v}")
+                };
+                push(out, guard(GuardForm::Case, value, false, Some(text), stmt, None, source));
+            }
+            "default_case" => {
+                let stmt = parent.parent();
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("value")), source);
+                let text = if subject.is_empty() {
+                    "default".to_owned()
+                } else {
+                    format!("{subject}: default")
+                };
+                push(
+                    out,
+                    guard(
+                        GuardForm::Case,
+                        stmt.and_then(|s| s.child_by_field_name("value")),
+                        false,
+                        Some(text),
+                        stmt,
+                        None,
+                        source,
+                    ),
+                );
+            }
+            "binary_expression" => {
+                if !is_field(parent, "right", child) {
+                    return;
+                }
+                let op = parent
+                    .child_by_field_name("operator")
+                    .map(|n| text(n, source))
+                    .unwrap_or("");
+                let left = parent.child_by_field_name("left");
+                match op {
+                    "&&" => push(out, guard(GuardForm::And, left, false, None, None, None, source)),
+                    "||" => push(out, guard(GuardForm::Or, left, true, None, None, None, source)),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn early_exits(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        for s in preceding_siblings(parent, child).into_iter().rev() {
+            if s.kind() != "if_statement" || s.child_by_field_name("alternative").is_some() {
+                continue;
+            }
+            let body = s.child_by_field_name("consequence");
+            if !go_always_exits(body, source) {
+                continue;
+            }
+            let cond = s.child_by_field_name("condition");
+            early_if(out, s, cond, cond_text(cond, source), body, true, source);
+        }
+    }
+}
+
+// -------------------------------------------------------------------- C/C++ --
+
+const C_EXITS: &[&str] = &[
+    "return_statement",
+    "break_statement",
+    "continue_statement",
+    "goto_statement",
+    "throw_statement",
+];
+
+fn c_always_exits(node: Option<Node<'_>>, source: &str) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if C_EXITS.contains(&node.kind()) {
+        return true;
+    }
+    if node.kind() == "compound_statement" {
+        return c_always_exits(last_named(node), source);
+    }
+    if node.kind() == "expression_statement" {
+        return matches!(
+            call_function_text(node, source),
+            "exit" | "_exit" | "abort" | "longjmp"
+        );
+    }
+    false
+}
+
+struct CRules;
+static C_RULES: CRules = CRules;
+
+impl RuleSet for CRules {
+    fn boundaries(&self) -> &'static [&'static str] {
+        &[
+            "function_definition",
+            "class_specifier",
+            "struct_specifier",
+            "namespace_definition",
+            "translation_unit",
+            "field_declaration_list",
+        ]
+    }
+    fn inline_functions(&self) -> &'static [&'static str] {
+        &["lambda_expression"]
+    }
+    fn binding_parents(&self) -> &'static [&'static str] {
+        &["init_declarator", "assignment_expression"]
+    }
+    fn blocks(&self) -> &'static [&'static str] {
+        &["compound_statement", "case_statement", "translation_unit"]
+    }
+
+    fn enclosing(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        match parent.kind() {
+            "if_statement" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::If, cond, false, None, None, None, source));
+                } else if is_field(parent, "alternative", child) || child.kind() == "else_clause" {
+                    push(out, guard(GuardForm::Else, cond, true, None, None, None, source));
+                }
+            }
+            "conditional_expression" => {
+                let cond = parent.child_by_field_name("condition");
+                if is_field(parent, "consequence", child) {
+                    push(out, guard(GuardForm::Ternary, cond, false, None, None, None, source));
+                } else if is_field(parent, "alternative", child) {
+                    push(out, guard(GuardForm::Ternary, cond, true, None, None, None, source));
+                }
+            }
+            "case_statement" => {
+                let value = parent.child_by_field_name("value");
+                if value == Some(child) {
+                    return;
+                }
+                let stmt = parent.parent().and_then(|p| p.parent());
+                let subject = cond_text(stmt.and_then(|s| s.child_by_field_name("condition")), source);
+                match value {
+                    None => {
+                        let text = if subject.is_empty() {
+                            "default".to_owned()
+                        } else {
+                            format!("{subject}: default")
+                        };
+                        push(
+                            out,
+                            guard(
+                                GuardForm::Case,
+                                stmt.and_then(|s| s.child_by_field_name("condition")),
+                                false,
+                                Some(text),
+                                stmt,
+                                None,
+                                source,
+                            ),
+                        );
+                    }
+                    Some(value) => {
+                        let v = cond_text(Some(value), source);
+                        let text = if subject.is_empty() {
+                            v
+                        } else {
+                            format!("{subject} == {v}")
+                        };
+                        push(
+                            out,
+                            guard(GuardForm::Case, Some(value), false, Some(text), stmt, None, source),
+                        );
+                    }
+                }
+            }
+            "binary_expression" => {
+                if !is_field(parent, "right", child) {
+                    return;
+                }
+                let op = parent
+                    .child_by_field_name("operator")
+                    .map(|n| text(n, source))
+                    .unwrap_or("");
+                let left = parent.child_by_field_name("left");
+                match op {
+                    "&&" => push(out, guard(GuardForm::And, left, false, None, None, None, source)),
+                    "||" => push(out, guard(GuardForm::Or, left, true, None, None, None, source)),
+                    _ => {}
+                }
+            }
+            "catch_clause" => {
+                if is_field(parent, "body", child) {
+                    push(
+                        out,
+                        guard(
+                            GuardForm::Catch,
+                            None,
+                            false,
+                            Some("on error".to_owned()),
+                            None,
+                            None,
+                            source,
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn early_exits(&self, parent: Node<'_>, child: Node<'_>, source: &str, out: &mut Vec<BranchGuard>) {
+        for s in preceding_siblings(parent, child).into_iter().rev() {
+            if s.kind() != "if_statement" {
+                continue;
+            }
+            let has_else = s.child_by_field_name("alternative").is_some()
+                || named_children(s).iter().any(|n| n.kind() == "else_clause");
+            if has_else {
+                continue;
+            }
+            let body = s.child_by_field_name("consequence");
+            if !c_always_exits(body, source) {
+                continue;
+            }
+            let cond = s.child_by_field_name("condition");
+            early_if(out, s, cond, cond_text(cond, source), body, true, source);
+        }
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -876,6 +2153,126 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(label(&source, 4, None), "x");
+    }
+
+    fn label_lang(source: &str, language: &str, line: u32, column: Option<u32>) -> String {
+        guard_label(&guards_in_source(source, language, line, column))
+    }
+
+    #[test]
+    fn swift_if_and_else() {
+        let source = [
+            "func go(_ x: Bool) {",
+            "  if x {",
+            "    a()",
+            "  } else {",
+            "    b()",
+            "  }",
+            "}",
+        ]
+        .join("\n");
+        assert_eq!(label_lang(&source, "swift", 3, None), "x");
+        assert_eq!(label_lang(&source, "swift", 5, None), "!x");
+    }
+
+    #[test]
+    fn swift_guard_statement_is_a_condition() {
+        let source = ["func go(_ x: Bool) {", "  guard x else { return }", "  a()", "}"].join("\n");
+        assert_eq!(label_lang(&source, "swift", 3, None), "x");
+    }
+
+    #[test]
+    fn python_if_elif() {
+        let source = [
+            "def go(x, y):",
+            "    if x:",
+            "        a()",
+            "    elif y:",
+            "        b()",
+        ]
+        .join("\n");
+        assert_eq!(label_lang(&source, "python", 3, None), "x");
+        assert_eq!(label_lang(&source, "python", 5, None), "!x && y");
+    }
+
+    #[test]
+    fn python_conditional_expression() {
+        let source = "def go(c, a, b):\n    return a if c else b()\n";
+        assert_eq!(label_lang(source, "python", 2, Some(23)), "!c");
+    }
+
+    #[test]
+    fn java_if_and_logical_operand() {
+        let source = [
+            "class A {",
+            "  void go(boolean x) {",
+            "    if (x) {",
+            "      a();",
+            "    }",
+            "  }",
+            "}",
+        ]
+        .join("\n");
+        assert_eq!(label_lang(&source, "java", 4, None), "x");
+
+        let source = [
+            "class A {",
+            "  void go(boolean a, boolean b) {",
+            "    a() && b();",
+            "  }",
+            "}",
+        ]
+        .join("\n");
+        assert_eq!(label_lang(&source, "java", 3, Some(11)), "a()");
+    }
+
+    #[test]
+    fn kotlin_if_expression() {
+        let source = ["fun go(x: Boolean) {", "    if (x) {", "        a()", "    }", "}"].join("\n");
+        assert_eq!(label_lang(&source, "kotlin", 3, None), "x");
+    }
+
+    #[test]
+    fn csharp_if() {
+        let source = [
+            "class A {",
+            "  void Go(bool x) {",
+            "    if (x) {",
+            "      a();",
+            "    }",
+            "  }",
+            "}",
+        ]
+        .join("\n");
+        assert_eq!(label_lang(&source, "csharp", 4, None), "x");
+    }
+
+    #[test]
+    fn go_early_return_flips_the_comparison() {
+        let source = [
+            "package main",
+            "func go(err error) {",
+            "    if err != nil {",
+            "        return",
+            "    }",
+            "    a()",
+            "}",
+        ]
+        .join("\n");
+        assert_eq!(label_lang(&source, "go", 6, None), "err == nil");
+    }
+
+    #[test]
+    fn c_if() {
+        let source = ["void go(int x) {", "  if (x) {", "    a();", "  }", "}"].join("\n");
+        assert_eq!(label_lang(&source, "c", 3, None), "x");
+    }
+
+    #[test]
+    fn every_declared_language_has_rules() {
+        for language in BRANCH_GUARD_LANGUAGES {
+            assert!(supports_branch_guards(language), "{language}");
+        }
     }
 
     #[test]

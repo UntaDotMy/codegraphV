@@ -171,6 +171,13 @@ impl<'t> Node<'t> {
     pub fn child_by_field_name(&self, name: impl AsRef<[u8]>) -> Option<Node<'t>> {
         self.inner.child_by_field_name(name).map(|n| self.wrap(n))
     }
+    /// The field name of the `i`-th child, when the grammar labels it.
+    pub fn field_name_for_child(&self, i: usize) -> Option<&'static str> {
+        self.inner.field_name_for_child(i as u32)
+    }
+    pub fn is_named_child(&self, i: usize) -> bool {
+        self.inner.child(i).is_some_and(|n| n.is_named())
+    }
     pub fn parent(&self) -> Option<Node<'t>> {
         self.inner.parent().map(|n| self.wrap(n))
     }
