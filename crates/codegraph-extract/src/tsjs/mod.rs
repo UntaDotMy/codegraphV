@@ -194,6 +194,7 @@ pub struct Walker<'t> {
     node_ids: Vec<String>,
     /// Function/method names defined in this file (fn-ref flush gate).
     defined_fn_names: HashSet<String>,
+    later_exports: std::cell::OnceCell<HashSet<String>>,
     /// Simple names from `imports` refs (fn-ref flush gate).
     imported_names: HashSet<String>,
     fn_ref_cands: Vec<(u32, fnref::Candidate)>,
@@ -232,6 +233,7 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
         stack: Vec::new(),
         node_ids: Vec::new(),
         defined_fn_names: HashSet::new(),
+        later_exports: std::cell::OnceCell::new(),
         imported_names: HashSet::new(),
         fn_ref_cands: Vec::new(),
         fs_values: HashMap::new(),

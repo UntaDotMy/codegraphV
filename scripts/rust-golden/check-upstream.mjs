@@ -16,6 +16,10 @@ const groups = [
     native: ['crates/codegraph-graph', 'crates/codegraph-search', 'crates/codegraph-db', 'crates/codegraph-types', 'crates/codegraph-jsre', 'Cargo.toml', 'Cargo.lock', 'scripts/rust-golden/graph.mjs', 'scripts/rust-golden/query-paths.mjs', 'scripts/rust-golden/check-upstream.mjs', 'scripts/rust-golden/verify.mjs', 'scripts/rust-golden/perf.mjs'],
     note: 'This runner verifies implemented graph/search behavior. Other QueryBuilder methods still await their consumers.' },
   { name: 'remaining-graph', status: 'pending', sources: ['src/graph/dead-code.ts', 'src/graph/branch-guards.ts', 'src/graph/dynamic-boundary-report.ts', 'src/graph/cobol-copybooks.ts'], native: [], note: 'Not implemented; preserve these semantics and their tests when porting.' },
+  { name: 'component-extraction', status: 'partial', verifiedByRunner: true,
+    sources: ['src/extraction/sfc-script.ts', 'src/extraction/svelte-extractor.ts', 'src/extraction/astro-extractor.ts', 'src/extraction/vue-extractor.ts', 'src/extraction/vue-options-api.ts', 'src/extraction/vue-template-calls.ts', 'src/extraction/tree-sitter.ts', 'src/extraction/tree-sitter-helpers.ts', 'src/extraction/grammars.ts'],
+    native: ['crates/codegraph-extract', 'crates/codegraph-types', 'crates/codegraph-jsre', 'scripts/rust-golden/sfc.mjs', 'Cargo.toml', 'Cargo.lock'],
+    note: 'Svelte/Vue/Astro wrappers and their delegated JS/TS extraction are compared. This does not attest to the other extraction languages, indexing orchestration or full framework flow resolution.' },
   { name: 'extraction', status: 'partial', sources: ['src/extraction', 'codegraph-kernel/src', 'codegraph-kernel/grammars', 'codegraph-kernel/build.rs', 'codegraph-kernel/Cargo.toml'], native: ['crates/codegraph-extract'], note: 'Native walkers/discovery exist. This runner does not refresh extraction differential attestations.' },
   { name: 'resolution', status: 'partial', sources: ['src/resolution'], native: ['crates/codegraph-resolve'], note: 'Resolver foundations only; the full resolver is not yet compiled/ported.' },
   { name: 'runtime-and-viewer', status: 'pending', sources: ['AGENTS.md', 'src/index.ts', 'src/directory.ts', 'src/project-config.ts', 'src/mcp', 'src/bin', 'src/context', 'src/sync', 'src/installer', 'src/upgrade', 'src/ui-server', 'ui/src'], native: [], note: 'CLI/MCP/context/watching/installer/viewer replacement remains pending.' },
@@ -49,7 +53,7 @@ export function snapshot() {
 }
 export function recordValidated(commands) {
   const current = snapshot();
-  current.validation = { groups: ['graph-search'], commands };
+  current.validation = { groups: ['graph-search', 'component-extraction'], commands };
   fs.writeFileSync(checkpointPath, JSON.stringify(current, null, 2) + '\n');
 }
 export function audit() {

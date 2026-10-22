@@ -4,6 +4,7 @@
 
 use regex::Regex;
 use std::sync::OnceLock;
+use std::collections::HashSet;
 
 macro_rules! re {
     ($name:ident, $pat:expr) => {
@@ -39,6 +40,21 @@ re!(
 );
 // value-ref target-name distinctiveness: /[A-Z_]/
 re!(has_upper_or_underscore, r"[A-Z_]");
+
+// isExportedLater's exact lexical rules, scanned once per file rather than
+// compiling a name-specific regex for every candidate initializer. The list
+// branch deliberately includes aliases/comment words, as the reference does.
+// ASCII token boundaries preserve `$` names; JS regex semantics preserve CRLF,
+// lone CR, Unicode line endings and JavaScript's precise whitespace set.
+
+pub fn later_exported_names(source: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for caps in codegraph_jsre::re!(r"^[ \t]*export\s+(?:default\s+([A-Za-z_$][0-9A-Za-z_$]*)\s*;?[ \t]*$|\{([^}]*)\})", "gm").captures_iter(source) {
+        if let Some(name) = caps.text(1) { names.insert(name.to_owned()); }
+        if let Some(list) = caps.text(2) { names.extend(codegraph_jsre::re!(r"[0-9A-Za-z_$]+", "g").captures_iter(list).map(|c| c.text(0).unwrap().to_owned())); }
+    }
+    names
+}
 
 /// isGeneratedFile (src/extraction/generated-detection.ts) — full pattern list
 /// ported so future language walkers share it.
@@ -211,6 +227,17 @@ pub fn init_signature(value_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_exports_match_reference_on_boundaries_aliases_and_line_endings() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("../tests/golden/later-exports.json")).unwrap();
+        for case in cases {
+            let found = later_exported_names(case["source"].as_str().unwrap());
+            for (name, expected) in case["expected"].as_object().unwrap() {
+                assert_eq!(found.contains(name), expected.as_bool().unwrap(), "{name}: {}", case["source"]);
+            }
+        }
+    }
 
     #[test]
     fn utf16_cols() {

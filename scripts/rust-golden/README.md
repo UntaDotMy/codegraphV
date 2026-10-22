@@ -28,15 +28,19 @@ node scripts/rust-golden/verify.mjs
 This runs, in order:
 
 1. Compile the **current** TypeScript engine and copy its schema.
-2. Build the native graph and path-recognition probes.
+2. Build the native graph, path-recognition and component-extraction probes.
 3. Compare complete graph/search results on shared SQLite fixtures and refresh
    the portable vectors only after a scenario matches.
 4. Compare path recognition, line anchors and exact callback traces.
-5. Run `cargo test --workspace` against the persisted vectors.
-6. Record revision, commands and SHA-256 source/native fingerprints on success.
+5. Compare Svelte/Vue/Astro extraction, including delegated scripts, against
+   current reference regressions and the viewer's real Svelte files; persist
+   independent native fixtures and late-export boundary vectors.
+6. Run `cargo test --workspace` against the persisted vectors.
+7. Record revision, commands and SHA-256 source/native fingerprints on success.
 
-The checkpoint validates graph/search; it deliberately does not attest to
-extraction/resolution/CLI/MCP/viewer parity. Their existing differential scripts
+The checkpoint validates implemented graph/search and Svelte/Vue/Astro extraction;
+it does not attest to the rest of extraction/resolution/CLI/MCP/viewer parity.
+Their existing differential scripts
 and regression suites remain required as each area lands. Test the new upstream
 TypeScript regression files too, especially those outside the implemented Rust
 surface. Never run Cargo builds concurrently with a probe executable on Windows.
@@ -66,6 +70,23 @@ the same 6,000-node, 30-file SQLite fixture. Warmup, repetitions and seven timin
 samples are identical; output includes raw samples and median/p95 latency per
 operation. The script checks result counts and excludes process startup/IPC.
 Full answer correctness is covered by `verify.mjs` before timing.
+
+Component extraction uses a separate release probe:
+
+```text
+cargo build --release -p codegraph-extract --example sfc_probe
+node scripts/rust-golden/sfc.mjs target/release/examples/sfc_probe.exe --bench --report=sfc-report.json <corpus-dir>...
+```
+
+It compares every eligible component before timing, selects up to 100 evenly
+spaced files per format, and checks observed output counts. The report retains
+seven raw samples, input digests, selected file paths, corpus revisions, native
+source/binary fingerprints, and the benchmark's limited scope. Each sample is
+three serial extraction passes, following three warmups. Serialization, process
+startup, IPC, indexing and resolution are excluded. Keep CPU-heavy builds/tests
+out of a timing run. `verify.mjs <corpus-dir>...` also accepts extra corpora for
+correctness checks, without timing them. Corpus files are never written into
+the repository's portable fixtures.
 
 Use these numbers to locate slow operations and re-measure an optimization;
 Rust is not assumed to be faster just because it compiles natively. Preserve

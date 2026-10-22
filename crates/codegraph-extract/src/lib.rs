@@ -45,6 +45,7 @@ mod rlang;
 mod ruby;
 mod rustlang;
 mod scala;
+pub mod sfc;
 pub mod scan;
 mod stack;
 mod ts;
@@ -121,6 +122,9 @@ fn warn_if_parse_left_nothing(result: &mut ExtractionResult, file_path: &str) {
 /// with a native walker: the language's offset-preserving `preParse` blanking,
 /// the walker, then the references read beside the tables (a CommonJS `require`).
 pub fn extract_source(file_path: &str, source: &str, language: Language) -> Result<ExtractionResult, String> {
+    if matches!(language, Language::Svelte | Language::Astro | Language::Vue) {
+        return Ok(sfc::extract_component(file_path, source, language));
+    }
     let pre = pre_parse(file_path, source, language);
     let mut result = extract_file(file_path, &pre, language)?;
     result.unresolved_references.extend(commonjs::commonjs_require_refs(file_path, source, language));

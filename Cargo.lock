@@ -71,6 +71,7 @@ name = "codegraph-extract"
 version = "1.6.2"
 dependencies = [
  "cc",
+ "codegraph-jsre",
  "codegraph-search",
  "codegraph-types",
  "indexmap",
