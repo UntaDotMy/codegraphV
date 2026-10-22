@@ -3,6 +3,7 @@
 
 pub mod cobol_copybooks;
 pub mod dynamic_boundaries;
+pub mod dynamic_boundary_report;
 pub mod go_package;
 pub mod named_symbol_flow;
 pub mod queries;
