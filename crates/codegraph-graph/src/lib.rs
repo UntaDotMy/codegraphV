@@ -2,6 +2,7 @@
 //! format and never mutate the index or invent edges.
 
 pub mod cobol_copybooks;
+pub mod dead_code;
 pub mod dynamic_boundaries;
 pub mod dynamic_boundary_report;
 pub mod go_package;

@@ -5,6 +5,7 @@
 //! the other wrote.
 
 mod error;
+pub mod dead_code_queries;
 pub mod graph_queries;
 pub mod migrations;
 pub mod reference_tail;

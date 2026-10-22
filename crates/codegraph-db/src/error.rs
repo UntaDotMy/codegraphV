@@ -9,6 +9,8 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("{0}")]
     Other(String),
 }
