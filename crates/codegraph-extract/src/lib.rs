@@ -53,7 +53,7 @@ pub mod scan;
 mod stack;
 mod source;
 pub mod templates;
-mod ts;
+pub mod ts;
 mod swift;
 mod textutil;
 mod tsjs;

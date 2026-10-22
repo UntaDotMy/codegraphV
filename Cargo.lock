@@ -103,6 +103,7 @@ name = "codegraph-graph"
 version = "1.6.2"
 dependencies = [
  "codegraph-db",
+ "codegraph-extract",
  "codegraph-jsre",
  "codegraph-search",
  "codegraph-text",
