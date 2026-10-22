@@ -1,9 +1,9 @@
 //! Name matching — port of `src/resolution/name-matcher.ts`.
 //!
 //! The TypeScript module is the largest in the engine (language-specific
-//! visibility rules for every supported language). This file starts with the
-//! cross-language gate `ctx` depends on; the per-language matchers land on top
-//! of it.
+//! visibility rules for every supported language). This file carries the
+//! cross-language gate `ctx` depends on; the per-language matchers and the
+//! object-literal bindings land on top of it.
 
 /// Languages that may share a reference. A reference may cross within one
 /// family (a Kotlin `Foo.BAR` can name a Java `Foo`); anything not listed forms
