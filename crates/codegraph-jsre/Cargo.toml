@@ -1,0 +1,10 @@
+[package]
+name = "codegraph-jsre"
+description = "JavaScript RegExp semantics on PCRE2, for the ports of the TypeScript engine's regex-heavy heuristics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pcre2 = "0.2"

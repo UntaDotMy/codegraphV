@@ -1,0 +1,13 @@
+[package]
+name = "codegraph-types"
+description = "Core graph types shared by every CodeGraph crate (port of src/types.ts + node-id scheme)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+sha2.workspace = true

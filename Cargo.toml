@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# The napi kernel is the TypeScript build's optional native accelerator and keeps
+# its own manifest/lockfile until the TypeScript implementation is retired.
+exclude = ["codegraph-kernel"]
+
+[workspace.package]
+version = "1.6.2"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/colbymchenry/codegraph"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+indexmap = { version = "2", features = ["serde"] }
+sha2 = "0.10"
+sha1 = "0.10"
+regex = "1"
+thiserror = "2"
+unicode-general-category = "1"
+unicode-normalization = "0.1"
+jsonc-parser = { version = "0.26", features = ["serde"] }
+
+codegraph-types = { path = "crates/codegraph-types" }
+codegraph-search = { path = "crates/codegraph-search" }
+codegraph-jsre = { path = "crates/codegraph-jsre" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = "symbols"

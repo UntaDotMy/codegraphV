@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+/** Repeatable latest-oracle gate. Keep build, probe execution and cargo test
+ * SEQUENTIAL: rebuilding a live .exe races Windows' executable file locks. */
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { root, oracleRoot, recordValidated } from './check-upstream.mjs';
+
+const commands = [];
+function run(command, args, cwd = root) {
+  const display = [command === process.execPath ? 'node' : command, ...args.map(a => a.startsWith(root + path.sep) ? path.relative(root, a).replaceAll('\\', '/') : a)].join(' ');
+  console.log(`\n${display}`);
+  const result = spawnSync(command, args, { cwd, stdio: 'inherit', windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw Error(`${display} failed (${result.status ?? result.signal})`);
+  commands.push(display);
+}
+run(process.execPath, [path.join(oracleRoot, 'node_modules/typescript/bin/tsc')], oracleRoot);
+// Graph/search require the exact schema shipped with the freshly built oracle.
+fs.mkdirSync(path.join(oracleRoot, 'dist/db'), { recursive: true });
+fs.copyFileSync(path.join(oracleRoot, 'src/db/schema.sql'), path.join(oracleRoot, 'dist/db/schema.sql'));
+run('cargo', ['build', '-p', 'codegraph-graph', '--example', 'graph_probe']);
+run('cargo', ['build', '-p', 'codegraph-search', '--example', 'query_paths_probe']);
+const suffix = process.platform === 'win32' ? '.exe' : '';
+run(process.execPath, ['scripts/rust-golden/graph.mjs', `target/debug/examples/graph_probe${suffix}`, '--write']);
+run(process.execPath, ['scripts/rust-golden/query-paths.mjs', `target/debug/examples/query_paths_probe${suffix}`, '--write']);
+run('cargo', ['test', '--workspace', '--quiet']);
+recordValidated(commands);
+console.log('\nGraph/search validated against the latest TypeScript sources; checkpoint recorded.');
