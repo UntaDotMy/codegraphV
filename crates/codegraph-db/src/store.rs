@@ -1344,6 +1344,33 @@ impl Store {
         self.exists("SELECT 1 FROM files WHERE language = ? LIMIT 1", &[&language])
     }
 
+    /// COBOL copybook include statements naming `member` — the `import` node
+    /// sitting on a `COPY X` / `EXEC SQL INCLUDE X` line. Ordering matches the
+    /// TypeScript query: file/line so the include list reads as the project is
+    /// laid out. Case-insensitive, because COBOL code is written in capitals
+    /// while a query usually is not.
+    pub fn get_cobol_includes_by_member(&self, member: &str, limit: u32) -> Result<Vec<Node>> {
+        self.query_nodes(
+            &format!(
+                "SELECT {NODE_COLS} FROM nodes WHERE lower(name) = lower(?) AND kind = 'import' AND language = 'cobol' ORDER BY file_path, start_line, id LIMIT ?"
+            ),
+            &[&member, &(limit as i64)],
+        )
+    }
+
+    /// COBOL file nodes whose basename stem is `member`, case-insensitively —
+    /// `member.cpy`, `MEMBER.CPY`, `member.cbl`. Every such basename sorts into
+    /// [`member.`, `member/`) under lower(), so this is a range seek on
+    /// idx_nodes_lower_name.
+    pub fn get_cobol_files_by_stem(&self, member: &str) -> Result<Vec<Node>> {
+        self.query_nodes(
+            &format!(
+                "SELECT {NODE_COLS} FROM nodes WHERE lower(name) >= lower(?) || '.' AND lower(name) < lower(?) || '/' AND kind = 'file' AND language = 'cobol' ORDER BY file_path"
+            ),
+            &[&member, &member],
+        )
+    }
+
     // -- Edges ---------------------------------------------------------------
 
     /// Outgoing edges from a node. Preserves the source/kind index order (calls

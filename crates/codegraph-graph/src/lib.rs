@@ -1,6 +1,8 @@
 //! Query-time graph algorithms. All queries operate on the shared SQLite
 //! format and never mutate the index or invent edges.
 
+pub mod cobol_copybooks;
+pub mod dynamic_boundaries;
 pub mod go_package;
 pub mod named_symbol_flow;
 pub mod queries;

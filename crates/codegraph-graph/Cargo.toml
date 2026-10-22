@@ -11,6 +11,7 @@ codegraph-types.workspace = true
 codegraph-db = { path = "../codegraph-db" }
 codegraph-jsre.workspace = true
 codegraph-search.workspace = true
+codegraph-text = { path = "../codegraph-text" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
