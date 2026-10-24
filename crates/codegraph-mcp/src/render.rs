@@ -593,14 +593,20 @@ pub fn explore(
         Some(&go),
     )?;
     let (named, undefined) = named_definitions(cg, &query_tokens(&extracted.stripped_query), &paths)?;
-    let graph = cg.find_relevant_context(
-        &extracted.stripped_query,
-        &FindRelevantContextOptions {
-            max_nodes: Some(60),
-            search_limit: Some(12),
-            ..Default::default()
-        },
-    )?;
+    // Relevance search widens a query whose words are not all symbol names; when every token
+    // names a definition it would only add listed neighbours, for most of the call's time.
+    let graph = if named.is_empty() || !undefined.is_empty() {
+        cg.find_relevant_context(
+            &extracted.stripped_query,
+            &FindRelevantContextOptions {
+                max_nodes: Some(60),
+                search_limit: Some(12),
+                ..Default::default()
+            },
+        )?
+    } else {
+        Default::default()
+    };
     // Files in order of importance; each with the symbols to list and the ranges to show.
     let mut relevant = IndexMap::<String, (Vec<Node>, Vec<Focus>)>::new();
     let mut add = |relevant: &mut IndexMap<String, (Vec<Node>, Vec<Focus>)>, n: &Node, focus: bool| {

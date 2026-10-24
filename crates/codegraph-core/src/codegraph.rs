@@ -145,7 +145,9 @@ pub struct CodeGraph {
     project_root: String,
     store: Rc<Store>,
     orchestrator: ExtractionOrchestrator,
-    resolver: ReferenceResolver,
+    /// Built on first use: detecting frameworks costs ~80 ms on a large index, and a read-only
+    /// query never resolves anything.
+    resolver: std::cell::OnceCell<ReferenceResolver>,
     /// Cross-process write lock (CLI, MCP, git hooks).
     file_lock: RefCell<FileLock>,
     /// True while an index/sync is on the stack — the port of the in-process index mutex.
@@ -158,28 +160,27 @@ pub struct CodeGraph {
 impl CodeGraph {
     fn from_store(store: Rc<Store>, project_root: String) -> CodeGraph {
         let file_lock = FileLock::new(Path::new(&crate::directory::get_code_graph_dir(&project_root)).join("codegraph.lock"));
-        let (orchestrator, resolver) = Self::wire_layers(&store, &project_root);
+        let orchestrator = Self::wire_layers(&store, &project_root);
         CodeGraph {
             watcher:None,watch_readers:std::cell::OnceCell::new(),last_watch_revision:Cell::new(0),
             project_root,
             store,
             orchestrator,
-            resolver,
+            resolver: std::cell::OnceCell::new(),
             file_lock: RefCell::new(file_lock),
             indexing: Cell::new(false),
             pending_full_reconcile: Cell::new(false),
         }
     }
 
-    /// (Re)build the extraction/resolution layers over `store`. Factored out of the constructor so
-    /// `reopen_replaced_database` can rebuild them against a fresh connection.
-    fn wire_layers(store: &Rc<Store>, project_root: &str) -> (ExtractionOrchestrator, ReferenceResolver) {
+    /// (Re)build the extraction layer over `store`. Factored out of the constructor so
+    /// `reopen_replaced_database` can rebuild it against a fresh connection. The resolver is built
+    /// on first use (see [`CodeGraph::resolver`]).
+    fn wire_layers(store: &Rc<Store>, project_root: &str) -> ExtractionOrchestrator {
         // Down-weight the project name as a query term in search ranking — it names the whole
         // repo, not a symbol, so it has no discriminative value (#720).
         store.set_project_name_tokens(derive_project_name_tokens(Path::new(project_root)));
-        let orchestrator = ExtractionOrchestrator::new(project_root, store.clone());
-        let resolver = ReferenceResolver::create(project_root, store.clone());
-        (orchestrator, resolver)
+        ExtractionOrchestrator::new(project_root, store.clone())
     }
 
     // ===========================================================================
@@ -288,7 +289,7 @@ impl CodeGraph {
     }
 
     pub fn resolver(&self) -> &ReferenceResolver {
-        &self.resolver
+        self.resolver.get_or_init(|| ReferenceResolver::create(&self.project_root, self.store.clone()))
     }
 
     pub fn orchestrator(&self) -> &ExtractionOrchestrator {
@@ -370,10 +371,9 @@ impl CodeGraph {
         // Open the live file FIRST — if that throws (e.g. mid-recreate), the old handle stays in
         // place and the caller retries on the next query.
         let fresh = Rc::new(Store::open(self.store.path(), DbOpenOptions { read_only: self.store.is_read_only(), ..Default::default() })?);
-        let (orchestrator, resolver) = Self::wire_layers(&fresh, &self.project_root);
+        self.orchestrator = Self::wire_layers(&fresh, &self.project_root);
         self.store = fresh;
-        self.orchestrator = orchestrator;
-        self.resolver = resolver;
+        self.resolver = std::cell::OnceCell::new();
         self.watch_readers.take();
         // Whoever reopened — a sync, or a tool call's self-heal — the next sync must reconcile the
         // whole tree (#1902).
@@ -458,6 +458,8 @@ impl CodeGraph {
         started: Instant,
     ) -> Result<IndexResult> {
         let _ = fast_init;
+        // Detect frameworks from the index as it stands before this run writes (as at open).
+        self.resolver();
         let git_state = self.orchestrator.begin_git_index_state(true)?;
         // Mark the index as in-flight BEFORE any writes: a run killed mid-index leaves this marker
         // behind, so `codegraph status` can tell a truncated index from a completed one.
@@ -490,10 +492,10 @@ impl CodeGraph {
         // detect() consults the indexed file list return false on the initial pass.
         if result.success && result.files_indexed > 0 {
             let t = Instant::now();
-            self.resolver.initialize();
+            self.resolver().initialize();
             // Cross-file finalization (e.g. NestJS RouterModule prefixes). Runs before resolution
             // so updated names show up in subsequent reads.
-            self.resolver.run_post_extract();
+            self.resolver().run_post_extract();
             if timings() {
                 eprintln!("[phase-timing] resolver-reinit: {}ms", t.elapsed().as_millis());
             }
@@ -508,8 +510,8 @@ impl CodeGraph {
             // Second pass: chained calls whose method lives on a supertype the receiver conforms to
             // (needs the implements/extends edges the main pass just built, #750), and `this.<member>`
             // callback registrations whose member is inherited (#808).
-            self.resolver.resolve_chained_calls_via_conformance()?;
-            self.resolver.resolve_deferred_this_member_refs()?;
+            self.resolver().resolve_chained_calls_via_conformance()?;
+            self.resolver().resolve_deferred_this_member_refs()?;
 
             // Refresh planner stats + checkpoint the WAL after bulk writes.
             let t = Instant::now();
@@ -594,7 +596,7 @@ impl CodeGraph {
 
     /// Record the Python package-root digest a later sync compares against.
     fn stamp_python_root_fingerprint(&self, fingerprint: Option<String>) {
-        let fingerprint = fingerprint.unwrap_or_else(|| self.resolver.get_python_root_fingerprint());
+        let fingerprint = fingerprint.unwrap_or_else(|| self.resolver().get_python_root_fingerprint());
         let _ = self.store.set_metadata(PYTHON_ROOTS_METADATA_KEY, &fingerprint);
     }
 
@@ -615,7 +617,7 @@ impl CodeGraph {
             self.store.begin_bulk_ref_load()?;
         }
         let t = Instant::now();
-        let stats = self.resolver.resolve_and_persist_batched(Some(&report), 5000, false);
+        let stats = self.resolver().resolve_and_persist_batched(Some(&report), 5000, false);
         if timings() {
             eprintln!("[phase-timing]   resolve-batches: {}ms ({total} refs)", t.elapsed().as_millis());
         }
@@ -631,7 +633,7 @@ impl CodeGraph {
         let mut stats = stats?;
         if synthesize {
             let t = Instant::now();
-            let count = synthesize_callback_edges(&self.store, self.resolver.context()).unwrap_or(0);
+            let count = synthesize_callback_edges(&self.store, self.resolver().context()).unwrap_or(0);
             stats.by_method.insert("callback-synthesis".to_string(), count);
             if timings() {
                 eprintln!("[phase-timing]   synthesis: {}ms", t.elapsed().as_millis());
@@ -676,6 +678,8 @@ impl CodeGraph {
     }
 
     fn sync_inner(&self, options: &IndexOptions, on_progress: &mut Option<ProgressFn<'_>>, started: Instant) -> Result<SyncResult> {
+        // Detect frameworks from the index as it stands before this sync writes (as at open).
+        self.resolver();
         // Defer WAL auto-checkpointing for the whole incremental run, exactly as index_all does for
         // the bulk path (#1231); runMaintenance at the end folds the WAL.
         let defer_wal = !env_flag("CODEGRAPH_NO_WAL_DEFER") && self.store.journal_mode().map(|m| m == "wal").unwrap_or(false);
@@ -712,7 +716,7 @@ impl CodeGraph {
         // The route nodes as they were before this sync replaced or removed a file — read at the
         // first change, so a sync that changes nothing reads nothing, and only where a router binds
         // navigation calls to routes.
-        let watch_routes = self.resolver.has_navigation_routers();
+        let watch_routes = self.resolver().has_navigation_routers();
         let mut routes_before: Option<Vec<Node>> = None;
         let mut result = {
             let mut on_file_change = |file_path: &str, content: Option<&str>| {
@@ -748,7 +752,7 @@ impl CodeGraph {
         // touched files so edits to `app.module.ts` propagate to controllers in unchanged files. A
         // removal counts too (a pure-removal sync also drops the resolver's warmed name caches).
         if result.files_added > 0 || result.files_modified > 0 || result.files_removed > 0 {
-            self.resolver.run_post_extract();
+            self.resolver().run_post_extract();
         }
 
         // A route that appeared, went away or was renamed changes what a navigation call in an
@@ -757,7 +761,7 @@ impl CodeGraph {
         if let Some(before) = &routes_before {
             let t = Instant::now();
             let routes = changed_routes(before, &store.get_nodes_by_kind(NodeKind::Route)?);
-            let reopened = self.resolver.reopen_navigations_for(&routes, result.changed_file_paths.as_deref().unwrap_or(&[]), 500)?;
+            let reopened = self.resolver().reopen_navigations_for(&routes, result.changed_file_paths.as_deref().unwrap_or(&[]), 500)?;
             if !routes.is_empty() && !refresh_synthesis {
                 refresh_synthesis = true;
                 store.set_metadata("synthesis_pending", "1")?;
@@ -807,7 +811,7 @@ impl CodeGraph {
         if files_changed {
             if let Some(changed) = &result.changed_file_paths {
                 let t = Instant::now();
-                let reopened = self.resolver.reopen_route_module_readers(changed)?;
+                let reopened = self.resolver().reopen_route_module_readers(changed)?;
                 if timings() {
                     eprintln!("[phase-timing] sync-route-modules: {}ms ({} refs re-opened)", t.elapsed().as_millis(), reopened);
                 }
@@ -817,10 +821,10 @@ impl CodeGraph {
         // Python module answers this sync may have moved in files it never touched.
         {
             let before = store.get_metadata(PYTHON_ROOTS_METADATA_KEY)?;
-            let now = self.resolver.get_python_root_fingerprint();
+            let now = self.resolver().get_python_root_fingerprint();
             if let Some(before_value) = &before {
                 if *before_value != now {
-                    self.resolver.clear_caches();
+                    self.resolver().clear_caches();
                     self.orchestrator.resurrect_resolution_edges_for_language(Language::Python)?;
                     // Any Python edge may move, so any synthesis built on one may too.
                     refresh_synthesis = true;
@@ -835,8 +839,8 @@ impl CodeGraph {
                     }
                     let mut reopened: IndexSet<String> = IndexSet::new();
                     if !moved.is_empty() {
-                        self.resolver.clear_caches();
-                        let scope = self.resolver.get_python_reopen_scope(&moved);
+                        self.resolver().clear_caches();
+                        let scope = self.resolver().get_python_reopen_scope(&moved);
                         reopened.extend(self.orchestrator.resurrect_resolution_edges_touching(Language::Python, &scope.target_files, &scope.source_dirs, &scope.module_leaves)?);
                     }
                     // An edited `__init__.py` can add, drop or repoint what its package binds, which
@@ -849,15 +853,15 @@ impl CodeGraph {
                         .cloned()
                         .collect();
                     if !edited_inits.is_empty() {
-                        self.resolver.clear_caches();
-                        let bindings = self.resolver.get_python_package_importers(&edited_inits);
+                        self.resolver().clear_caches();
+                        let bindings = self.resolver().get_python_package_importers(&edited_inits);
                         reopened.extend(self.orchestrator.resurrect_python_package_importers(&bindings)?);
                     }
                     // Resolve the narrow set now, the way the changed files' own references were
                     // resolved above, rather than leaving a handful of refs to the orphan sweep.
                     if !reopened.is_empty() {
                         let files: Vec<String> = reopened.iter().cloned().collect();
-                        self.resolver.resolve_and_persist(&store.get_unresolved_references_by_files(&files)?)?;
+                        self.resolver().resolve_and_persist(&store.get_unresolved_references_by_files(&files)?)?;
                         // A moved edge in a file synthesis read or wrote means synthesis must be rebuilt.
                         if !refresh_synthesis
                             && files.iter().any(|f| store.has_synthesized_edges_touching_file(f).unwrap_or(false) || store.was_synthesis_input(f).unwrap_or(false))
@@ -899,12 +903,12 @@ impl CodeGraph {
                 let reopened_files = self.orchestrator.resurrect_type_dependent_edges(&touched_py, result.changed_file_paths.as_deref().unwrap_or(&[]))?;
                 // CODEGRAPH_PY_ATTR_RETRY_CEILING overrides the candidate ceiling (tests).
                 let ceiling = std::env::var("CODEGRAPH_PY_ATTR_RETRY_CEILING").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(2000);
-                let failed = self.resolver.python_attr_retry_candidates(&touched_py, ceiling)?;
+                let failed = self.resolver().python_attr_retry_candidates(&touched_py, ceiling)?;
                 let mut retry = store.get_unresolved_references_by_files(&reopened_files)?;
                 let over_ceiling = failed.is_none();
                 retry.extend(failed.unwrap_or_default());
                 if !retry.is_empty() {
-                    self.resolver.resolve_and_persist(&retry)?;
+                    self.resolver().resolve_and_persist(&retry)?;
                 }
                 if timings() {
                     eprintln!("[phase-timing] sync-type-rebind: {}ms ({} refs{})", t.elapsed().as_millis(), retry.len(), if over_ceiling { ", failed-ref fan-in over ceiling" } else { "" });
@@ -915,12 +919,12 @@ impl CodeGraph {
         if files_changed || orphan_count > 0 {
             // Second pass: chained calls whose method lives on a supertype the receiver conforms to
             // (#750), and `this.<member>` callback registrations whose member is inherited (#808).
-            self.resolver.resolve_chained_calls_via_conformance()?;
-            self.resolver.resolve_deferred_this_member_refs()?;
+            self.resolver().resolve_chained_calls_via_conformance()?;
+            self.resolver().resolve_deferred_this_member_refs()?;
         }
 
         if refresh_synthesis {
-            self.resolver.refresh_synthesis()?;
+            self.resolver().refresh_synthesis()?;
             store.set_metadata("synthesis_pending", "0")?;
         }
 
@@ -970,7 +974,7 @@ impl CodeGraph {
             eprintln!("[phase-timing] sync-ref-load: {}ms ({} refs)", t.elapsed().as_millis(), unresolved.len());
         }
         emit(on_progress, IndexPhase::Resolving, 0, unresolved.len());
-        self.resolver.resolve_and_persist(&unresolved)?;
+        self.resolver().resolve_and_persist(&unresolved)?;
         emit(on_progress, IndexPhase::Resolving, unresolved.len(), unresolved.len());
 
         // Retry previously-failed refs the changed files may now satisfy (#1240). Look them up by
@@ -990,7 +994,7 @@ impl CodeGraph {
         let added_files: HashSet<String> = result.added_file_paths.iter().flatten().cloned().collect();
         let added_list: Vec<String> = result.added_file_paths.clone().unwrap_or_default();
         let resolves_to_added = |specifier: &str, from_file: &str, language: Language| -> bool {
-            self.resolver.resolve_module_file(specifier, from_file, language).is_some_and(|f| added_files.contains(&f))
+            self.resolver().resolve_module_file(specifier, from_file, language).is_some_and(|f| added_files.contains(&f))
         };
         let resolved_modules: Vec<String> = if added_files.is_empty() {
             Vec::new()
@@ -1012,7 +1016,7 @@ impl CodeGraph {
         let mut retry_rows: HashSet<Option<i64>> = retryable.iter().map(|r| r.row_id).collect();
         let path_keys: Vec<String> = added_list.iter().flat_map(|f| codegraph_db::reference_tail::import_path_keys(f)).collect();
         let namespace_names = store.get_node_names_by_files(changed, Some(&[NodeKind::Namespace, NodeKind::Module]))?;
-        let could_name = self.resolver.could_name_any_of(&added_list);
+        let could_name = self.resolver().could_name_any_of(&added_list);
         let import_retry = store.get_retryable_failed_imports(&path_keys, &namespace_names, 500, &resolved_modules, 5000, Some(&*could_name))?;
         for r in import_retry.into_iter().chain(folder_imports) {
             if retry_rows.insert(r.row_id) {
@@ -1024,7 +1028,7 @@ impl CodeGraph {
         retryable.sort_by_key(|r| r.row_id.unwrap_or(0));
         if !retryable.is_empty() {
             emit(on_progress, IndexPhase::Resolving, 0, retryable.len());
-            self.resolver.resolve_and_persist(&retryable)?;
+            self.resolver().resolve_and_persist(&retryable)?;
             emit(on_progress, IndexPhase::Resolving, retryable.len(), retryable.len());
         }
         if timings() {
@@ -1035,7 +1039,7 @@ impl CodeGraph {
         // it imports: what the files importing it bound by name in its absence, or failed, goes back
         // to pending for the sweep below. (The removal half runs before removed files are deleted.)
         let reader = ImportReader::new(&self.project_root);
-        let module_resolver = |specifier: &str, from_file: &str, language: Language| self.resolver.resolve_module_file(specifier, from_file, language);
+        let module_resolver = |specifier: &str, from_file: &str, language: Language| self.resolver().resolve_module_file(specifier, from_file, language);
         let mut added: Vec<ChangedFile> = Vec::new();
         for file_path in &added_list {
             if let Some(file) = store.get_file_by_path(file_path)? {
@@ -1079,7 +1083,7 @@ impl CodeGraph {
         // An edited module whose default export moved to another declaration, or went away, while
         // the old one stayed declared. Read off the edges into the edited modules.
         let t = Instant::now();
-        let moved_defaults = self.resolver.changed_default_exports(&modified, changed, edges_before_resolution)?;
+        let moved_defaults = self.resolver().changed_default_exports(&modified, changed, edges_before_resolution)?;
         let through_defaults = if moved_defaults.is_empty() { 0 } else { reopen_references_through_changed_defaults(store, &reader, &moved_defaults, edges_before_resolution)? };
         if timings() {
             eprintln!("[phase-timing] sync-default-exports: {}ms ({} defaults moved, {} refs re-opened)", t.elapsed().as_millis(), moved_defaults.len(), through_defaults);
@@ -1094,7 +1098,7 @@ impl CodeGraph {
                 edited_modules.push(ChangedFile { path: file_path.clone(), language: file.language });
             }
         }
-        let resolve_now = |r: &UnresolvedReference| self.resolver.resolve_now(r);
+        let resolve_now = |r: &UnresolvedReference| self.resolver().resolve_now(r);
         let name_matched = reopen_name_matched_imports(store, &reader, &edited_modules, edges_before_resolution, &module_resolver, &resolve_now)?;
         if timings() {
             eprintln!("[phase-timing] sync-name-matched-imports: {}ms ({} refs re-opened)", t.elapsed().as_millis(), name_matched);
@@ -1188,18 +1192,18 @@ impl CodeGraph {
 
     /// Detected frameworks in the project.
     pub fn get_detected_frameworks(&self) -> Vec<String> {
-        if self.watcher.is_some(){ReferenceResolver::create(&self.project_root,self.store().clone()).detected_frameworks()}else{self.resolver.detected_frameworks()}
+        if self.watcher.is_some(){ReferenceResolver::create(&self.project_root,self.store().clone()).detected_frameworks()}else{self.resolver().detected_frameworks()}
     }
 
     /// Re-initialize the resolver (useful after adding new files).
     pub fn reinitialize_resolver(&self) {
-        self.resolver.initialize();
+        self.resolver().initialize();
     }
 
     /// Resolve the pending references and create edges.
     pub fn resolve_references(&self) -> Result<codegraph_resolve::types::ResolutionResult> {
         let refs = self.store.get_unresolved_references()?;
-        Ok(self.resolver.resolve_and_persist(&refs)?)
+        Ok(self.resolver().resolve_and_persist(&refs)?)
     }
 
     /// Indexed files whose symbols are missing although their content is current — rows a

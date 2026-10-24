@@ -94,3 +94,23 @@ fn a_rolled_back_ranking_is_not_memoized() {
     );
     store.close().unwrap();
 }
+
+/// A fresh connection (a one-shot CLI call) reuses the verdict persisted by an earlier one
+/// instead of re-aggregating every edge; an edge write makes it recompute.
+#[test]
+fn persisted_ranking_is_reused_until_edges_change() {
+    let (dir, store) = setup();
+    assert_eq!(store.get_dominant_file().unwrap().unwrap().file_path, "src/b.rs");
+    let stored = store.get_metadata(codegraph_db::DOMINANT_FILE_METADATA_KEY).unwrap().expect("verdict persisted");
+    // Rewrite the stored verdict: only a read of the persisted value can return it.
+    let mut doc: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    doc["value"]["filePath"] = "src/persisted.rs".into();
+    store.set_metadata(codegraph_db::DOMINANT_FILE_METADATA_KEY, &doc.to_string()).unwrap();
+    store.close().unwrap();
+
+    let fresh = Store::open(dir.path().join("codegraph.db"), OpenOptions::default()).unwrap();
+    assert_eq!(fresh.get_dominant_file().unwrap().unwrap().file_path, "src/persisted.rs");
+    add_edges(&fresh, "a", 60);
+    assert_eq!(fresh.get_dominant_file().unwrap().unwrap().file_path, "src/a.rs");
+    fresh.close().unwrap();
+}

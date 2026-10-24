@@ -4,6 +4,8 @@
 
 --recall: Rust mean recall >= TS mean recall on every repo.
 --tokens: Rust median out_tokens <= TS median out_tokens on every repo.
+--latency REPO=MS: Rust median wall_ms < MS on REPO (repeatable); with any --latency, Rust
+    median wall_ms <= the rg arm's on every repo that has one.
 Exits 0 when every requested check passes.
 """
 import argparse
@@ -17,12 +19,28 @@ def main() -> int:
     ap.add_argument('report')
     ap.add_argument('--recall', action='store_true')
     ap.add_argument('--tokens', action='store_true')
+    ap.add_argument('--latency', action='append', default=[], metavar='REPO=MS')
     args = ap.parse_args()
     report = json.load(open(args.report, encoding='utf-8'))
     failed = 0
     for repo, data in report['repos'].items():
         arms = {arm: [q for q in rows if 'recall' in q] for arm, rows in data['arms'].items()}
-        rust, ts = arms.get('rust'), arms.get('ts')
+        rust, ts, rg = arms.get('rust'), arms.get('ts'), arms.get('rg')
+        if args.latency and rust:
+            wall = statistics.median(q['wall_ms'] for q in rust)
+            for spec in args.latency:
+                name, limit = spec.split('=')
+                if name == repo:
+                    ok = wall < float(limit)
+                    failed += not ok
+                    print(f"{'PASS' if ok else 'FAIL'} {repo}: rust median wall {wall:.0f}ms < {limit}ms")
+            if rg:
+                rg_wall = statistics.median(q['wall_ms'] for q in rg)
+                ok = wall <= rg_wall
+                failed += not ok
+                print(f"{'PASS' if ok else 'FAIL'} {repo}: rust median wall {wall:.0f}ms <= rg {rg_wall:.0f}ms")
+        if not (args.recall or args.tokens):
+            continue
         if not rust or not ts:
             print(f'FAIL {repo}: report lacks a rust or ts arm')
             failed += 1

@@ -27,6 +27,19 @@ pub struct TopRouteFile {
 
 pub(crate) type DominantMemo = ((i64, i64), Option<DominantFile>);
 
+/// `project_metadata` key holding the last dominant-file verdict and the table fingerprint
+/// it was computed against.
+pub const DOMINANT_FILE_METADATA_KEY: &str = "dominant_file_v1";
+
+/// Row counts and top row ids of the tables the verdict reads: a write to any of them moves it.
+const DOMINANT_FINGERPRINT_SQL: &str = "SELECT (SELECT count(*) FROM edges), (SELECT max(rowid) FROM edges),     (SELECT count(*) FROM nodes), (SELECT max(rowid) FROM nodes), (SELECT count(*) FROM files), (SELECT max(rowid) FROM files)";
+
+#[derive(Serialize, Deserialize)]
+struct PersistedDominant {
+    fingerprint: Vec<Option<i64>>,
+    value: Option<DominantFile>,
+}
+
 pub const DOMINANT_FILE_SQL: &str = "SELECT n.file_path, COUNT(*) AS edge_count FROM edges e
     CROSS JOIN nodes n ON e.source = n.id CROSS JOIN nodes m ON e.target = m.id
     WHERE n.file_path = m.file_path GROUP BY n.file_path ORDER BY edge_count DESC, n.file_path";
@@ -50,8 +63,34 @@ impl Store {
                 return Ok(value.clone());
             }
         }
-        let value = self.compute_dominant_file()?;
+        let value = self.persisted_dominant_file()?;
         *self.dominant_file_memo.borrow_mut() = Some((stamp, value.clone()));
+        Ok(value)
+    }
+
+    /// The aggregate reads every edge (~300 ms on a 170K-edge index), so the verdict is kept in
+    /// `project_metadata` for the next connection — each CLI call opens a fresh one. Storing it
+    /// is best-effort: a read-only connection just recomputes.
+    fn persisted_dominant_file(&self) -> Result<Option<DominantFile>> {
+        let fingerprint: Vec<Option<i64>> = self.conn().query_row(DOMINANT_FINGERPRINT_SQL, [], |r| {
+            (0..6).map(|i| r.get::<_, Option<i64>>(i)).collect()
+        })?;
+        if let Some(stored) = self.get_metadata(DOMINANT_FILE_METADATA_KEY)? {
+            if let Ok(p) = serde_json::from_str::<PersistedDominant>(&stored) {
+                if p.fingerprint == fingerprint {
+                    return Ok(p.value);
+                }
+            }
+        }
+        let value = self.compute_dominant_file()?;
+        if let Ok(json) = serde_json::to_string(&PersistedDominant { fingerprint, value: value.clone() }) {
+            // Never wait on another process's write lock for a cache entry.
+            let conn = self.conn();
+            let timeout: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap_or(5000);
+            let _ = conn.busy_timeout(std::time::Duration::ZERO);
+            let _ = self.set_metadata(DOMINANT_FILE_METADATA_KEY, &json);
+            let _ = conn.busy_timeout(std::time::Duration::from_millis(timeout.max(0) as u64));
+        }
         Ok(value)
     }
 

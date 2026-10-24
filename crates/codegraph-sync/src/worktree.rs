@@ -28,7 +28,32 @@ pub struct NestedRepository {
     pub rel_path: String,
 }
 
+/// The directory holding the `.git` (directory or worktree file) nearest at or above `dir`.
+fn nearest_git_root(dir: &str) -> Option<String> {
+    let mut cur = nodepath::resolve(&[dir]);
+    loop {
+        if Path::new(&cur).join(".git").exists() {
+            return Some(cur);
+        }
+        let up = nodepath::dirname(&cur);
+        if up == cur {
+            return None;
+        }
+        cur = up;
+    }
+}
+
 pub fn detect_worktree_index_mismatch(start: &str, index: &str) -> Option<WorktreeIndexMismatch> {
+    // Every tool call asks this; spawning git costs ~45 ms on Windows. Without a GIT_DIR override,
+    // the nearest `.git` is the worktree git would report: no repository, or the index's own
+    // root, cannot mismatch.
+    if std::env::var_os("GIT_DIR").is_none() {
+        match nearest_git_root(start) {
+            None => return None,
+            Some(root) if resolved(&root) == resolved(index) => return None,
+            Some(_) => {}
+        }
+    }
     let worktree_root = git_worktree_root(start)?;
     let index_root = resolved(index);
     if worktree_root == index_root || git_worktree_root(&index_root).as_ref() != Some(&index_root) {

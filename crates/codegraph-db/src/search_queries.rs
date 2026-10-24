@@ -361,8 +361,23 @@ impl Store {
     ) -> Result<Vec<SearchResult>> {
         let lowered = text.to_lowercase();
         let max_dist = if utf16_len(&lowered) <= 4 { 1 } else { 2 };
+        let target_len = utf16_len(&lowered);
+        // A name more than `max_dist` units longer can never match. Its lowercase form is at
+        // least as many characters, and a character is at least one UTF-16 unit, so SQLite's
+        // character `length()` bounds it exactly without reading every name. Ties keep the
+        // name index's binary order, which the unfiltered DISTINCT scan produced.
+        let mut stmt = self
+            .conn()
+            .prepare_cached("SELECT DISTINCT name FROM nodes WHERE length(name) <= ? ORDER BY name")?;
+        let names = stmt
+            .query_map([(target_len + max_dist) as i64], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut candidates = Vec::new();
-        for name in self.get_all_node_names()? {
+        for name in names {
+            // ASCII lowercases to the same length: skip the allocation when it cannot match.
+            if name.is_ascii() && name.len().abs_diff(target_len) > max_dist {
+                continue;
+            }
             let dist = bounded_edit_distance(&name.to_lowercase(), &lowered, max_dist);
             if dist <= max_dist {
                 candidates.push((name, dist));
