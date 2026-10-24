@@ -689,9 +689,16 @@ impl ReferenceResolver {
             return super_call.value();
         }
 
-        // Built-ins and external modules never resolve to project symbols.
+        // Built-ins and external modules never resolve to project symbols — except a python call
+        // of a builtin-named method through a local or a parameter its def types as a project
+        // class (`reg = Registry(); reg.get(k)`, #2583): that reading, by evidence only, is the one
+        // way back.
         if self.is_built_in_or_external(r) {
-            return None;
+            return if is_python_builtin_named_method_call(r) {
+                self.gate_language(crate::name_matcher::python_attr::match_python_typed_local_call(r, ctx), r)
+            } else {
+                None
+            };
         }
 
         if matches!(r.language, Language::Cfml | Language::CfScript)
@@ -1930,4 +1937,15 @@ pub fn changed_routes(before: &[Node], after: &[Node]) -> Vec<Node> {
     let mut out: Vec<Node> = before.iter().filter(|r| !after_keys.contains(&key(r))).cloned().collect();
     out.extend(after.iter().filter(|r| !before_keys.contains(&key(r))).cloned());
     out
+}
+
+/// A python call `x.get(…)` of a method named like a builtin collection, string or file method.
+fn is_python_builtin_named_method_call(r: &UnresolvedRef) -> bool {
+    if r.language != Language::Python || !r.is_kind(EdgeKind::Calls) {
+        return false;
+    }
+    match r.reference_name.find('.') {
+        Some(dot) if dot > 0 => PYTHON_BUILT_IN_METHODS.contains(&r.reference_name[dot + 1..]) && !PYTHON_BUILT_IN_TYPES.contains(&r.reference_name[..dot]),
+        _ => false,
+    }
 }

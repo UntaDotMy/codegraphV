@@ -9,7 +9,7 @@
 use super::infer::infer_local_receiver_type;
 use super::python::python_derives_from;
 use super::python_scope::{is_python_outside_module_name, is_python_outside_module_receiver};
-use super::python::python_binds_locally;
+use super::python::{python_binds_locally, python_constructor_call, python_line_bindings, python_member_lines, python_own_lines, python_statement_starts, PythonBinding};
 use super::util::*;
 use crate::ctx::Ctx;
 use crate::types::{NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
@@ -1248,4 +1248,242 @@ mod tests {
         assert!(!python_target_binds("engine.x", "engine"));
         assert!(!python_target_binds("table[engine]", "engine"));
     }
+}
+
+// -- Typed locals: `reg = Registry(); reg.get(k)` (#2583) ------------------------------------------
+
+memo_map!(PyFileDefsMemo, String, Rc<Vec<NodeRef>>);
+memo_map!(PyScopeBindingsMemo, String, Rc<ScopeBindings>);
+memo_map!(PyLocalClassMemo, String, Rc<(PyTypeAnswer, Vec<String>)>);
+
+/// What a def's parameter of a name is annotated with — `None` when the def has no parameter of
+/// that name, `Some(None)` for one without an annotation (or `*name` / `**name`) — and every
+/// binding of the name in the def's own body.
+pub struct ScopeBindings {
+    param: Option<Option<String>>,
+    bindings: Vec<PythonBinding>,
+}
+
+/// A call of a builtin-named method — `get`, `update`, `items`, `close` — through a local or a
+/// parameter: `reg = SystemPackRegistry(); reg.get(k)`, a factory typed by its `-> T`, `def f(reg:
+/// SystemPackRegistry)`. The builtin filter drops such a call by its method's name; this is its one
+/// way back, by evidence only: the def that binds the name where the call reads it gives it one
+/// project class everywhere it binds it, and the method is that class's own or a declared base's
+/// (matchPythonTypedLocalCall).
+pub fn match_python_typed_local_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    if r.language != Language::Python || !r.is_kind(codegraph_types::EdgeKind::Calls) {
+        return None;
+    }
+    let m = re!(r"^([A-Za-z_]\w*)\.(\w+)$").captures(&r.reference_name)?;
+    let (receiver, method) = (m.text(1)?, m.text(2)?);
+    if receiver == "self" || receiver == "cls" {
+        return None;
+    }
+    let scope = python_binding_scope(receiver, r, ctx)?;
+    let mut read = BTreeSet::new();
+    let Some(PyAnswer::Class(cls)) = python_local_class(&scope, receiver, r, ctx, &mut read) else { return None };
+    let hit = python_method_on_class(&cls, method, r, ctx, &mut read)?;
+    read.remove(&r.file_path);
+    Some(with_type_from(hit, &read))
+}
+
+/// A python file's functions and methods, the latest-starting first.
+fn python_file_defs(file_path: &str, ctx: &Ctx) -> Rc<Vec<NodeRef>> {
+    memoized::<PyFileDefsMemo>(ctx, file_path.to_string(), || {
+        let mut defs: Vec<NodeRef> =
+            ctx.get_nodes_in_file(file_path).iter().filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method)).cloned().collect();
+        defs.sort_by(|a, b| b.start_line.cmp(&a.start_line));
+        Rc::new(defs)
+    })
+}
+
+fn python_scope_bindings(scope: &Node, name: &str, ctx: &Ctx) -> Rc<ScopeBindings> {
+    memoized::<PyScopeBindingsMemo>(ctx, format!("{}\0{name}", scope.id), || {
+        let lines = python_member_lines(&scope.file_path, ctx);
+        let statements = python_statement_starts(&scope.file_path, ctx);
+        // A statement that names the name only as a receiver or a container (`reg.get(…)`,
+        // `reg[k]`), its continuation lines included, binds nothing: skip its per-line work.
+        let n = escape_regex(name);
+        let word = Re::cached(&format!(r"(?<![\w.]){n}\b(?!\s*[.\[])"), "");
+        let mention = Re::cached(&format!(r"(?<![\w.]){n}\b"), "");
+        let starts = |i: usize| statements.get(i).copied().unwrap_or(false);
+        let names = |i: usize| -> bool {
+            let test = if re!(r"^\s*(?:from|import)\b").is_match(&lines[i]) { &mention } else { &word };
+            if test.is_match(&lines[i]) {
+                return true;
+            }
+            if !starts(i) {
+                return false;
+            }
+            let mut j = i + 1;
+            while j < lines.len() && !starts(j) {
+                if test.is_match(&lines[j]) {
+                    return true;
+                }
+                j += 1;
+            }
+            false
+        };
+        let mut bindings = Vec::new();
+        for i in python_own_lines(Some(scope), &scope.file_path, ctx) {
+            if i < lines.len() && names(i) {
+                bindings.extend(python_line_bindings(&lines, i, &statements, name));
+            }
+        }
+        Rc::new(ScopeBindings { param: python_param_annotation(scope.signature.as_deref().unwrap_or(""), name), bindings })
+    })
+}
+
+/// The def whose local `name` is the one `r` reads: the innermost def around the reference that
+/// binds the name, by a parameter or in its own body. None for a module global, or when the def
+/// declares it `global`.
+fn python_binding_scope(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
+    for scope in python_file_defs(&r.file_path, ctx).iter() {
+        if scope.start_line > r.line || scope.end_line < r.line {
+            continue;
+        }
+        let b = python_scope_bindings(scope, name, ctx);
+        if b.param.is_some() {
+            return Some(Rc::clone(scope));
+        }
+        if b.bindings.iter().any(|b| matches!(b, PythonBinding::Global)) {
+            return None;
+        }
+        if !b.bindings.is_empty() {
+            return Some(Rc::clone(scope));
+        }
+    }
+    None
+}
+
+/// What the parameter `name` of a def with this signature says of its type (see ScopeBindings).
+fn python_param_annotation(signature: &str, name: &str) -> Option<Option<String>> {
+    let sig: Vec<u16> = signature.encode_utf16().collect();
+    let open = sig.iter().position(|&c| c == u16::from(b'('))?;
+    if !signature.contains(name) {
+        return None;
+    }
+    // Parameters split at the commas directly inside the parentheses; strings are blanked (same
+    // length) so a quoted comma or bracket doesn't count.
+    let blank: Vec<u16> = python_blank_strings(signature).encode_utf16().collect();
+    let opens = |c: u16| c == u16::from(b'(') || c == u16::from(b'[') || c == u16::from(b'{');
+    let closes = |c: u16| c == u16::from(b')') || c == u16::from(b']') || c == u16::from(b'}');
+    let mut params: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0i64;
+    let mut from = open + 1;
+    for (i, &c) in blank.iter().enumerate().skip(open) {
+        if opens(c) {
+            depth += 1;
+        } else if closes(c) {
+            depth -= 1;
+            if depth == 0 {
+                params.push((from, i));
+                break;
+            }
+        } else if c == u16::from(b',') && depth == 1 {
+            params.push((from, i));
+            from = i + 1;
+        }
+    }
+    let text = |a: usize, b: usize| String::from_utf16_lossy(&sig[a.min(sig.len())..b.min(sig.len())]);
+    for (start, end) in params {
+        let part = text(start, end);
+        let Some(head) = re!(r"^\s*(\*{0,2})([A-Za-z_]\w*)\s*(:?)").captures(&part) else { continue };
+        if head.text(2) != Some(name) {
+            continue;
+        }
+        if !head.text(1).unwrap_or("").is_empty() || head.text(3).unwrap_or("").is_empty() {
+            return Some(None);
+        }
+        // The annotation runs up to the default's `=`, outside brackets.
+        let at = start + utf16_len(head.text(0).unwrap_or(""));
+        let mut d = 0i64;
+        let mut to = end;
+        for (i, &c) in blank.iter().enumerate().take(end).skip(at) {
+            if opens(c) {
+                d += 1;
+            } else if closes(c) {
+                d -= 1;
+            } else if c == u16::from(b'=') && d == 0 {
+                to = i;
+                break;
+            }
+        }
+        let ann = text(at, to);
+        let ann = js_trim(&ann);
+        return Some(if ann.is_empty() { None } else { Some(ann.to_string()) });
+    }
+    None
+}
+
+/// The project class the local or parameter `name` of `scope` holds, the same for every binding of
+/// it there (pythonLocalClass).
+fn python_local_class(scope: &Node, name: &str, r: &UnresolvedRef, ctx: &Ctx, read: &mut BTreeSet<String>) -> PyTypeAnswer {
+    let hit = memoized::<PyLocalClassMemo>(ctx, format!("{}\0{name}", scope.id), || {
+        let mut own = BTreeSet::new();
+        let answer = python_local_class_uncached(scope, name, r, ctx, &mut own);
+        Rc::new((answer, own.into_iter().collect()))
+    });
+    read.extend(hit.1.iter().cloned());
+    hit.0.clone()
+}
+
+fn python_local_class_uncached(scope: &Node, name: &str, r: &UnresolvedRef, ctx: &Ctx, read: &mut BTreeSet<String>) -> PyTypeAnswer {
+    let file_path = &scope.file_path;
+    let sb = python_scope_bindings(scope, name, ctx);
+    let mut evidence: Vec<PyEvidence> = Vec::new();
+    if let Some(param) = &sb.param {
+        evidence.push(param.as_deref().and_then(python_annotation_evidence)?);
+    }
+    for b in &sb.bindings {
+        let PythonBinding::Assign { ty, value, line } = b else { return None };
+        let ev: PyAttrEvidence = if let Some(ty) = ty {
+            // `reg: Base = make()` trusts the annotation; `reg: A = B()` contradicts it.
+            let constructor = if !value.is_empty() && value != "None" { python_constructor_call(value) } else { None };
+            if constructor.is_some_and(|c| last_segment(&c) != last_segment(ty)) {
+                return None;
+            }
+            python_annotation_evidence(ty)
+        } else if value == "None" {
+            continue;
+        } else if re!(r"^[A-Za-z_]\w*$").is_match(value) {
+            // `reg = registry`: what the parameter's annotation names, unless the def rebinds it.
+            let copied = python_scope_bindings(scope, value, ctx);
+            match &copied.param {
+                Some(Some(p)) if copied.bindings.is_empty() => python_annotation_evidence(p),
+                _ => return None,
+            }
+        } else {
+            let mut at = r.clone();
+            at.line = *line as u32 + 1;
+            if python_value_callees(value).iter().any(|c| python_binds_locally(c.split('.').next().unwrap_or(""), &at, ctx, false)) {
+                return None;
+            }
+            python_value_evidence(value, None)
+        };
+        evidence.push(ev?);
+    }
+    // Nothing here can be a project class: a builtin, or no evidence.
+    if !evidence.iter().any(|ev| !matches!(ev, PyEvidence::Runtime)) {
+        return if evidence.is_empty() { None } else { Some(PyAnswer::Runtime) };
+    }
+    // A def or class of the name nested in the scope binds it there, a def nested in it can rebind
+    // the scope's own through `nonlocal`, and `with … as (a, name)` binds it in a way the line
+    // reader doesn't read.
+    let nested = |n: &NodeRef| n.name == name && n.start_line > scope.start_line && n.end_line <= scope.end_line;
+    if python_file_defs(file_path, ctx).iter().any(|n| n.id != scope.id && nested(n)) || python_file_classes(file_path, ctx).iter().any(nested) {
+        return None;
+    }
+    let lines = python_member_lines(file_path, ctx);
+    let n = escape_regex(name);
+    let nonlocal = Re::cached(&format!(r"^\s*nonlocal\b.*(?<![\w.]){n}\b"), "");
+    let as_tuple = Re::cached(&format!(r"\bas\s*\([^)]*(?<![\w.]){n}\b"), "");
+    let from = (scope.start_line as usize).saturating_sub(1);
+    for line in lines.iter().take((scope.end_line as usize).min(lines.len())).skip(from) {
+        if line.contains(name) && (nonlocal.is_match(line) || as_tuple.is_match(line)) {
+            return None;
+        }
+    }
+    let answers: Vec<PyTypeAnswer> = evidence.iter().map(|ev| python_evidence_class(ev, file_path, ctx, read, 0, &None)).collect();
+    python_agree(&answers)
 }
