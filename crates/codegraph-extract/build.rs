@@ -37,4 +37,6 @@ fn main() {
     compile(&root, "scala", false, false);
     compile(&root, "dart", false, true);
     compile(&root, "swift", true, false);
+    // nix: nix-community 3d0173d regenerated with tree-sitter-cli 0.25.10 (ABI 15).
+    compile(&root, "nix", false, false);
 }

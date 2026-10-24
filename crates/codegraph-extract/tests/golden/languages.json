@@ -1,0 +1,134 @@
+[
+ {
+  "input": {
+   "file": "nix/flake.nix",
+   "language": "nix",
+   "source": "{\n  description = \"demo\";\n  inputs.nixpkgs.url = \"github:NixOS/nixpkgs\";\n  outputs = { self, nixpkgs }:\n    let\n      systems = [ \"x86_64-linux\" ];\n      forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});\n    in {\n      packages = forAll (pkgs: { default = pkgs.callPackage ./package.nix { }; });\n      nixosModules.default = { modules = [ ./module.nix ]; };\n    };\n}\n"
+  },
+  "expected": {
+   "nodes": [
+    "{\"endColumn\":0,\"endLine\":13,\"filePath\":\"nix/flake.nix\",\"id\":\"file:nix/flake.nix\",\"isExported\":false,\"kind\":\"file\",\"language\":\"nix\",\"name\":\"flake.nix\",\"qualifiedName\":\"nix/flake.nix\",\"startColumn\":0,\"startLine\":1}",
+    "{\"endColumn\":23,\"endLine\":2,\"filePath\":\"nix/flake.nix\",\"id\":\"variable:4f4e4f9d3a224eba0710cbb55a9af135\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"description\",\"qualifiedName\":\"description\",\"signature\":\"= \\\"demo\\\"\",\"startColumn\":2,\"startLine\":2}",
+    "{\"endColumn\":35,\"endLine\":6,\"filePath\":\"nix/flake.nix\",\"id\":\"variable:f289ebbd6173a20f0b9c7d63eb881314\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"systems\",\"qualifiedName\":\"outputs::systems\",\"signature\":\"= [ \\\"x86_64-linux\\\" ]\",\"startColumn\":6,\"startLine\":6}",
+    "{\"endColumn\":46,\"endLine\":3,\"filePath\":\"nix/flake.nix\",\"id\":\"variable:5f0fab7080a16a626b18564407eb6cb4\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"inputs.nixpkgs.url\",\"qualifiedName\":\"inputs.nixpkgs.url\",\"signature\":\"= \\\"github:NixOS/nixpkgs\\\"\",\"startColumn\":2,\"startLine\":3}",
+    "{\"endColumn\":55,\"endLine\":10,\"filePath\":\"nix/flake.nix\",\"id\":\"import:fb3aa877e787bb8e7258ffe47e8e1ac9\",\"kind\":\"import\",\"language\":\"nix\",\"name\":\"./module.nix\",\"qualifiedName\":\"outputs::./module.nix\",\"signature\":\"./module.nix\",\"startColumn\":43,\"startLine\":10}",
+    "{\"endColumn\":58,\"endLine\":10,\"filePath\":\"nix/flake.nix\",\"id\":\"variable:d9e432478178488f0334629a5aa1d3b5\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"modules\",\"qualifiedName\":\"outputs::modules\",\"signature\":\"= [ ./module.nix ]\",\"startColumn\":31,\"startLine\":10}",
+    "{\"endColumn\":6,\"endLine\":11,\"filePath\":\"nix/flake.nix\",\"id\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"isExported\":true,\"kind\":\"function\",\"language\":\"nix\",\"name\":\"outputs\",\"qualifiedName\":\"outputs\",\"signature\":\"{ self, nixpkgs }\",\"startColumn\":2,\"startLine\":4}",
+    "{\"endColumn\":61,\"endLine\":10,\"filePath\":\"nix/flake.nix\",\"id\":\"variable:d32e4fb4c1fe4f75e8622857fe8dffef\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"nixosModules.default\",\"qualifiedName\":\"outputs::nixosModules.default\",\"signature\":\"= { modules = [ ./module.nix ]; }\",\"startColumn\":6,\"startLine\":10}",
+    "{\"endColumn\":77,\"endLine\":9,\"filePath\":\"nix/flake.nix\",\"id\":\"import:da96565650a40af2b7a5fa944485dc8c\",\"kind\":\"import\",\"language\":\"nix\",\"name\":\"./package.nix\",\"qualifiedName\":\"outputs::./package.nix\",\"signature\":\"pkgs.callPackage ./package.nix { }\",\"startColumn\":43,\"startLine\":9}",
+    "{\"endColumn\":78,\"endLine\":9,\"filePath\":\"nix/flake.nix\",\"id\":\"variable:c8be9ce1c6b1ca2609faa8f25826ff98\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"default\",\"qualifiedName\":\"outputs::default\",\"signature\":\"= pkgs.callPackage ./package.nix { }\",\"startColumn\":33,\"startLine\":9}",
+    "{\"endColumn\":82,\"endLine\":9,\"filePath\":\"nix/flake.nix\",\"id\":\"variable:c1948ffc38139fff718bf87b751b448b\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"packages\",\"qualifiedName\":\"outputs::packages\",\"signature\":\"= forAll (pkgs: { default = pkgs.callPackage ./package.nix { }; })\",\"startColumn\":6,\"startLine\":9}",
+    "{\"endColumn\":92,\"endLine\":7,\"filePath\":\"nix/flake.nix\",\"id\":\"function:69b93726eb57aeefce9b93abf816ca8d\",\"isExported\":false,\"kind\":\"function\",\"language\":\"nix\",\"name\":\"forAll\",\"qualifiedName\":\"outputs::forAll\",\"signature\":\"(f)\",\"startColumn\":6,\"startLine\":7}"
+   ],
+   "edges": [
+    "{\"kind\":\"contains\",\"source\":\"file:nix/flake.nix\",\"target\":\"function:798d47040fa1fec2a47ad67cf5ac228e\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/flake.nix\",\"target\":\"variable:4f4e4f9d3a224eba0710cbb55a9af135\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/flake.nix\",\"target\":\"variable:5f0fab7080a16a626b18564407eb6cb4\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"function:69b93726eb57aeefce9b93abf816ca8d\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"import:da96565650a40af2b7a5fa944485dc8c\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"import:fb3aa877e787bb8e7258ffe47e8e1ac9\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"variable:c1948ffc38139fff718bf87b751b448b\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"variable:c8be9ce1c6b1ca2609faa8f25826ff98\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"variable:d32e4fb4c1fe4f75e8622857fe8dffef\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"variable:d9e432478178488f0334629a5aa1d3b5\"}",
+    "{\"kind\":\"contains\",\"source\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"target\":\"variable:f289ebbd6173a20f0b9c7d63eb881314\"}"
+   ],
+   "unresolvedReferences": [
+    "{\"column\":17,\"fromNodeId\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"line\":9,\"referenceKind\":\"calls\",\"referenceName\":\"forAll\"}",
+    "{\"column\":18,\"fromNodeId\":\"function:69b93726eb57aeefce9b93abf816ca8d\",\"line\":7,\"referenceKind\":\"calls\",\"referenceName\":\"nixpkgs.lib.genAttrs\"}",
+    "{\"column\":43,\"fromNodeId\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"line\":10,\"referenceKind\":\"imports\",\"referenceName\":\"./module.nix\"}",
+    "{\"column\":43,\"fromNodeId\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"line\":9,\"referenceKind\":\"calls\",\"referenceName\":\"pkgs.callPackage\"}",
+    "{\"column\":43,\"fromNodeId\":\"function:798d47040fa1fec2a47ad67cf5ac228e\",\"line\":9,\"referenceKind\":\"imports\",\"referenceName\":\"./package.nix\"}",
+    "{\"column\":56,\"fromNodeId\":\"function:69b93726eb57aeefce9b93abf816ca8d\",\"line\":7,\"referenceKind\":\"calls\",\"referenceName\":\"f\"}"
+   ],
+   "errors": []
+  }
+ },
+ {
+  "input": {
+   "file": "nix/module.nix",
+   "language": "nix",
+   "source": "# A NixOS-style module touching every extraction path.\n{ config, lib, pkgs, ... }@args:\nlet\n  cfg = config.services.demo;\n  helper = a: b: lib.concatStrings [ a b ];\n  wrap = { name, value ? 1 }: \"${name}=${toString value}\";\n  inherit (lib) mkIf mkOption types;\n  inherit pkgs;\n  long = \"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\";\nin\n{\n  imports = [ ./hardware.nix ../common \"./quoted.nix\" ./dir/${args.x} ];\n  options.services.demo.enable = mkOption { type = types.bool; default = false; };\n  config = mkIf cfg.enable {\n    environment.systemPackages = [ (pkgs.callPackage ./pkgs/tool.nix { }) pkgs.hello ];\n    demoText = helper \"a\" (wrap { name = \"x\"; });\n  };\n  lib2 = import ./lib.nix { inherit lib; };\n  other = builtins.import ../other;\n  dyn = import (./dyn + \"/x.nix\");\n  outputs = rec {\n    nested = x: y: z: builtins.map (v: v + x) [ y z ];\n    value = nested 1 2 3;\n  };\n}\n"
+  },
+  "expected": {
+   "nodes": [
+    "{\"endColumn\":0,\"endLine\":26,\"filePath\":\"nix/module.nix\",\"id\":\"file:nix/module.nix\",\"isExported\":false,\"kind\":\"file\",\"language\":\"nix\",\"name\":\"module.nix\",\"qualifiedName\":\"nix/module.nix\",\"startColumn\":0,\"startLine\":1}",
+    "{\"endColumn\":119,\"endLine\":9,\"filePath\":\"nix/module.nix\",\"id\":\"variable:04c2000bc8fcdf0f0459ffc2bfb5a94c\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"long\",\"qualifiedName\":\"long\",\"signature\":\"= \\\"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé...\",\"startColumn\":2,\"startLine\":9}",
+    "{\"endColumn\":14,\"endLine\":8,\"filePath\":\"nix/module.nix\",\"id\":\"variable:3237c6401155f0897ac50e5b6101aeb0\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"pkgs\",\"qualifiedName\":\"pkgs\",\"startColumn\":10,\"startLine\":8}",
+    "{\"endColumn\":20,\"endLine\":7,\"filePath\":\"nix/module.nix\",\"id\":\"variable:592a33b9d3691f25ef76e833c8dfee96\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"mkIf\",\"qualifiedName\":\"mkIf\",\"startColumn\":16,\"startLine\":7}",
+    "{\"endColumn\":25,\"endLine\":18,\"filePath\":\"nix/module.nix\",\"id\":\"import:31d25baf361199c5b018b8fdbf611419\",\"kind\":\"import\",\"language\":\"nix\",\"name\":\"./lib.nix\",\"qualifiedName\":\"./lib.nix\",\"signature\":\"import ./lib.nix\",\"startColumn\":9,\"startLine\":18}",
+    "{\"endColumn\":25,\"endLine\":23,\"filePath\":\"nix/module.nix\",\"id\":\"variable:0e9933c11bd45041236215b9489221d9\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"value\",\"qualifiedName\":\"value\",\"signature\":\"= nested 1 2 3\",\"startColumn\":4,\"startLine\":23}",
+    "{\"endColumn\":28,\"endLine\":12,\"filePath\":\"nix/module.nix\",\"id\":\"import:d2b628c23299c49c00de4446ff30ed86\",\"kind\":\"import\",\"language\":\"nix\",\"name\":\"./hardware.nix\",\"qualifiedName\":\"./hardware.nix\",\"signature\":\"./hardware.nix\",\"startColumn\":14,\"startLine\":12}",
+    "{\"endColumn\":29,\"endLine\":4,\"filePath\":\"nix/module.nix\",\"id\":\"variable:7a6f120435717bb6ea04197fd32c147e\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"cfg\",\"qualifiedName\":\"cfg\",\"signature\":\"= config.services.demo\",\"startColumn\":2,\"startLine\":4}",
+    "{\"endColumn\":29,\"endLine\":7,\"filePath\":\"nix/module.nix\",\"id\":\"variable:eb36b5c675839125533f27c6f1018083\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"mkOption\",\"qualifiedName\":\"mkOption\",\"startColumn\":21,\"startLine\":7}",
+    "{\"endColumn\":34,\"endLine\":19,\"filePath\":\"nix/module.nix\",\"id\":\"import:6511b8b3cb054ca2128101c0da8b0e24\",\"kind\":\"import\",\"language\":\"nix\",\"name\":\"../other\",\"qualifiedName\":\"../other\",\"signature\":\"builtins.import ../other\",\"startColumn\":10,\"startLine\":19}",
+    "{\"endColumn\":34,\"endLine\":20,\"filePath\":\"nix/module.nix\",\"id\":\"variable:f642ff19654e4624594298744db89e0b\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"dyn\",\"qualifiedName\":\"dyn\",\"signature\":\"= import (./dyn + \\\"/x.nix\\\")\",\"startColumn\":2,\"startLine\":20}",
+    "{\"endColumn\":35,\"endLine\":19,\"filePath\":\"nix/module.nix\",\"id\":\"variable:2eb2a204d6c7440ee20dc6dfbb5a46f7\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"other\",\"qualifiedName\":\"other\",\"signature\":\"= builtins.import ../other\",\"startColumn\":2,\"startLine\":19}",
+    "{\"endColumn\":35,\"endLine\":7,\"filePath\":\"nix/module.nix\",\"id\":\"variable:7bff8801cfdc89612b9a5c28bc158864\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"types\",\"qualifiedName\":\"types\",\"startColumn\":30,\"startLine\":7}",
+    "{\"endColumn\":38,\"endLine\":12,\"filePath\":\"nix/module.nix\",\"id\":\"import:5fef595bc7a6eba694e3caed62a8102f\",\"kind\":\"import\",\"language\":\"nix\",\"name\":\"../common\",\"qualifiedName\":\"../common\",\"signature\":\"../common\",\"startColumn\":29,\"startLine\":12}",
+    "{\"endColumn\":39,\"endLine\":18,\"filePath\":\"nix/module.nix\",\"id\":\"variable:f77d2298bc5da36dfed730a34d210657\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"lib\",\"qualifiedName\":\"lib\",\"startColumn\":36,\"startLine\":18}",
+    "{\"endColumn\":4,\"endLine\":17,\"filePath\":\"nix/module.nix\",\"id\":\"variable:406056049f3122669f85b4257b4b0e53\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"config\",\"qualifiedName\":\"config\",\"signature\":\"= mkIf cfg.enable {\\n    environment.systemPackages = [ (pkgs.callPackage ./pkgs/tool.nix { }) pkgs.hel...\",\"startColumn\":2,\"startLine\":14}",
+    "{\"endColumn\":4,\"endLine\":24,\"filePath\":\"nix/module.nix\",\"id\":\"variable:de023cf4c626cb4345af52e2ac2e8d36\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"outputs\",\"qualifiedName\":\"outputs\",\"signature\":\"= rec {\\n    nested = x: y: z: builtins.map (v: v + x) [ y z ];\\n    value = nested 1 2 3;\\n  }\",\"startColumn\":2,\"startLine\":21}",
+    "{\"endColumn\":43,\"endLine\":18,\"filePath\":\"nix/module.nix\",\"id\":\"variable:0ee74ed9e7b90d03eba009ccd3511a2d\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"lib2\",\"qualifiedName\":\"lib2\",\"signature\":\"= import ./lib.nix { inherit lib; }\",\"startColumn\":2,\"startLine\":18}",
+    "{\"endColumn\":43,\"endLine\":5,\"filePath\":\"nix/module.nix\",\"id\":\"function:e44458dabb6929fa785dff0e80793ff2\",\"isExported\":false,\"kind\":\"function\",\"language\":\"nix\",\"name\":\"helper\",\"qualifiedName\":\"helper\",\"signature\":\"a : b\",\"startColumn\":2,\"startLine\":5}",
+    "{\"endColumn\":45,\"endLine\":16,\"filePath\":\"nix/module.nix\",\"id\":\"variable:3ecc5da4d3fc9493cf4deff79ac0270a\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"name\",\"qualifiedName\":\"name\",\"signature\":\"= \\\"x\\\"\",\"startColumn\":34,\"startLine\":16}",
+    "{\"endColumn\":49,\"endLine\":16,\"filePath\":\"nix/module.nix\",\"id\":\"variable:0ff5815eb18920ee91bd579fa07beba6\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"demoText\",\"qualifiedName\":\"demoText\",\"signature\":\"= helper \\\"a\\\" (wrap { name = \\\"x\\\"; })\",\"startColumn\":4,\"startLine\":16}",
+    "{\"endColumn\":54,\"endLine\":22,\"filePath\":\"nix/module.nix\",\"id\":\"function:ce3218bc3f9b70a2f8978c204299a6d0\",\"isExported\":false,\"kind\":\"function\",\"language\":\"nix\",\"name\":\"nested\",\"qualifiedName\":\"nested\",\"signature\":\"x : y : z\",\"startColumn\":4,\"startLine\":22}",
+    "{\"endColumn\":58,\"endLine\":6,\"filePath\":\"nix/module.nix\",\"id\":\"function:a852bce5651fe6b26201e063b8ae247d\",\"isExported\":false,\"kind\":\"function\",\"language\":\"nix\",\"name\":\"wrap\",\"qualifiedName\":\"wrap\",\"signature\":\"{ name, value ? 1 }\",\"startColumn\":2,\"startLine\":6}",
+    "{\"endColumn\":62,\"endLine\":13,\"filePath\":\"nix/module.nix\",\"id\":\"variable:2b41ddd48ce67ac408130b4a69fd696b\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"type\",\"qualifiedName\":\"type\",\"signature\":\"= types.bool\",\"startColumn\":44,\"startLine\":13}",
+    "{\"endColumn\":72,\"endLine\":12,\"filePath\":\"nix/module.nix\",\"id\":\"variable:feadf6ac3de700130e121b6a8bf3bfec\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"imports\",\"qualifiedName\":\"imports\",\"signature\":\"= [ ./hardware.nix ../common \\\"./quoted.nix\\\" ./dir/${args.x} ]\",\"startColumn\":2,\"startLine\":12}",
+    "{\"endColumn\":72,\"endLine\":15,\"filePath\":\"nix/module.nix\",\"id\":\"import:c8a51f22dd74a3943e012bd130f650e0\",\"kind\":\"import\",\"language\":\"nix\",\"name\":\"./pkgs/tool.nix\",\"qualifiedName\":\"./pkgs/tool.nix\",\"signature\":\"pkgs.callPackage ./pkgs/tool.nix { }\",\"startColumn\":36,\"startLine\":15}",
+    "{\"endColumn\":79,\"endLine\":13,\"filePath\":\"nix/module.nix\",\"id\":\"variable:72de7ee3bede1b978b4a4b94d3ee7b13\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"default\",\"qualifiedName\":\"default\",\"signature\":\"= false\",\"startColumn\":63,\"startLine\":13}",
+    "{\"endColumn\":82,\"endLine\":13,\"filePath\":\"nix/module.nix\",\"id\":\"variable:9ddf7814c4e1948eab0dcd929deed7ac\",\"isExported\":true,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"options.services.demo.enable\",\"qualifiedName\":\"options.services.demo.enable\",\"signature\":\"= mkOption { type = types.bool; default = false; }\",\"startColumn\":2,\"startLine\":13}",
+    "{\"endColumn\":87,\"endLine\":15,\"filePath\":\"nix/module.nix\",\"id\":\"variable:ef88b2e7a4ab4c1bfe89d4f737dee550\",\"isExported\":false,\"kind\":\"variable\",\"language\":\"nix\",\"name\":\"environment.systemPackages\",\"qualifiedName\":\"environment.systemPackages\",\"signature\":\"= [ (pkgs.callPackage ./pkgs/tool.nix { }) pkgs.hello ]\",\"startColumn\":4,\"startLine\":15}"
+   ],
+   "edges": [
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"function:a852bce5651fe6b26201e063b8ae247d\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"function:ce3218bc3f9b70a2f8978c204299a6d0\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"function:e44458dabb6929fa785dff0e80793ff2\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"import:31d25baf361199c5b018b8fdbf611419\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"import:5fef595bc7a6eba694e3caed62a8102f\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"import:6511b8b3cb054ca2128101c0da8b0e24\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"import:c8a51f22dd74a3943e012bd130f650e0\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"import:d2b628c23299c49c00de4446ff30ed86\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:04c2000bc8fcdf0f0459ffc2bfb5a94c\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:0e9933c11bd45041236215b9489221d9\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:0ee74ed9e7b90d03eba009ccd3511a2d\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:0ff5815eb18920ee91bd579fa07beba6\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:2b41ddd48ce67ac408130b4a69fd696b\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:2eb2a204d6c7440ee20dc6dfbb5a46f7\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:3237c6401155f0897ac50e5b6101aeb0\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:3ecc5da4d3fc9493cf4deff79ac0270a\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:406056049f3122669f85b4257b4b0e53\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:592a33b9d3691f25ef76e833c8dfee96\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:72de7ee3bede1b978b4a4b94d3ee7b13\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:7a6f120435717bb6ea04197fd32c147e\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:7bff8801cfdc89612b9a5c28bc158864\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:9ddf7814c4e1948eab0dcd929deed7ac\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:de023cf4c626cb4345af52e2ac2e8d36\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:eb36b5c675839125533f27c6f1018083\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:ef88b2e7a4ab4c1bfe89d4f737dee550\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:f642ff19654e4624594298744db89e0b\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:f77d2298bc5da36dfed730a34d210657\"}",
+    "{\"kind\":\"contains\",\"source\":\"file:nix/module.nix\",\"target\":\"variable:feadf6ac3de700130e121b6a8bf3bfec\"}"
+   ],
+   "unresolvedReferences": [
+    "{\"column\":10,\"fromNodeId\":\"file:nix/module.nix\",\"line\":19,\"referenceKind\":\"imports\",\"referenceName\":\"../other\"}",
+    "{\"column\":11,\"fromNodeId\":\"file:nix/module.nix\",\"line\":14,\"referenceKind\":\"calls\",\"referenceName\":\"mkIf\"}",
+    "{\"column\":12,\"fromNodeId\":\"file:nix/module.nix\",\"line\":23,\"referenceKind\":\"calls\",\"referenceName\":\"nested\"}",
+    "{\"column\":14,\"fromNodeId\":\"file:nix/module.nix\",\"line\":12,\"referenceKind\":\"imports\",\"referenceName\":\"./hardware.nix\"}",
+    "{\"column\":15,\"fromNodeId\":\"file:nix/module.nix\",\"line\":16,\"referenceKind\":\"calls\",\"referenceName\":\"helper\"}",
+    "{\"column\":17,\"fromNodeId\":\"function:e44458dabb6929fa785dff0e80793ff2\",\"line\":5,\"referenceKind\":\"calls\",\"referenceName\":\"lib.concatStrings\"}",
+    "{\"column\":22,\"fromNodeId\":\"function:ce3218bc3f9b70a2f8978c204299a6d0\",\"line\":22,\"referenceKind\":\"calls\",\"referenceName\":\"builtins.map\"}",
+    "{\"column\":27,\"fromNodeId\":\"file:nix/module.nix\",\"line\":16,\"referenceKind\":\"calls\",\"referenceName\":\"wrap\"}",
+    "{\"column\":29,\"fromNodeId\":\"file:nix/module.nix\",\"line\":12,\"referenceKind\":\"imports\",\"referenceName\":\"../common\"}",
+    "{\"column\":33,\"fromNodeId\":\"file:nix/module.nix\",\"line\":13,\"referenceKind\":\"calls\",\"referenceName\":\"mkOption\"}",
+    "{\"column\":36,\"fromNodeId\":\"file:nix/module.nix\",\"line\":15,\"referenceKind\":\"calls\",\"referenceName\":\"pkgs.callPackage\"}",
+    "{\"column\":36,\"fromNodeId\":\"file:nix/module.nix\",\"line\":15,\"referenceKind\":\"imports\",\"referenceName\":\"./pkgs/tool.nix\"}",
+    "{\"column\":41,\"fromNodeId\":\"function:a852bce5651fe6b26201e063b8ae247d\",\"line\":6,\"referenceKind\":\"calls\",\"referenceName\":\"toString\"}",
+    "{\"column\":9,\"fromNodeId\":\"file:nix/module.nix\",\"line\":18,\"referenceKind\":\"imports\",\"referenceName\":\"./lib.nix\"}"
+   ],
+   "errors": []
+  }
+ }
+]

@@ -41,6 +41,7 @@ mod kotlin;
 pub mod languages;
 mod langs;
 mod lua;
+mod nix;
 mod php;
 mod preparse;
 mod python;
@@ -94,6 +95,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result
         "lua" | "luau" => lua::extract(file_path, source, lang),
         "scala" => scala::extract(file_path, source),
         "dart" => dart::extract(file_path, source),
+        "nix" => nix::extract(file_path, source),
         "typescript" | "tsx" | "javascript" | "jsx" => tsjs::extract(file_path, source, lang),
         other => Err(format!("no native walker for language {other}")),
     })?;
