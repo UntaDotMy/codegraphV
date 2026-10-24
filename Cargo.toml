@@ -28,6 +28,13 @@ codegraph-types = { path = "crates/codegraph-types" }
 codegraph-search = { path = "crates/codegraph-search" }
 codegraph-jsre = { path = "crates/codegraph-jsre" }
 
+# Line numbers in backtraces, not full debug info: full debuginfo grew target/debug past 50 GB.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
