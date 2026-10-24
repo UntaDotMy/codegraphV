@@ -20,6 +20,7 @@ pub mod synth_utils;
 pub mod types;
 pub mod workspace_packages;
 pub mod js_builtins;
+pub mod js_super_calls;
 pub mod jsx_code;
 pub mod resurrect_ref;
 pub mod shopify_themes;

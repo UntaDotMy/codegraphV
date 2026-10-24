@@ -682,6 +682,13 @@ impl ReferenceResolver {
             return theme_file.value();
         }
 
+        // A TS/JS `super.run(…)` runs the method of the class's parent or a nearer ancestor, or
+        // one outside the project: never a method found by its name alone.
+        let super_call = crate::js_super_calls::match_js_super_call(r, ctx);
+        if !super_call.is_undefined() {
+            return super_call.value();
+        }
+
         // Built-ins and external modules never resolve to project symbols.
         if self.is_built_in_or_external(r) {
             return None;
@@ -1788,6 +1795,11 @@ impl ReferenceResolver {
         let result = result?;
         if !r.is_kind(EdgeKind::Calls) || result.target_node_id != r.from_node_id {
             return Some(result);
+        }
+        // A TS/JS call is read where it starts, so a `this.run()` that shares its line with a
+        // `super.run()` keeps its edge (#2497).
+        if crate::js_super_calls::is_js_super_call_language(r.language) {
+            return if crate::js_super_calls::is_js_super_call_site(r, &self.ctx) { None } else { Some(result) };
         }
         let cut = r.reference_name.rfind('.').map_or(0, |i| i + 1).max(r.reference_name.rfind(':').map_or(0, |i| i + 1));
         let name = &r.reference_name[cut..];

@@ -182,6 +182,8 @@ pub struct Ctx {
     supertype_gen: Cell<u64>,
     supertype_memo: RefCell<HashMap<String, (u64, Rc<Vec<String>>)>>,
     supertype_node_memo: RefCell<HashMap<String, (u64, NodeList)>>,
+    /// get_superclass_nodes' memo (`extends` edges alone), under the same generation tag.
+    superclass_node_memo: RefCell<HashMap<String, (u64, NodeList)>>,
     nodes_by_kind_cache: RefCell<HashMap<NodeKind, NodeList>>,
     file_exists_memo: RefCell<HashMap<String, bool>>,
     known_names: RefCell<Option<Rc<HashSet<String>>>>,
@@ -229,6 +231,7 @@ impl Ctx {
             supertype_gen: Cell::new(0),
             supertype_memo: RefCell::new(HashMap::new()),
             supertype_node_memo: RefCell::new(HashMap::new()),
+            superclass_node_memo: RefCell::new(HashMap::new()),
             nodes_by_kind_cache: RefCell::new(HashMap::new()),
             file_exists_memo: RefCell::new(HashMap::new()),
             known_names: RefCell::new(None),
@@ -342,6 +345,7 @@ impl Ctx {
         self.method_owner_index_cache.borrow_mut().clear();
         self.supertype_memo.borrow_mut().clear();
         self.supertype_node_memo.borrow_mut().clear();
+        self.superclass_node_memo.borrow_mut().clear();
         self.supertype_gen.set(self.supertype_gen.get() + 1);
         self.nodes_by_kind_cache.borrow_mut().clear();
         self.file_exists_memo.borrow_mut().clear();
@@ -375,6 +379,9 @@ impl Ctx {
         self.supertype_gen.set(self.supertype_gen.get() + 1);
         if self.supertype_memo.borrow().len() > 50_000 {
             self.supertype_memo.borrow_mut().clear();
+        }
+        if self.superclass_node_memo.borrow().len() > 50_000 {
+            self.superclass_node_memo.borrow_mut().clear();
         }
         if self.supertype_node_memo.borrow().len() > 50_000 {
             self.supertype_node_memo.borrow_mut().clear();
@@ -789,6 +796,25 @@ impl Ctx {
         }
         let nodes = Rc::new(nodes);
         self.supertype_node_memo.borrow_mut().insert(id.to_string(), (self.supertype_gen.get(), Rc::clone(&nodes)));
+        nodes
+    }
+
+    /// The classes one class declaration extends, through its own resolved `extends` edges
+    /// alone: the parent a `super.m()` call reaches, never an interface (#2497).
+    pub fn get_superclass_nodes(&self, id: &str) -> NodeList {
+        if let Some((gen, nodes)) = self.superclass_node_memo.borrow().get(id) {
+            if *gen == self.supertype_gen.get() {
+                return Rc::clone(nodes);
+            }
+        }
+        let mut nodes: Vec<NodeRef> = Vec::new();
+        for edge in q("getOutgoingEdges", self.store.get_outgoing_edges(id, &[EdgeKind::Extends], None)) {
+            if let Some(target) = self.node_by_id(&edge.target) {
+                nodes.push(target);
+            }
+        }
+        let nodes = Rc::new(nodes);
+        self.superclass_node_memo.borrow_mut().insert(id.to_string(), (self.supertype_gen.get(), Rc::clone(&nodes)));
         nodes
     }
 
