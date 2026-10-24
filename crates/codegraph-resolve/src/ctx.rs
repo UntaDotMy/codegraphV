@@ -29,6 +29,42 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::rc::Rc;
 
+/// A Jest or Vitest manual mock: a file under a `__mocks__/` directory (isManualMockPath).
+pub fn is_manual_mock_path(file_path: &str) -> bool {
+    let p = js_lower(&file_path.replace('\\', "/"));
+    p.starts_with("__mocks__/") || p.contains("/__mocks__/")
+}
+
+/// Whether a definition in `candidate_path` is a manual mock that a reference from
+/// `from_path`, which is no test code, cannot mean (isManualMockHiddenFrom, #2455): the rule
+/// the mock-free view applies, for the passes that pick a component or handler by name.
+pub fn is_manual_mock_hidden_from(candidate_path: &str, from_path: &str) -> bool {
+    is_manual_mock_path(candidate_path) && !codegraph_search::is_test_path(from_path)
+}
+
+/// The names the project's manual mocks declare (ReferenceResolver.manualMockNames).
+pub struct ManualMockNames {
+    pub names: HashSet<String>,
+    pub lower_names: HashSet<String>,
+}
+
+/// The mock-free view's own answers (the maps of ReferenceResolver.mocklessContextFor).
+#[derive(Default)]
+struct MocklessCaches {
+    by_name: HashMap<String, NodeList>,
+    by_lower_name: HashMap<String, NodeList>,
+    by_kind: HashMap<NodeKind, NodeList>,
+}
+
+/// The nodes of `nodes` outside a manual mock (the same list when none is in one).
+fn without_mocks(nodes: NodeList) -> NodeList {
+    if nodes.iter().any(|n| is_manual_mock_path(&n.file_path)) {
+        Rc::new(nodes.iter().filter(|n| !is_manual_mock_path(&n.file_path)).cloned().collect())
+    } else {
+        nodes
+    }
+}
+
 /// Largest source file the resolver reads (`MAX_SOURCE_FILE_SIZE_BYTES`).
 pub const MAX_SOURCE_FILE_SIZE_BYTES: u64 = 1024 * 1024;
 
@@ -163,6 +199,13 @@ pub struct Ctx {
     memos: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
     /// A file list standing in for the index's, for framework detection before anything is stored.
     file_list: RefCell<Option<Rc<Vec<String>>>>,
+    /// Resolving production code in a project with manual mocks: lookups answer as if no
+    /// `__mocks__/` file were indexed, and memos are the view's own (#2455).
+    mockless: Cell<bool>,
+    /// The manual mocks' names: None until read, then Some(None) when the project has none.
+    manual_mocks: RefCell<Option<Option<Rc<ManualMockNames>>>>,
+    mockless_caches: RefCell<MocklessCaches>,
+    mockless_memos: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
 }
 
 impl Ctx {
@@ -201,6 +244,10 @@ impl Ctx {
             manifest_scopes: RefCell::new(HashMap::new()),
             memos: RefCell::new(HashMap::new()),
             file_list: RefCell::new(None),
+            mockless: Cell::new(false),
+            manual_mocks: RefCell::new(None),
+            mockless_caches: RefCell::new(MocklessCaches::default()),
+            mockless_memos: RefCell::new(HashMap::new()),
         })
     }
 
@@ -228,12 +275,56 @@ impl Ctx {
     /// `T` carries its own interior mutability; give each memo its own newtype.
     pub fn memo<T: Default + 'static>(&self) -> Rc<T> {
         let id = TypeId::of::<T>();
-        if let Some(m) = self.memos.borrow().get(&id) {
+        // The mock-free view keeps memos of its own, as a TypeScript WeakMap keyed by the
+        // view's context object does.
+        let memos = if self.mockless.get() { &self.mockless_memos } else { &self.memos };
+        if let Some(m) = memos.borrow().get(&id) {
             return Rc::clone(m).downcast::<T>().ok().expect("memo type id collision");
         }
         let m: Rc<T> = Rc::new(T::default());
-        self.memos.borrow_mut().insert(id, m.clone() as Rc<dyn Any>);
+        memos.borrow_mut().insert(id, m.clone() as Rc<dyn Any>);
         m
+    }
+
+    /// The names the project's manual mocks declare, None when it has none; read once per
+    /// cache window (ReferenceResolver.manualMockNames).
+    pub fn manual_mock_names(&self) -> Option<Rc<ManualMockNames>> {
+        if let Some(cached) = self.manual_mocks.borrow().as_ref() {
+            return cached.clone();
+        }
+        let files: Vec<String> = match self.known_files.borrow().as_ref() {
+            Some(known) => known.iter().filter(|f| is_manual_mock_path(f)).cloned().collect(),
+            None => q("getAllFilePaths", self.store.get_all_file_paths()).into_iter().filter(|f| is_manual_mock_path(f)).collect(),
+        };
+        let mut names = HashSet::new();
+        let mut lower_names = HashSet::new();
+        if !files.is_empty() {
+            for n in q("getNodesByFiles", self.store.get_nodes_by_files(&files)) {
+                lower_names.insert(js_lower(&n.name));
+                names.insert(n.name);
+            }
+        }
+        let mocks = (!names.is_empty()).then(|| Rc::new(ManualMockNames { names, lower_names }));
+        *self.manual_mocks.borrow_mut() = Some(mocks.clone());
+        mocks
+    }
+
+    /// Run `f` on the mock-free view when `on` (production code in a project with manual
+    /// mocks, ReferenceResolver.resolveOne), else on the whole graph.
+    pub fn with_mockless<R>(&self, on: bool, f: impl FnOnce() -> R) -> R {
+        let outer = self.mockless.replace(on);
+        let result = f();
+        self.mockless.set(outer);
+        result
+    }
+
+    /// The manual mocks' names while the mock-free view is on.
+    fn active_mocks(&self) -> Option<Rc<ManualMockNames>> {
+        if self.mockless.get() {
+            self.manual_mock_names()
+        } else {
+            None
+        }
     }
 
     /// Drop every cache and memo.
@@ -264,6 +355,9 @@ impl Ctx {
         // The import resolver's and name matcher's per-context memos assume the same stable
         // window as the caches above — drop them together.
         self.memos.borrow_mut().clear();
+        *self.manual_mocks.borrow_mut() = None;
+        *self.mockless_caches.borrow_mut() = MocklessCaches::default();
+        self.mockless_memos.borrow_mut().clear();
     }
 
     /// Pre-build the lightweight caches for resolution: the known file paths and symbol names.
@@ -355,6 +449,21 @@ impl Ctx {
 
     /// Get all nodes by name.
     pub fn get_nodes_by_name(&self, name: &str) -> NodeList {
+        if let Some(mocks) = self.active_mocks() {
+            if mocks.names.contains(name) {
+                if let Some(c) = self.mockless_caches.borrow().by_name.get(name) {
+                    return Rc::clone(c);
+                }
+                let r = without_mocks(self.all_nodes_by_name(name));
+                self.mockless_caches.borrow_mut().by_name.insert(name.to_string(), Rc::clone(&r));
+                return r;
+            }
+        }
+        self.all_nodes_by_name(name)
+    }
+
+    /// `get_nodes_by_name` on the whole graph.
+    fn all_nodes_by_name(&self, name: &str) -> NodeList {
         if let Some(c) = self.name_cache.borrow().get(&name.to_string()) {
             return c;
         }
@@ -365,16 +474,35 @@ impl Ctx {
 
     /// Get all nodes by qualified name.
     pub fn get_nodes_by_qualified_name(&self, qualified_name: &str) -> NodeList {
-        if let Some(c) = self.qualified_name_cache.borrow().get(&qualified_name.to_string()) {
-            return c;
+        let cached = self.qualified_name_cache.borrow().get(&qualified_name.to_string());
+        let r = cached.unwrap_or_else(|| {
+            let r = wrap_nodes(q("getNodesByQualifiedNameExact", self.store.get_nodes_by_qualified_name_exact(qualified_name)));
+            self.qualified_name_cache.borrow_mut().set(qualified_name.to_string(), Rc::clone(&r));
+            r
+        });
+        if self.active_mocks().is_some() {
+            without_mocks(r)
+        } else {
+            r
         }
-        let r = wrap_nodes(q("getNodesByQualifiedNameExact", self.store.get_nodes_by_qualified_name_exact(qualified_name)));
-        self.qualified_name_cache.borrow_mut().set(qualified_name.to_string(), Rc::clone(&r));
-        r
     }
 
     /// Get nodes by lowercase name (O(1) lookup for fuzzy matching).
     pub fn get_nodes_by_lower_name(&self, lower_name: &str) -> NodeList {
+        if let Some(mocks) = self.active_mocks() {
+            if mocks.lower_names.contains(lower_name) {
+                if let Some(c) = self.mockless_caches.borrow().by_lower_name.get(lower_name) {
+                    return Rc::clone(c);
+                }
+                let r = without_mocks(self.all_nodes_by_lower_name(lower_name));
+                self.mockless_caches.borrow_mut().by_lower_name.insert(lower_name.to_string(), Rc::clone(&r));
+                return r;
+            }
+        }
+        self.all_nodes_by_lower_name(lower_name)
+    }
+
+    fn all_nodes_by_lower_name(&self, lower_name: &str) -> NodeList {
         if let Some(c) = self.lower_name_cache.borrow().get(&lower_name.to_string()) {
             return c;
         }
@@ -385,6 +513,18 @@ impl Ctx {
 
     /// Get all nodes of a kind (cached; callers must treat the list as read-only).
     pub fn get_nodes_by_kind(&self, kind: NodeKind) -> NodeList {
+        if self.active_mocks().is_some() {
+            if let Some(c) = self.mockless_caches.borrow().by_kind.get(&kind) {
+                return Rc::clone(c);
+            }
+            let r = without_mocks(self.all_nodes_by_kind(kind));
+            self.mockless_caches.borrow_mut().by_kind.insert(kind, Rc::clone(&r));
+            return r;
+        }
+        self.all_nodes_by_kind(kind)
+    }
+
+    fn all_nodes_by_kind(&self, kind: NodeKind) -> NodeList {
         if let Some(c) = self.nodes_by_kind_cache.borrow().get(&kind) {
             return Rc::clone(c);
         }
@@ -395,8 +535,11 @@ impl Ctx {
 
     /// Stream nodes of a kind one at a time, without populating the per-kind cache.
     pub fn for_each_node_of_kind(&self, kind: NodeKind, mut visit: impl FnMut(Node)) {
+        let mockless = self.active_mocks().is_some();
         let r = self.store.for_each_node_of_kind(kind, |n| {
-            visit(n);
+            if !(mockless && is_manual_mock_path(&n.file_path)) {
+                visit(n);
+            }
             true
         });
         q("iterateNodesByKind", r.map(|_| ()));
@@ -406,11 +549,19 @@ impl Ctx {
     /// exactly `resolveMethodOnType`'s kind/language/qualifiedName-suffix filter, cached per
     /// (language, type, method).
     pub fn get_method_matches(&self, type_name: &str, method_name: &str, language: Language) -> NodeList {
+        let matches = self.all_method_matches(type_name, method_name, language);
+        match self.active_mocks() {
+            Some(mocks) if mocks.names.contains(method_name) => without_mocks(matches),
+            _ => matches,
+        }
+    }
+
+    fn all_method_matches(&self, type_name: &str, method_name: &str, language: Language) -> NodeList {
         let key = format!("{} {}::{}", language.as_str(), type_name, method_name);
         if let Some(c) = self.method_match_cache.borrow().get(&key) {
             return c;
         }
-        let candidates = self.get_nodes_by_name(method_name);
+        let candidates = self.all_nodes_by_name(method_name);
         let want = format!("{type_name}::{method_name}");
         let matches: Vec<NodeRef>;
         if type_name.contains("::") || method_name.contains(':') {

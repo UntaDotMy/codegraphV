@@ -258,7 +258,14 @@ pub fn event_emitter_edges(ctx: &Ctx) -> Vec<Edge> {
                     continue;
                 };
                 let Some(handler) =
-                    ctx.get_nodes_by_name(handler_name).iter().find(|n| n.kind == NodeKind::Function || n.kind == NodeKind::Method).cloned()
+                    // A manual mock's function is a handler only test code registers (#2455).
+                    ctx.get_nodes_by_name(handler_name)
+                        .iter()
+                        .find(|n| {
+                            (n.kind == NodeKind::Function || n.kind == NodeKind::Method)
+                                && !crate::ctx::is_manual_mock_hidden_from(&n.file_path, &file)
+                        })
+                        .cloned()
                 else {
                     continue;
                 };

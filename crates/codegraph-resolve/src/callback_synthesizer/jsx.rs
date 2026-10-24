@@ -205,7 +205,14 @@ fn jsx_child(scope: &JsxScope, name: &str, imports_of: &dyn Fn() -> Imports) -> 
     if let Some(own) = own.as_ref() {
         return Some(own.component.clone().unwrap_or_else(|| Rc::clone(&own.declaration)));
     }
-    let candidates: Vec<NodeRef> = ctx.get_nodes_by_name(name).iter().filter(|n| is_jsx_child_kind(n.kind)).cloned().collect();
+    // A manual mock's component renders only in a test (#2455): production code's
+    // `<Chart />` never means `__mocks__/…`'s `Chart`.
+    let candidates: Vec<NodeRef> = ctx
+        .get_nodes_by_name(name)
+        .iter()
+        .filter(|n| is_jsx_child_kind(n.kind) && !crate::ctx::is_manual_mock_hidden_from(&n.file_path, file))
+        .cloned()
+        .collect();
     if let Some(local) = candidates.iter().find(|n| n.file_path == file) {
         return Some(Rc::clone(local));
     }
@@ -634,7 +641,12 @@ pub fn vue_template_edges(ctx: &Ctx) -> Vec<Edge> {
         // Prefer a target in THIS SFC (handlers live in the same file's script). A name the SFC
         // imports from a package is the package's.
         let resolve = |name: &str, kinds: &[NodeKind], fallback: Option<NodeRef>| -> Option<NodeRef> {
-            let matches: Vec<NodeRef> = ctx.get_nodes_by_name(name).iter().filter(|n| kinds.contains(&n.kind)).cloned().collect();
+            let matches: Vec<NodeRef> = ctx
+                .get_nodes_by_name(name)
+                .iter()
+                .filter(|n| kinds.contains(&n.kind) && !crate::ctx::is_manual_mock_hidden_from(&n.file_path, &file))
+                .cloned()
+                .collect();
             let local = matches.iter().find(|n| n.file_path == file).cloned();
             if local.is_some() || imported_from_package(ctx, name, &file) {
                 return local;

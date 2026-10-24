@@ -147,6 +147,15 @@ pub fn synthesize_callback_edges(store: &Rc<Store>, ctx: &Rc<Ctx>) -> codegraph_
 
     // The independent passes. Their results merge in REGISTRY ORDER below and none of their edges
     // persist until that merge, so every pass sees the same committed post-resolution DB state.
+    // A Jest or Vitest manual mock answers only for test code (#2455): whatever pass paired
+    // them, production code never links into a `__mocks__/` file.
+    let mock_nodes: HashSet<String> = ctx
+        .get_all_files()
+        .iter()
+        .filter(|f| crate::ctx::is_manual_mock_path(f))
+        .flat_map(|f| ctx.get_nodes_in_file(f).iter().map(|n| n.id.clone()).collect::<Vec<_>>())
+        .collect();
+    let from_test_code = |id: &str| ctx.node_by_id(id).is_none_or(|n| codegraph_search::is_test_path(&n.file_path));
     let mut merged: Vec<Edge> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for pass in synth_passes() {
@@ -154,9 +163,13 @@ pub fn synthesize_callback_edges(store: &Rc<Store>, ctx: &Rc<Ctx>) -> codegraph_
             continue;
         }
         for e in (pass.run)(ctx) {
-            if seen.insert(format!("{}>{}", e.source, e.target)) {
-                merged.push(e);
+            if !seen.insert(format!("{}>{}", e.source, e.target)) {
+                continue;
             }
+            if !mock_nodes.is_empty() && mock_nodes.contains(&e.target) && !from_test_code(&e.source) {
+                continue;
+            }
+            merged.push(e);
         }
     }
     insert_chunked(store, &merged)?;

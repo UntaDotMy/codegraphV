@@ -5,6 +5,7 @@
 //! worker pool and profiling hooks have no counterpart: resolution here is sequential, which
 //! is also the path the pool must agree with byte for byte.
 
+use codegraph_search::is_test_path;
 use crate::alias_binding::resolve_alias_binding;
 use crate::ambient_modules::ambient_module_declarations;
 use crate::callback_synthesizer::synthesize_callback_edges;
@@ -572,8 +573,16 @@ impl ReferenceResolver {
             .any(|imp| imp.local_name == r.reference_name || r.reference_name.starts_with(&format!("{}.", imp.local_name)))
     }
 
-    /// Resolve one reference through the strategy chain and the gates.
+    /// Resolve one reference through the strategy chain and the gates. Production code is
+    /// resolved as if the project's Jest/Vitest manual mocks were not indexed: a mock
+    /// re-declares its module's names by design and stands in for it only while a test runs
+    /// (#2455). Test code, a mock included, keeps the whole graph.
     pub fn resolve_one(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
+        let mockless = !is_test_path(&r.file_path) && self.ctx.manual_mock_names().is_some();
+        self.ctx.with_mockless(mockless, || self.resolve_one_in(r))
+    }
+
+    fn resolve_one_in(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
         let ctx = &*self.ctx;
         if is_visible_cpp_macro(r, ctx) {
             return None;
