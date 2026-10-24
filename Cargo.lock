@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-cli"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "clap",
  "codegraph-context",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-context"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-db",
  "codegraph-graph",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-core"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-context",
  "codegraph-db",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-db"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-jsre",
  "codegraph-search",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-extract"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "cc",
  "codegraph-jsre",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graph"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-db",
  "codegraph-extract",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-installer"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-types",
  "jsonc-parser",
@@ -375,14 +375,14 @@ dependencies = [
 
 [[package]]
 name = "codegraph-jsre"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "pcre2-sys",
 ]
 
 [[package]]
 name = "codegraph-mcp"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-context",
  "codegraph-core",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-resolve"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-db",
  "codegraph-extract",
@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-search"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-jsre",
  "codegraph-types",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-sync"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-extract",
  "codegraph-jsre",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-text"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-types",
  "regex",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-types"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "indexmap",
  "serde",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-ui-server"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "codegraph-core",
  "codegraph-db",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-viewer"
-version = "1.6.2"
+version = "0.0.1"
 dependencies = [
  "js-sys",
  "serde_json",

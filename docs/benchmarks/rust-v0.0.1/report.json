@@ -1,0 +1,1349 @@
+{
+ "machine": {
+  "cpus": 12,
+  "platform": "win32"
+ },
+ "settings": {
+  "runs": 3,
+  "warmup": 1,
+  "arms": [
+   "rust",
+   "ts",
+   "rg"
+  ]
+ },
+ "repos": {
+  "serde_json": {
+   "index": {
+    "rust": {
+     "wall_ms": 1636.0,
+     "cpu_ms": 1937.5,
+     "peak_rss_mb": 53.3,
+     "peak_commit_mb": 100.0,
+     "procs": 11,
+     "counts": {
+      "files": 69,
+      "nodes": 2100,
+      "edges": 6134
+     }
+    },
+    "ts": {
+     "wall_ms": 4151.2,
+     "cpu_ms": 9093.8,
+     "peak_rss_mb": 484.0,
+     "peak_commit_mb": 906.3,
+     "procs": 13,
+     "counts": {
+      "files": 69,
+      "nodes": 2100,
+      "edges": 6135
+     }
+    }
+   },
+   "arms": {
+    "rust": [
+     {
+      "id": "sj-01",
+      "query": "from_str Deserializer deserialize_any",
+      "wall_ms": 35.3,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.1,
+      "peak_commit_mb": 3.0,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1437
+     },
+     {
+      "id": "sj-02",
+      "query": "parse_number parse_decimal parse_exponent f64_from_parts",
+      "wall_ms": 34.4,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.1,
+      "peak_commit_mb": 3.0,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1254
+     },
+     {
+      "id": "sj-03",
+      "query": "to_string to_writer format_escaped_str",
+      "wall_ms": 31.5,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 9.5,
+      "peak_commit_mb": 2.5,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 408
+     },
+     {
+      "id": "sj-04",
+      "query": "parse_whitespace peek_error fix_position",
+      "wall_ms": 35.4,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.3,
+      "peak_commit_mb": 2.8,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 533
+     },
+     {
+      "id": "sj-05",
+      "query": "Value pointer index_into",
+      "wall_ms": 34.1,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 9.8,
+      "peak_commit_mb": 2.7,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1177
+     },
+     {
+      "id": "sj-06",
+      "query": "to_value from_value Serializer",
+      "wall_ms": 35.3,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.2,
+      "peak_commit_mb": 2.8,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 403
+     },
+     {
+      "id": "sj-07",
+      "query": "StreamDeserializer byte_offset into_iter",
+      "wall_ms": 39.5,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 9.9,
+      "peak_commit_mb": 2.8,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 699
+     },
+     {
+      "id": "sj-08",
+      "query": "Map entry or_insert",
+      "wall_ms": 34.6,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.0,
+      "peak_commit_mb": 2.8,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 555
+     },
+     {
+      "id": "sj-09",
+      "query": "Error classify Category is_eof",
+      "wall_ms": 37.2,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.5,
+      "peak_commit_mb": 2.9,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1063
+     },
+     {
+      "id": "sj-10",
+      "query": "SliceRead parse_str ignore_value",
+      "wall_ms": 34.1,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.0,
+      "peak_commit_mb": 2.9,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1434
+     },
+     {
+      "id": "sj-11",
+      "query": "LineColIterator IoRead next_char",
+      "wall_ms": 32.9,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 9.4,
+      "peak_commit_mb": 2.6,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 497
+     }
+    ],
+    "ts": [
+     {
+      "id": "sj-01",
+      "query": "from_str Deserializer deserialize_any",
+      "wall_ms": 1026.3,
+      "cpu_ms": 1000.0,
+      "peak_rss_mb": 185.8,
+      "peak_commit_mb": 273.3,
+      "procs": 4,
+      "recall": 0.6666666666666666,
+      "located": 0.6666666666666666,
+      "out_tokens": 2746
+     },
+     {
+      "id": "sj-02",
+      "query": "parse_number parse_decimal parse_exponent f64_from_parts",
+      "wall_ms": 1012.1,
+      "cpu_ms": 984.4,
+      "peak_rss_mb": 186.0,
+      "peak_commit_mb": 273.5,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3278
+     },
+     {
+      "id": "sj-03",
+      "query": "to_string to_writer format_escaped_str",
+      "wall_ms": 1034.2,
+      "cpu_ms": 906.2,
+      "peak_rss_mb": 180.2,
+      "peak_commit_mb": 268.5,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3317
+     },
+     {
+      "id": "sj-04",
+      "query": "parse_whitespace peek_error fix_position",
+      "wall_ms": 1027.4,
+      "cpu_ms": 1015.6,
+      "peak_rss_mb": 187.8,
+      "peak_commit_mb": 273.0,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3568
+     },
+     {
+      "id": "sj-05",
+      "query": "Value pointer index_into",
+      "wall_ms": 1002.4,
+      "cpu_ms": 937.5,
+      "peak_rss_mb": 175.4,
+      "peak_commit_mb": 264.0,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3515
+     },
+     {
+      "id": "sj-06",
+      "query": "to_value from_value Serializer",
+      "wall_ms": 1013.6,
+      "cpu_ms": 906.2,
+      "peak_rss_mb": 175.6,
+      "peak_commit_mb": 265.4,
+      "procs": 4,
+      "recall": 0.6666666666666666,
+      "located": 0.6666666666666666,
+      "out_tokens": 3496
+     },
+     {
+      "id": "sj-07",
+      "query": "StreamDeserializer byte_offset into_iter",
+      "wall_ms": 1024.9,
+      "cpu_ms": 1000.0,
+      "peak_rss_mb": 187.6,
+      "peak_commit_mb": 272.9,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3559
+     },
+     {
+      "id": "sj-08",
+      "query": "Map entry or_insert",
+      "wall_ms": 996.4,
+      "cpu_ms": 906.2,
+      "peak_rss_mb": 180.9,
+      "peak_commit_mb": 273.2,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3200
+     },
+     {
+      "id": "sj-09",
+      "query": "Error classify Category is_eof",
+      "wall_ms": 1001.0,
+      "cpu_ms": 968.8,
+      "peak_rss_mb": 185.9,
+      "peak_commit_mb": 272.9,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3367
+     },
+     {
+      "id": "sj-10",
+      "query": "SliceRead parse_str ignore_value",
+      "wall_ms": 1004.9,
+      "cpu_ms": 875.0,
+      "peak_rss_mb": 186.2,
+      "peak_commit_mb": 272.9,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3777
+     },
+     {
+      "id": "sj-11",
+      "query": "LineColIterator IoRead next_char",
+      "wall_ms": 994.3,
+      "cpu_ms": 953.1,
+      "peak_rss_mb": 180.6,
+      "peak_commit_mb": 273.2,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3274
+     }
+    ],
+    "rg": [
+     {
+      "id": "sj-01",
+      "query": "from_str Deserializer deserialize_any",
+      "wall_ms": 95.6,
+      "cpu_ms": 171.9,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 46975
+     },
+     {
+      "id": "sj-02",
+      "query": "parse_number parse_decimal parse_exponent f64_from_parts",
+      "wall_ms": 120.6,
+      "cpu_ms": 171.9,
+      "peak_rss_mb": 7.7,
+      "peak_commit_mb": null,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 19024
+     },
+     {
+      "id": "sj-03",
+      "query": "to_string to_writer format_escaped_str",
+      "wall_ms": 91.9,
+      "cpu_ms": 171.9,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 47799
+     },
+     {
+      "id": "sj-04",
+      "query": "parse_whitespace peek_error fix_position",
+      "wall_ms": 88.4,
+      "cpu_ms": 62.5,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 25811
+     },
+     {
+      "id": "sj-05",
+      "query": "Value pointer index_into",
+      "wall_ms": 92.6,
+      "cpu_ms": 125.0,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 26922
+     },
+     {
+      "id": "sj-06",
+      "query": "to_value from_value Serializer",
+      "wall_ms": 96.3,
+      "cpu_ms": 78.1,
+      "peak_rss_mb": 7.7,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.3333333333333333,
+      "located": 0.3333333333333333,
+      "out_tokens": 52192
+     },
+     {
+      "id": "sj-07",
+      "query": "StreamDeserializer byte_offset into_iter",
+      "wall_ms": 91.5,
+      "cpu_ms": 109.4,
+      "peak_rss_mb": 7.5,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.3333333333333333,
+      "located": 0.3333333333333333,
+      "out_tokens": 22037
+     },
+     {
+      "id": "sj-08",
+      "query": "Map entry or_insert",
+      "wall_ms": 93.3,
+      "cpu_ms": 187.5,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 19189
+     },
+     {
+      "id": "sj-09",
+      "query": "Error classify Category is_eof",
+      "wall_ms": 122.7,
+      "cpu_ms": 390.6,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 57394
+     },
+     {
+      "id": "sj-10",
+      "query": "SliceRead parse_str ignore_value",
+      "wall_ms": 91.6,
+      "cpu_ms": 375.0,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 28501
+     },
+     {
+      "id": "sj-11",
+      "query": "LineColIterator IoRead next_char",
+      "wall_ms": 91.9,
+      "cpu_ms": 359.4,
+      "peak_rss_mb": 7.6,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 28970
+     }
+    ]
+   }
+  },
+  "tokio": {
+   "index": {
+    "rust": {
+     "wall_ms": 8416.9,
+     "cpu_ms": 10562.5,
+     "peak_rss_mb": 155.2,
+     "peak_commit_mb": 307.4,
+     "procs": 11,
+     "counts": {
+      "files": 555,
+      "nodes": 9934,
+      "edges": 25538
+     }
+    },
+    "ts": {
+     "wall_ms": 15290.3,
+     "cpu_ms": 45453.1,
+     "peak_rss_mb": 1117.0,
+     "peak_commit_mb": 1256.6,
+     "procs": 13,
+     "counts": {
+      "files": 555,
+      "nodes": 9934,
+      "edges": 25384
+     }
+    }
+   },
+   "arms": {
+    "rust": [
+     {
+      "id": "tk-01",
+      "query": "Builder enable_all build Runtime",
+      "wall_ms": 42.7,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 12.0,
+      "peak_commit_mb": 3.3,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2601
+     },
+     {
+      "id": "tk-02",
+      "query": "sleep Sleep poll_elapsed reset",
+      "wall_ms": 113.0,
+      "cpu_ms": 109.4,
+      "peak_rss_mb": 17.2,
+      "peak_commit_mb": 4.6,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2770
+     },
+     {
+      "id": "tk-03",
+      "query": "timeout Timeout",
+      "wall_ms": 68.6,
+      "cpu_ms": 62.5,
+      "peak_rss_mb": 16.2,
+      "peak_commit_mb": 4.2,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1628
+     },
+     {
+      "id": "tk-04",
+      "query": "interval Interval tick",
+      "wall_ms": 37.5,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 11.1,
+      "peak_commit_mb": 3.2,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1459
+     },
+     {
+      "id": "tk-05",
+      "query": "broadcast channel Sender send Receiver recv",
+      "wall_ms": 47.3,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 12.6,
+      "peak_commit_mb": 3.5,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2433
+     },
+     {
+      "id": "tk-06",
+      "query": "TcpListener bind accept TcpStream connect",
+      "wall_ms": 129.6,
+      "cpu_ms": 125.0,
+      "peak_rss_mb": 16.7,
+      "peak_commit_mb": 4.6,
+      "procs": 1,
+      "recall": 0.5,
+      "located": 0.5,
+      "out_tokens": 2534
+     },
+     {
+      "id": "tk-07",
+      "query": "Semaphore acquire Acquire",
+      "wall_ms": 38.7,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 11.6,
+      "peak_commit_mb": 3.1,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1088
+     },
+     {
+      "id": "tk-08",
+      "query": "spawn_blocking Spawner spawn_blocking_inner",
+      "wall_ms": 40.8,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.5,
+      "peak_commit_mb": 3.3,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1113
+     },
+     {
+      "id": "tk-09",
+      "query": "mpsc channel Sender send Receiver recv",
+      "wall_ms": 50.9,
+      "cpu_ms": 46.9,
+      "peak_rss_mb": 13.3,
+      "peak_commit_mb": 3.9,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2560
+     },
+     {
+      "id": "tk-10",
+      "query": "Notify notified notify_one",
+      "wall_ms": 39.1,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 11.4,
+      "peak_commit_mb": 3.2,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1069
+     },
+     {
+      "id": "tk-11",
+      "query": "Runtime block_on CurrentThread spawn_inner",
+      "wall_ms": 188.1,
+      "cpu_ms": 187.5,
+      "peak_rss_mb": 18.2,
+      "peak_commit_mb": 5.2,
+      "procs": 1,
+      "recall": 0.6666666666666666,
+      "located": 0.6666666666666666,
+      "out_tokens": 2536
+     }
+    ],
+    "ts": [
+     {
+      "id": "tk-01",
+      "query": "Builder enable_all build Runtime",
+      "wall_ms": 1129.2,
+      "cpu_ms": 1062.5,
+      "peak_rss_mb": 205.9,
+      "peak_commit_mb": 276.2,
+      "procs": 4,
+      "recall": 0.75,
+      "located": 0.75,
+      "out_tokens": 6239
+     },
+     {
+      "id": "tk-02",
+      "query": "sleep Sleep poll_elapsed reset",
+      "wall_ms": 1164.0,
+      "cpu_ms": 1171.9,
+      "peak_rss_mb": 209.3,
+      "peak_commit_mb": 277.2,
+      "procs": 4,
+      "recall": 0.75,
+      "located": 0.75,
+      "out_tokens": 6235
+     },
+     {
+      "id": "tk-03",
+      "query": "timeout Timeout",
+      "wall_ms": 1061.0,
+      "cpu_ms": 1000.0,
+      "peak_rss_mb": 196.1,
+      "peak_commit_mb": 274.1,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 4195
+     },
+     {
+      "id": "tk-04",
+      "query": "interval Interval tick",
+      "wall_ms": 1099.1,
+      "cpu_ms": 1015.6,
+      "peak_rss_mb": 198.6,
+      "peak_commit_mb": 275.0,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6245
+     },
+     {
+      "id": "tk-05",
+      "query": "broadcast channel Sender send Receiver recv",
+      "wall_ms": 1189.0,
+      "cpu_ms": 1140.6,
+      "peak_rss_mb": 199.4,
+      "peak_commit_mb": 267.8,
+      "procs": 4,
+      "recall": 0.6666666666666666,
+      "located": 0.6666666666666666,
+      "out_tokens": 6246
+     },
+     {
+      "id": "tk-06",
+      "query": "TcpListener bind accept TcpStream connect",
+      "wall_ms": 1145.1,
+      "cpu_ms": 1187.5,
+      "peak_rss_mb": 211.2,
+      "peak_commit_mb": 275.8,
+      "procs": 4,
+      "recall": 0.25,
+      "located": 0.25,
+      "out_tokens": 6244
+     },
+     {
+      "id": "tk-07",
+      "query": "Semaphore acquire Acquire",
+      "wall_ms": 1117.7,
+      "cpu_ms": 984.4,
+      "peak_rss_mb": 198.1,
+      "peak_commit_mb": 274.9,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6243
+     },
+     {
+      "id": "tk-08",
+      "query": "spawn_blocking Spawner spawn_blocking_inner",
+      "wall_ms": 1150.9,
+      "cpu_ms": 1078.1,
+      "peak_rss_mb": 207.9,
+      "peak_commit_mb": 276.1,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 5941
+     },
+     {
+      "id": "tk-09",
+      "query": "mpsc channel Sender send Receiver recv",
+      "wall_ms": 1193.6,
+      "cpu_ms": 1171.9,
+      "peak_rss_mb": 199.5,
+      "peak_commit_mb": 268.6,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6249
+     },
+     {
+      "id": "tk-10",
+      "query": "Notify notified notify_one",
+      "wall_ms": 1097.8,
+      "cpu_ms": 968.8,
+      "peak_rss_mb": 198.8,
+      "peak_commit_mb": 274.4,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3531
+     },
+     {
+      "id": "tk-11",
+      "query": "Runtime block_on CurrentThread spawn_inner",
+      "wall_ms": 1202.7,
+      "cpu_ms": 1234.4,
+      "peak_rss_mb": 208.0,
+      "peak_commit_mb": 275.9,
+      "procs": 4,
+      "recall": 0.3333333333333333,
+      "located": 0.3333333333333333,
+      "out_tokens": 6230
+     }
+    ],
+    "rg": [
+     {
+      "id": "tk-01",
+      "query": "Builder enable_all build Runtime",
+      "wall_ms": 214.7,
+      "cpu_ms": 718.8,
+      "peak_rss_mb": 8.3,
+      "peak_commit_mb": null,
+      "procs": 4,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 43820
+     },
+     {
+      "id": "tk-02",
+      "query": "sleep Sleep poll_elapsed reset",
+      "wall_ms": 212.7,
+      "cpu_ms": 890.6,
+      "peak_rss_mb": 8.1,
+      "peak_commit_mb": null,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 68394
+     },
+     {
+      "id": "tk-03",
+      "query": "timeout Timeout",
+      "wall_ms": 107.1,
+      "cpu_ms": 562.5,
+      "peak_rss_mb": 8.2,
+      "peak_commit_mb": null,
+      "procs": 2,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 41700
+     },
+     {
+      "id": "tk-04",
+      "query": "interval Interval tick",
+      "wall_ms": 164.4,
+      "cpu_ms": 578.1,
+      "peak_rss_mb": 8.4,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 50513
+     },
+     {
+      "id": "tk-05",
+      "query": "broadcast channel Sender send Receiver recv",
+      "wall_ms": 320.5,
+      "cpu_ms": 1296.9,
+      "peak_rss_mb": 8.3,
+      "peak_commit_mb": null,
+      "procs": 6,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 82651
+     },
+     {
+      "id": "tk-06",
+      "query": "TcpListener bind accept TcpStream connect",
+      "wall_ms": 266.5,
+      "cpu_ms": 1109.4,
+      "peak_rss_mb": 8.1,
+      "peak_commit_mb": null,
+      "procs": 5,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 56996
+     },
+     {
+      "id": "tk-07",
+      "query": "Semaphore acquire Acquire",
+      "wall_ms": 175.8,
+      "cpu_ms": 546.9,
+      "peak_rss_mb": 8.0,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 74103
+     },
+     {
+      "id": "tk-08",
+      "query": "spawn_blocking Spawner spawn_blocking_inner",
+      "wall_ms": 164.4,
+      "cpu_ms": 656.2,
+      "peak_rss_mb": 8.2,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 37584
+     },
+     {
+      "id": "tk-09",
+      "query": "mpsc channel Sender send Receiver recv",
+      "wall_ms": 320.0,
+      "cpu_ms": 1218.8,
+      "peak_rss_mb": 8.3,
+      "peak_commit_mb": null,
+      "procs": 6,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 68384
+     },
+     {
+      "id": "tk-10",
+      "query": "Notify notified notify_one",
+      "wall_ms": 160.9,
+      "cpu_ms": 625.0,
+      "peak_rss_mb": 8.4,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 48551
+     },
+     {
+      "id": "tk-11",
+      "query": "Runtime block_on CurrentThread spawn_inner",
+      "wall_ms": 212.8,
+      "cpu_ms": 843.8,
+      "peak_rss_mb": 8.0,
+      "peak_commit_mb": null,
+      "procs": 4,
+      "recall": 0.3333333333333333,
+      "located": 0.3333333333333333,
+      "out_tokens": 47475
+     }
+    ]
+   }
+  },
+  "codegraph": {
+   "index": {
+    "rust": {
+     "wall_ms": 45803.7,
+     "cpu_ms": 93015.6,
+     "peak_rss_mb": 959.4,
+     "peak_commit_mb": 1911.7,
+     "procs": 11,
+     "counts": {
+      "files": 1819,
+      "nodes": 47492,
+      "edges": 170653
+     }
+    },
+    "ts": {
+     "wall_ms": 48841.8,
+     "cpu_ms": 215046.9,
+     "peak_rss_mb": 3889.1,
+     "peak_commit_mb": 3968.9,
+     "procs": 13,
+     "counts": {
+      "files": 1819,
+      "nodes": 47521,
+      "edges": 170782
+     }
+    }
+   },
+   "arms": {
+    "rust": [
+     {
+      "id": "cg-01",
+      "query": "CodeGraph indexAll ExtractionOrchestrator",
+      "wall_ms": 91.0,
+      "cpu_ms": 78.1,
+      "peak_rss_mb": 23.8,
+      "peak_commit_mb": 5.0,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 4580
+     },
+     {
+      "id": "cg-02",
+      "query": "ToolHandler execute handleExplore",
+      "wall_ms": 67.3,
+      "cpu_ms": 62.5,
+      "peak_rss_mb": 17.5,
+      "peak_commit_mb": 5.7,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2527
+     },
+     {
+      "id": "cg-03",
+      "query": "getExploreBudget getExploreOutputBudget",
+      "wall_ms": 47.0,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 14.9,
+      "peak_commit_mb": 4.5,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1422
+     },
+     {
+      "id": "cg-04",
+      "query": "ReferenceResolver resolveAll",
+      "wall_ms": 46.1,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 12.5,
+      "peak_commit_mb": 4.0,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2137
+     },
+     {
+      "id": "cg-05",
+      "query": "GraphTraverser traverseBFS getImpactRadius",
+      "wall_ms": 71.0,
+      "cpu_ms": 62.5,
+      "peak_rss_mb": 20.7,
+      "peak_commit_mb": 4.0,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2144
+     },
+     {
+      "id": "cg-06",
+      "query": "QueryBuilder insertNode DatabaseConnection",
+      "wall_ms": 45.1,
+      "cpu_ms": 46.9,
+      "peak_rss_mb": 13.8,
+      "peak_commit_mb": 3.8,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3508
+     },
+     {
+      "id": "cg-07",
+      "query": "upsertInstructionsEntry CODEGRAPH_INSTRUCTIONS_BLOCK",
+      "wall_ms": 38.0,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 10.6,
+      "peak_commit_mb": 3.9,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 656
+     },
+     {
+      "id": "cg-08",
+      "query": "SYNTH_PASSES enclosingFn",
+      "wall_ms": 40.6,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 12.1,
+      "peak_commit_mb": 3.9,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 2075
+     },
+     {
+      "id": "cg-09",
+      "query": "findAllSymbols findDynamicBoundaries buildDeadCodeReport",
+      "wall_ms": 58.6,
+      "cpu_ms": 46.9,
+      "peak_rss_mb": 16.1,
+      "peak_commit_mb": 5.0,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 3573
+     },
+     {
+      "id": "cg-10",
+      "query": "FileWatcher ContextBuilder buildContext",
+      "wall_ms": 78.8,
+      "cpu_ms": 78.1,
+      "peak_rss_mb": 21.8,
+      "peak_commit_mb": 4.4,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 4068
+     },
+     {
+      "id": "cg-11",
+      "query": "js_sort_by allocate_explore_budget build_flow_from_named_symbols",
+      "wall_ms": 41.4,
+      "cpu_ms": 31.2,
+      "peak_rss_mb": 11.6,
+      "peak_commit_mb": 3.9,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 1706
+     },
+     {
+      "id": "cg-12",
+      "query": "get_ambient_declaration_paths_among resolve_one index_all",
+      "wall_ms": 64.2,
+      "cpu_ms": 46.9,
+      "peak_rss_mb": 16.0,
+      "peak_commit_mb": 4.9,
+      "procs": 1,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 5920
+     }
+    ],
+    "ts": [
+     {
+      "id": "cg-01",
+      "query": "CodeGraph indexAll ExtractionOrchestrator",
+      "wall_ms": 1835.6,
+      "cpu_ms": 1578.1,
+      "peak_rss_mb": 277.6,
+      "peak_commit_mb": 329.2,
+      "procs": 4,
+      "recall": 0.3333333333333333,
+      "located": 0.6666666666666666,
+      "out_tokens": 6242
+     },
+     {
+      "id": "cg-02",
+      "query": "ToolHandler execute handleExplore",
+      "wall_ms": 1963.8,
+      "cpu_ms": 1890.6,
+      "peak_rss_mb": 315.7,
+      "peak_commit_mb": 340.2,
+      "procs": 4,
+      "recall": 0.3333333333333333,
+      "located": 0.6666666666666666,
+      "out_tokens": 5934
+     },
+     {
+      "id": "cg-03",
+      "query": "getExploreBudget getExploreOutputBudget",
+      "wall_ms": 1858.8,
+      "cpu_ms": 1640.6,
+      "peak_rss_mb": 301.2,
+      "peak_commit_mb": 332.5,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6246
+     },
+     {
+      "id": "cg-04",
+      "query": "ReferenceResolver resolveAll",
+      "wall_ms": 1918.5,
+      "cpu_ms": 1875.0,
+      "peak_rss_mb": 326.1,
+      "peak_commit_mb": 338.0,
+      "procs": 4,
+      "recall": 0.5,
+      "located": 1.0,
+      "out_tokens": 6224
+     },
+     {
+      "id": "cg-05",
+      "query": "GraphTraverser traverseBFS getImpactRadius",
+      "wall_ms": 1935.5,
+      "cpu_ms": 1890.6,
+      "peak_rss_mb": 313.2,
+      "peak_commit_mb": 337.7,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6247
+     },
+     {
+      "id": "cg-06",
+      "query": "QueryBuilder insertNode DatabaseConnection",
+      "wall_ms": 1945.6,
+      "cpu_ms": 1843.8,
+      "peak_rss_mb": 319.0,
+      "peak_commit_mb": 341.5,
+      "procs": 4,
+      "recall": 0.3333333333333333,
+      "located": 1.0,
+      "out_tokens": 6234
+     },
+     {
+      "id": "cg-07",
+      "query": "upsertInstructionsEntry CODEGRAPH_INSTRUCTIONS_BLOCK",
+      "wall_ms": 1827.8,
+      "cpu_ms": 1718.8,
+      "peak_rss_mb": 273.9,
+      "peak_commit_mb": 321.3,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6211
+     },
+     {
+      "id": "cg-08",
+      "query": "SYNTH_PASSES enclosingFn",
+      "wall_ms": 1900.3,
+      "cpu_ms": 1859.4,
+      "peak_rss_mb": 327.7,
+      "peak_commit_mb": 334.0,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6237
+     },
+     {
+      "id": "cg-09",
+      "query": "findAllSymbols findDynamicBoundaries buildDeadCodeReport",
+      "wall_ms": 1936.5,
+      "cpu_ms": 1796.9,
+      "peak_rss_mb": 316.5,
+      "peak_commit_mb": 336.3,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6226
+     },
+     {
+      "id": "cg-10",
+      "query": "FileWatcher ContextBuilder buildContext",
+      "wall_ms": 1811.5,
+      "cpu_ms": 1703.1,
+      "peak_rss_mb": 272.9,
+      "peak_commit_mb": 327.0,
+      "procs": 4,
+      "recall": 0.3333333333333333,
+      "located": 1.0,
+      "out_tokens": 6244
+     },
+     {
+      "id": "cg-11",
+      "query": "js_sort_by allocate_explore_budget build_flow_from_named_symbols",
+      "wall_ms": 1872.7,
+      "cpu_ms": 1750.0,
+      "peak_rss_mb": 278.6,
+      "peak_commit_mb": 329.2,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6250
+     },
+     {
+      "id": "cg-12",
+      "query": "get_ambient_declaration_paths_among resolve_one index_all",
+      "wall_ms": 1929.8,
+      "cpu_ms": 1843.8,
+      "peak_rss_mb": 285.8,
+      "peak_commit_mb": 329.0,
+      "procs": 4,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 6249
+     }
+    ],
+    "rg": [
+     {
+      "id": "cg-01",
+      "query": "CodeGraph indexAll ExtractionOrchestrator",
+      "wall_ms": 472.2,
+      "cpu_ms": 2468.8,
+      "peak_rss_mb": 32.1,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 221806
+     },
+     {
+      "id": "cg-02",
+      "query": "ToolHandler execute handleExplore",
+      "wall_ms": 483.7,
+      "cpu_ms": 2531.2,
+      "peak_rss_mb": 28.2,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 399441
+     },
+     {
+      "id": "cg-03",
+      "query": "getExploreBudget getExploreOutputBudget",
+      "wall_ms": 298.9,
+      "cpu_ms": 1671.9,
+      "peak_rss_mb": 27.5,
+      "peak_commit_mb": null,
+      "procs": 2,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 43738
+     },
+     {
+      "id": "cg-04",
+      "query": "ReferenceResolver resolveAll",
+      "wall_ms": 306.1,
+      "cpu_ms": 1562.5,
+      "peak_rss_mb": 27.5,
+      "peak_commit_mb": null,
+      "procs": 2,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 57446
+     },
+     {
+      "id": "cg-05",
+      "query": "GraphTraverser traverseBFS getImpactRadius",
+      "wall_ms": 461.5,
+      "cpu_ms": 2640.6,
+      "peak_rss_mb": 27.9,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 85043
+     },
+     {
+      "id": "cg-06",
+      "query": "QueryBuilder insertNode DatabaseConnection",
+      "wall_ms": 463.8,
+      "cpu_ms": 2593.8,
+      "peak_rss_mb": 27.3,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 202820
+     },
+     {
+      "id": "cg-07",
+      "query": "upsertInstructionsEntry CODEGRAPH_INSTRUCTIONS_BLOCK",
+      "wall_ms": 297.7,
+      "cpu_ms": 1765.6,
+      "peak_rss_mb": 27.9,
+      "peak_commit_mb": null,
+      "procs": 2,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 32097
+     },
+     {
+      "id": "cg-08",
+      "query": "SYNTH_PASSES enclosingFn",
+      "wall_ms": 296.6,
+      "cpu_ms": 1625.0,
+      "peak_rss_mb": 27.9,
+      "peak_commit_mb": null,
+      "procs": 2,
+      "recall": 0.5,
+      "located": 0.5,
+      "out_tokens": 32237
+     },
+     {
+      "id": "cg-09",
+      "query": "findAllSymbols findDynamicBoundaries buildDeadCodeReport",
+      "wall_ms": 458.5,
+      "cpu_ms": 2453.1,
+      "peak_rss_mb": 27.2,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 64368
+     },
+     {
+      "id": "cg-10",
+      "query": "FileWatcher ContextBuilder buildContext",
+      "wall_ms": 444.5,
+      "cpu_ms": 2421.9,
+      "peak_rss_mb": 27.2,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.0,
+      "located": 0.0,
+      "out_tokens": 40037
+     },
+     {
+      "id": "cg-11",
+      "query": "js_sort_by allocate_explore_budget build_flow_from_named_symbols",
+      "wall_ms": 467.1,
+      "cpu_ms": 2421.9,
+      "peak_rss_mb": 27.2,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 1.0,
+      "located": 1.0,
+      "out_tokens": 26957
+     },
+     {
+      "id": "cg-12",
+      "query": "get_ambient_declaration_paths_among resolve_one index_all",
+      "wall_ms": 456.6,
+      "cpu_ms": 2375.0,
+      "peak_rss_mb": 27.8,
+      "peak_commit_mb": null,
+      "procs": 3,
+      "recall": 0.6666666666666666,
+      "located": 0.6666666666666666,
+      "out_tokens": 64052
+     }
+    ]
+   }
+  }
+ }
+}
