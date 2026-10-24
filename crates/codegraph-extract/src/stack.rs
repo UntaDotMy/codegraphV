@@ -260,11 +260,16 @@ mod tests {
             let used = current_sp() - low;
             // std/the OS round the requested size up a little (macOS reports
             // 1,060,864 for a 1 MiB request); the point is that the bounds
-            // describe THIS thread's small stack, not the main thread's.
-            assert!(
-                used <= SMALL_STACK + 128 * 1024,
-                "used {used} is not within the {SMALL_STACK}-byte stack"
-            );
+            // describe THIS thread's small stack, not the main thread's 8 MiB.
+            // glibc hands a new thread any cached stack of an exited thread up
+            // to 4x the requested size, so after the test harness's 2 MiB
+            // threads exit, a 1 MiB request really runs on 2 MiB.
+            let allowed = if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                4 * SMALL_STACK
+            } else {
+                SMALL_STACK + 128 * 1024
+            };
+            assert!(used <= allowed, "used {used} is not within the {SMALL_STACK}-byte stack");
         });
     }
 
