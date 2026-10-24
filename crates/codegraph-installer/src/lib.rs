@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 mod edit;
+mod markers;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const TARGETS: &[&str] = &[
     "claude",
@@ -315,29 +316,35 @@ impl Environment {
         let entry = self.entry(id, loc);
         let value = (!remove).then_some(&entry);
         let after = match id {
-            "codex" => edit::toml(&before, value)?,
-            "hermes" => edit::yaml(&before, value)?,
+            "codex" => Some(edit::toml(&before, value)?),
+            "hermes" => Some(edit::yaml(&before, value)?),
             _ => {
-                let mut result = edit::json(&before, &config_keys(id), value)?;
-                if id == "opencode" {
-                    result = edit::json(&result, &["mcp", "codegraph"], None)?;
+                // opencode: drop the pre-#1698 `mcp.codegraph` entry either way.
+                let legacy = if id == "opencode" {
+                    edit::json(&before, &["mcp", "codegraph"], None)?
+                } else {
+                    before.clone()
+                };
+                match value {
+                    Some(value) => Some(edit::json(&legacy, &config_keys(id), Some(value))?),
+                    None => remove_json(&before, &legacy, &config_keys(id))?,
                 }
-                result
             }
         };
-        let mut planned = vec![(file, before, after)];
+        // `None` deletes the file: uninstall left nothing in it.
+        let mut planned: Vec<(PathBuf, String, Option<String>)> = vec![(file, before, after)];
         if let Some(file) = self.instructions_path(id, loc) {
             let before = read(&file)?;
-            let mut after = remove_block(&before);
-            if !remove {
-                if !after.trim().is_empty() {
-                    after = after.trim_end().to_owned() + "\n\n";
-                } else {
-                    after.clear();
+            let after = if remove {
+                match markers::strip(&before, START, END) {
+                    Some(rest) if markers::is_blank(&rest) => None,
+                    Some(rest) => Some(rest),
+                    None => Some(before.clone()),
                 }
-                after.push_str(INSTRUCTIONS);
-                after.push('\n');
-            }
+            } else {
+                let existing = file.exists().then_some(before.as_str());
+                Some(markers::upsert(existing, INSTRUCTIONS, START, END))
+            };
             planned.push((file, before, after));
         }
         if id == "claude" {
@@ -361,8 +368,11 @@ impl Environment {
                     allow.push(json!("mcp__codegraph__*"));
                 }
                 if allow != prior {
-                    let after =
-                        edit::json(&before, &["permissions", "allow"], Some(&json!(allow)))?;
+                    let after = if allow.is_empty() {
+                        remove_json(&before, &before, &["permissions", "allow"])?
+                    } else {
+                        Some(edit::json(&before, &["permissions", "allow"], Some(&json!(allow)))?)
+                    };
                     planned.push((settings, before, after));
                 }
                 data.take();
@@ -371,7 +381,7 @@ impl Environment {
                 let file = self.project.join(".claude.json");
                 let before = read(&file)?;
                 if !before.is_empty() {
-                    let after = edit::json(&before, &["mcpServers", "codegraph"], None)?;
+                    let after = remove_json(&before, &before, &["mcpServers", "codegraph"])?;
                     planned.push((file, before, after));
                 }
             }
@@ -385,7 +395,7 @@ impl Environment {
                 if !planned.iter().any(|(p, _, _)| p == &path) {
                     let before = read(&path)?;
                     if !before.is_empty() {
-                        let after = edit::json(&before, &["mcpServers", "codegraph"], None)?;
+                        let after = remove_json(&before, &before, &["mcpServers", "codegraph"])?;
                         planned.push((path, before, after));
                     }
                 }
@@ -394,14 +404,19 @@ impl Environment {
         let mut result = WriteResult::default();
         for (path, before, after) in planned {
             let exists = path.exists();
-            let action = if before == after {
+            let action = if after.as_ref() == Some(&before) || after.is_none() && !exists {
                 if exists {
                     "unchanged"
                 } else {
                     "not-found"
                 }
             } else {
-                write_atomic(&path, &after)?;
+                match &after {
+                    Some(text) => write_atomic(&path, text)?,
+                    // A link is emptied through, never replaced by deleting it.
+                    None if path.is_symlink() => write_atomic(&path, "")?,
+                    None => std::fs::remove_file(&path)?,
+                }
                 if remove {
                     "removed"
                 } else if exists {
@@ -456,16 +471,23 @@ fn read(path: &Path) -> io::Result<String> {
         Err(e) => Err(e),
     }
 }
-fn remove_block(text: &str) -> String {
-    let mut result = text.to_owned();
-    while let Some(start) = result.find(START) {
-        let Some(end) = result[start..].find(END) else {
+/// `text` (`original` after earlier edits) without the value at `path` and without the
+/// objects that removal leaves empty; `None` when the document is then empty.
+fn remove_json(original: &str, text: &str, path: &[&str]) -> Result<Option<String>> {
+    let parse = |t: &str| -> Result<Value> {
+        Ok(jsonc_parser::parse_to_serde_value(t, &Default::default())?.unwrap_or(Value::Null))
+    };
+    let mut out = edit::json(text, path, None)?;
+    for depth in (1..path.len()).rev() {
+        let parsed = parse(&out)?;
+        let parent = path[..depth].iter().fold(&parsed, |v, k| &v[k]);
+        if !parent.as_object().is_some_and(|o| o.is_empty()) {
             break;
-        };
-        let end = start + end + END.len();
-        result.replace_range(start..end, "");
+        }
+        out = edit::json(&out, &path[..depth], None)?;
     }
-    result.trim_end().to_owned() + if result.trim().is_empty() { "" } else { "\n" }
+    let empty = !out.trim().is_empty() && parse(&out)?.as_object().is_some_and(|o| o.is_empty());
+    Ok(if out != original && empty { None } else { Some(out) })
 }
 fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     let target = if path.is_symlink() {

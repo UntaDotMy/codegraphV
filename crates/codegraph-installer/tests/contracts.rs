@@ -111,3 +111,44 @@ fn shared_instructions_preserve_user_text() {
         .unwrap();
     assert!(fs::read_to_string(file).unwrap().contains("Keep this."));
 }
+fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.insert(path.strip_prefix(root).unwrap().to_path_buf(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+/// Uninstall gives back what install found: a CRLF instructions file keeps its line breaks,
+/// and files install created (settings.json, an instructions file) do not linger emptied.
+#[test]
+fn claude_uninstall_restores_user_files_byte_for_byte() {
+    let claude_json = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"other\": {\n      \"command\": \"x\"\n    }\n  }\n}\n";
+    for (config, notes) in [(Some(claude_json), Some("# My notes\r\n\r\nKeep this.\r\n")), (None, None)] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(&dir);
+        if let Some(text) = config {
+            fs::write(env.home.join(".claude.json"), text).unwrap();
+        }
+        if let Some(text) = notes {
+            fs::create_dir_all(env.home.join(".claude")).unwrap();
+            fs::write(env.home.join(".claude").join("CLAUDE.md"), text).unwrap();
+        }
+        let before = snapshot(&env.home);
+        env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
+        assert_ne!(snapshot(&env.home), before);
+        env.apply("claude", Location::Global, InstallOptions::default(), true).unwrap();
+        let after = snapshot(&env.home);
+        for (path, bytes) in &after {
+            assert_eq!(before.get(path), Some(bytes), "{} differs:\n{}", path.display(), String::from_utf8_lossy(bytes));
+        }
+        assert_eq!(after.len(), before.len(), "{:?}", after.keys().collect::<Vec<_>>());
+    }
+}
