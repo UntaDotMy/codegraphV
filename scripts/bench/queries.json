@@ -1,0 +1,57 @@
+{
+  "_doc": "Repos and flow queries for scripts/bench/bench.py. A target is `name` or `name@path-substring`; its definition sites come from source text (bench.find_definitions). `cargo` = a crate dir under ~/.cargo/registry/src/*/, `git: HEAD` = this repo via git archive.",
+  "repos": [
+    {
+      "name": "serde_json",
+      "cargo": "serde_json-1.0.145",
+      "queries": [
+        {"id": "sj-01", "q": "from_str Deserializer deserialize_any", "targets": ["from_str@src/de.rs", "Deserializer@src/de.rs", "deserialize_any@src/de.rs"]},
+        {"id": "sj-02", "q": "parse_number parse_decimal parse_exponent f64_from_parts", "targets": ["parse_number@src/de.rs", "parse_decimal@src/de.rs", "parse_exponent@src/de.rs", "f64_from_parts@src/de.rs"]},
+        {"id": "sj-03", "q": "to_string to_writer format_escaped_str", "targets": ["to_string@src/ser.rs", "to_writer@src/ser.rs", "format_escaped_str@src/ser.rs"]},
+        {"id": "sj-04", "q": "parse_whitespace peek_error fix_position", "targets": ["parse_whitespace@src/de.rs", "peek_error@src/de.rs", "fix_position@src/de.rs"]},
+        {"id": "sj-05", "q": "Value pointer index_into", "targets": ["Value@src/value/mod.rs", "pointer@src/value/mod.rs", "index_into@src/value/index.rs"]},
+        {"id": "sj-06", "q": "to_value from_value Serializer", "targets": ["to_value@src/value/mod.rs", "from_value@src/value/mod.rs", "Serializer@src/ser.rs"]},
+        {"id": "sj-07", "q": "StreamDeserializer byte_offset into_iter", "targets": ["StreamDeserializer@src/de.rs", "byte_offset@src/de.rs", "into_iter@src/de.rs"]},
+        {"id": "sj-08", "q": "Map entry or_insert", "targets": ["Map@src/map.rs", "entry@src/map.rs", "or_insert@src/map.rs"]},
+        {"id": "sj-09", "q": "Error classify Category is_eof", "targets": ["Error@src/error.rs", "classify@src/error.rs", "Category@src/error.rs", "is_eof@src/error.rs"]},
+        {"id": "sj-10", "q": "SliceRead parse_str ignore_value", "targets": ["SliceRead@src/read.rs", "parse_str@src/read.rs", "ignore_value@src/de.rs"]},
+        {"id": "sj-11", "q": "LineColIterator IoRead next_char", "targets": ["LineColIterator@src/iter.rs", "IoRead@src/read.rs", "next_char@src/de.rs"]}
+      ]
+    },
+    {
+      "name": "tokio",
+      "cargo": "tokio-1.53.1",
+      "queries": [
+        {"id": "tk-01", "q": "Builder enable_all build Runtime", "targets": ["Builder@src/runtime/builder.rs", "enable_all@src/runtime/builder.rs", "build@src/runtime/builder.rs", "Runtime@src/runtime/runtime.rs"]},
+        {"id": "tk-02", "q": "sleep Sleep poll_elapsed reset", "targets": ["sleep@src/time/sleep.rs", "Sleep@src/time/sleep.rs", "poll_elapsed@src/time/sleep.rs", "reset@src/time/sleep.rs"]},
+        {"id": "tk-03", "q": "timeout Timeout", "targets": ["timeout@src/time/timeout.rs", "Timeout@src/time/timeout.rs"]},
+        {"id": "tk-04", "q": "interval Interval tick", "targets": ["interval@src/time/interval.rs", "Interval@src/time/interval.rs", "tick@src/time/interval.rs"]},
+        {"id": "tk-05", "q": "broadcast channel Sender send Receiver recv", "targets": ["channel@src/sync/broadcast.rs", "send@src/sync/broadcast.rs", "recv@src/sync/broadcast.rs"]},
+        {"id": "tk-06", "q": "TcpListener bind accept TcpStream connect", "targets": ["TcpListener@src/net/tcp/listener.rs", "bind@src/net/tcp/listener.rs", "accept@src/net/tcp/listener.rs", "connect@src/net/tcp/stream.rs"]},
+        {"id": "tk-07", "q": "Semaphore acquire Acquire", "targets": ["Semaphore@src/sync/batch_semaphore.rs", "acquire@src/sync/batch_semaphore.rs", "Acquire@src/sync/batch_semaphore.rs"]},
+        {"id": "tk-08", "q": "spawn_blocking Spawner spawn_blocking_inner", "targets": ["Spawner@src/runtime/blocking/pool.rs", "spawn_blocking_inner@src/runtime/blocking/pool.rs"]},
+        {"id": "tk-09", "q": "mpsc channel Sender send Receiver recv", "targets": ["channel@src/sync/mpsc/bounded.rs", "send@src/sync/mpsc/bounded.rs", "recv@src/sync/mpsc/bounded.rs"]},
+        {"id": "tk-10", "q": "Notify notified notify_one", "targets": ["Notify@src/sync/notify.rs", "notified@src/sync/notify.rs", "notify_one@src/sync/notify.rs"]},
+        {"id": "tk-11", "q": "Runtime block_on CurrentThread spawn_inner", "targets": ["block_on@src/runtime/runtime.rs", "CurrentThread@src/runtime/scheduler/current_thread", "spawn_inner@src/task/spawn.rs"]}
+      ]
+    },
+    {
+      "name": "codegraph",
+      "git": "HEAD",
+      "queries": [
+        {"id": "cg-01", "q": "CodeGraph indexAll ExtractionOrchestrator", "targets": ["CodeGraph@src/index.ts", "indexAll@src/index.ts", "ExtractionOrchestrator@src/extraction/index.ts"]},
+        {"id": "cg-02", "q": "ToolHandler execute handleExplore", "targets": ["ToolHandler@src/mcp/tools.ts", "execute@src/mcp/tools.ts", "handleExplore@src/mcp/tools.ts"]},
+        {"id": "cg-03", "q": "getExploreBudget getExploreOutputBudget", "targets": ["getExploreBudget@src/mcp/tools.ts", "getExploreOutputBudget@src/mcp/tools.ts"]},
+        {"id": "cg-04", "q": "ReferenceResolver resolveAll", "targets": ["ReferenceResolver@src/resolution/index.ts", "resolveAll@src/resolution/index.ts"]},
+        {"id": "cg-05", "q": "GraphTraverser traverseBFS getImpactRadius", "targets": ["GraphTraverser@src/graph/traversal.ts", "traverseBFS@src/graph/traversal.ts", "getImpactRadius@src/graph/traversal.ts"]},
+        {"id": "cg-06", "q": "QueryBuilder insertNode DatabaseConnection", "targets": ["QueryBuilder@src/db/queries.ts", "insertNode@src/db/queries.ts", "DatabaseConnection@src/db/index.ts"]},
+        {"id": "cg-07", "q": "upsertInstructionsEntry CODEGRAPH_INSTRUCTIONS_BLOCK", "targets": ["upsertInstructionsEntry@src/installer/targets/shared.ts", "CODEGRAPH_INSTRUCTIONS_BLOCK@src/installer/instructions-template.ts"]},
+        {"id": "cg-08", "q": "SYNTH_PASSES enclosingFn", "targets": ["SYNTH_PASSES@src/resolution/callback-synthesizer.ts", "enclosingFn@src/resolution/synth-utils.ts"]},
+        {"id": "cg-09", "q": "findAllSymbols findDynamicBoundaries buildDeadCodeReport", "targets": ["findAllSymbols@src/graph/named-symbol-flow.ts", "findDynamicBoundaries@src/graph/dynamic-boundary-report.ts", "buildDeadCodeReport@src/graph/dead-code.ts"]},
+        {"id": "cg-10", "q": "FileWatcher ContextBuilder buildContext", "targets": ["FileWatcher@src/sync/watcher.ts", "ContextBuilder@src/context/index.ts", "buildContext@src/context/index.ts"]},
+        {"id": "cg-11", "q": "js_sort_by allocate_explore_budget build_flow_from_named_symbols", "targets": ["js_sort_by@crates/codegraph-types/src/jssort.rs", "allocate_explore_budget@crates/codegraph-mcp/src/explore/helpers.rs", "build_flow_from_named_symbols@crates/codegraph-mcp/src/explore/sections.rs"]},
+        {"id": "cg-12", "q": "get_ambient_declaration_paths_among resolve_one index_all", "targets": ["get_ambient_declaration_paths_among@crates/codegraph-db/src/store.rs", "resolve_one@crates/codegraph-resolve/src/resolver.rs", "index_all@crates/codegraph-core/src/codegraph.rs"]}
+      ]
+    }
+  ]
+}

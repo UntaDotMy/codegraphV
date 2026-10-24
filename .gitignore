@@ -69,6 +69,7 @@ release/
 tmux-web/
 
 assets/__pycache__/
+scripts/bench/__pycache__/
 
 assets/generate-waitlist.py
 
