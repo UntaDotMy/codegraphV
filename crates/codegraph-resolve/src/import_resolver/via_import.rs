@@ -1158,7 +1158,7 @@ pub fn is_bound_to_out_of_repo_import(r: &UnresolvedRef, ctx: &Ctx) -> bool {
         if &imp.local_name != name {
             continue;
         }
-        return is_external_import(&imp.source, r.language, ctx, ExternalOpts::default())
+        return is_external_import(&imp.source, r.language, ctx, ExternalOpts { from_file: Some(&r.file_path), ..ExternalOpts::default() })
             && resolve_import_path(&imp.source, &r.file_path, r.language, ctx).is_none()
             && !ambient_module_declares(&imp.source, &imp.exported_name, imp.is_default, r, ctx);
     }
@@ -1286,7 +1286,7 @@ pub fn import_binding_tail(r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
         Some(rc) if r.is_kind(EdgeKind::Calls) => local_type_binding(rc, r, ctx, &mappings),
         _ => None,
     })?;
-    if is_external_import(&binding.source, r.language, ctx, ExternalOpts::default())
+    if is_external_import(&binding.source, r.language, ctx, ExternalOpts { from_file: Some(&r.file_path), ..ExternalOpts::default() })
         && !ctx.get_nearest_aliases(&r.file_path).is_some_and(|a| a.patterns.iter().any(|p| !p.prefix.is_empty() && binding.source.starts_with(&p.prefix)))
         && !names_own_config_module(&binding.source, &r.file_path, r.language, ctx)
     {

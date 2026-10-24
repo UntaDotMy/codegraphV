@@ -2,23 +2,35 @@
 //!
 //! npm / yarn / bun read member packages from the root `package.json` `workspaces`
 //! field, pnpm from `pnpm-workspace.yaml`; ohpm modules declare `file:` siblings in
-//! `oh-package.json5`. Each member's declared `name` maps to its directory so the
-//! resolver can rewrite `@scope/ui/widgets` → `packages/ui/widgets`.
+//! `oh-package.json5`, and any package.json may depend on a sibling by path
+//! (`"acme-shared": "file:../common"`, #2456). Each package's `name` maps to its
+//! directory, and its manifest's declared entries (`exports`, `main`, `module`,
+//! `types`) to files (#2502), so the resolver can rewrite `@scope/ui` →
+//! `packages/ui/src/index.ts` and `@scope/ui/widgets` → `packages/ui/widgets`.
 
 use codegraph_jsre::{escape_regex, re, Re};
+use codegraph_types::jscompat::js_trim;
 use codegraph_types::log::log_debug;
 use codegraph_types::nodepath;
-use serde_json::Value;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkspacePackages {
-    /// Member package `name` → directory relative to the project root (posix).
+    /// Package `name` → directory relative to the project root (posix): the workspace members,
+    /// ohpm's `file:` dependencies, and the root package.json's path dependencies.
     pub by_name: HashMap<String, String>,
     /// Iteration order of `by_name` (JavaScript `Map` insertion order).
     pub names_in_order: Vec<String>,
     /// Member package `name` → its declared ENTRY FILE (ohpm `main`), posix, project-relative.
     pub entry_by_name: HashMap<String, String>,
+    /// The entries an npm/pnpm/yarn/bun package's package.json declares, by its directory.
+    pub entries_by_dir: HashMap<String, PackageEntries>,
+    /// The path dependencies a package.json below the root declares: its directory →
+    /// (dependency name, target directory) in declaration order. Seen only from the files under
+    /// that manifest; the root manifest's are in `by_name`.
+    pub scoped_by_name: HashMap<String, Vec<(String, String)>>,
 }
 
 impl WorkspacePackages {
@@ -27,6 +39,28 @@ impl WorkspacePackages {
             self.names_in_order.push(name);
         }
     }
+}
+
+/// What a package.json declares a package's importers reach, as project-relative posix
+/// targets, best first. A target may name build output the index does not hold.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PackageEntries {
+    /// The `exports` map (`.`, `./utils`, `./schema/*` → targets), in key order. A string, an
+    /// array or a conditions-only `exports` is the `.` entry.
+    pub exports: Option<Vec<(String, Vec<String>)>>,
+    /// The package root's `source`, `module`, `main`, `types` and `typings` fields.
+    pub main: Option<Vec<String>>,
+}
+
+/// Where an import of a workspace or path-dependency package lands, before any file is probed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceImportTargets {
+    /// The entries the package declares for the import, best first.
+    pub declared: Vec<String>,
+    /// The package's directory plus the import's subpath (`packages/ui/widgets`), extension-less.
+    pub directory: String,
+    /// The package's directory.
+    pub package_dir: String,
 }
 
 /// Parse JSON-with-comments (ohpm's JSON5 manifests): comments and trailing commas tolerated.
@@ -40,7 +74,8 @@ fn read_text(path: &str) -> Option<String> {
     std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-/// Load workspace member packages for `project_root`; `None` when the project declares none.
+/// Load workspace packages for `project_root`; `None` when the project declares no workspaces
+/// and no package depends on another by path.
 pub fn load_workspace_packages(project_root: &str) -> Option<WorkspacePackages> {
     let mut ws = WorkspacePackages::default();
 
@@ -65,8 +100,9 @@ pub fn load_workspace_packages(project_root: &str) -> Option<WorkspacePackages> 
         }
     }
 
-    // HarmonyOS/OpenHarmony (ArkTS) modular projects.
-    for (name, dir) in collect_ohpm_file_deps(project_root) {
+    // HarmonyOS/OpenHarmony (ArkTS) modular projects, and npm path dependencies (#2456).
+    let PathDeps { ohpm, mut npm } = collect_path_deps(project_root);
+    for (name, dir) in ohpm {
         if ws.by_name.contains_key(&name) {
             continue;
         }
@@ -76,18 +112,129 @@ pub fn load_workspace_packages(project_root: &str) -> Option<WorkspacePackages> 
             ws.entry_by_name.insert(name, entry);
         }
     }
+    if let Some(root_deps) = npm.remove("") {
+        for (name, dir) in root_deps {
+            if !ws.by_name.contains_key(&name) {
+                ws.insert(name, dir);
+            }
+        }
+    }
 
-    if ws.by_name.is_empty() {
+    if ws.by_name.is_empty() && npm.is_empty() {
         return None;
     }
-    log_debug("workspace packages loaded", &[("count", ws.by_name.len().to_string())]);
+
+    // What each npm-style package's manifest declares for its importers.
+    let mut package_dirs: HashSet<String> = ws.by_name.values().cloned().collect();
+    for deps in npm.values() {
+        package_dirs.extend(deps.iter().map(|(_, dir)| dir.clone()));
+    }
+    for dir in package_dirs {
+        if let Some(entries) = read_package_entries(project_root, &dir) {
+            ws.entries_by_dir.insert(dir, entries);
+        }
+    }
+    ws.scoped_by_name = npm;
+
+    log_debug(
+        "workspace packages loaded",
+        &[
+            ("count", ws.by_name.len().to_string()),
+            ("scoped", ws.scoped_by_name.len().to_string()),
+            ("entries", ws.entries_by_dir.len().to_string()),
+        ],
+    );
     Some(ws)
+}
+
+/// Condition keys an `exports` target is read through first; any other condition comes next,
+/// and `types`/`typings` last.
+const RESOLVING_CONDITIONS: [&str; 6] = ["import", "require", "node", "module", "module-sync", "default"];
+const TYPE_CONDITIONS: [&str; 2] = ["types", "typings"];
+
+/// An `exports` value's targets, best first: a string, a fallback array, or (nested)
+/// conditions, by key order within each tier.
+fn export_targets(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(items) => items.iter().flat_map(export_targets).collect(),
+        Value::Object(conditions) => {
+            let tier = |key: &str| {
+                if RESOLVING_CONDITIONS.contains(&key) {
+                    0
+                } else if TYPE_CONDITIONS.contains(&key) {
+                    2
+                } else {
+                    1
+                }
+            };
+            (0..3)
+                .flat_map(|t| conditions.iter().filter(move |(key, _)| tier(key) == t).flat_map(|(_, v)| export_targets(v)))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The package.json fields an importer of the package root reaches without `exports`.
+const MAIN_FIELDS: [&str; 5] = ["source", "module", "main", "types", "typings"];
+
+fn dedupe(items: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    items.into_iter().filter(|s| seen.insert(s.clone())).collect()
+}
+
+/// Read a package's declared entries; `None` when its manifest declares none.
+fn read_package_entries(project_root: &str, dir_rel: &str) -> Option<PackageEntries> {
+    let text = read_text(&nodepath::join(&[project_root, dir_rel, "package.json"]))?;
+    let pkg: Value = serde_json::from_str(&text).ok()?;
+    let pkg = pkg.as_object()?;
+    let in_package = |target: &str| package_target(project_root, dir_rel, target);
+    let mut out = PackageEntries::default();
+    if let Some(exp) = pkg.get("exports").filter(|v| !v.is_null()) {
+        let subpaths = exp.as_object().is_some_and(|o| o.keys().any(|k| k.starts_with('.')));
+        let entries: Vec<(String, &Value)> = if subpaths {
+            exp.as_object().unwrap().iter().filter(|(k, _)| k.starts_with('.')).map(|(k, v)| (k.clone(), v)).collect()
+        } else {
+            vec![(".".to_string(), exp)]
+        };
+        let mut exports: Vec<(String, Vec<String>)> = Vec::new();
+        for (key, value) in entries {
+            let targets = dedupe(export_targets(value).iter().filter_map(|t| in_package(t)));
+            match exports.iter_mut().find(|(k, _)| *k == key) {
+                Some(slot) => slot.1 = targets,
+                None => exports.push((key, targets)),
+            }
+        }
+        out.exports = Some(exports);
+    }
+    let main = dedupe(MAIN_FIELDS.iter().filter_map(|field| pkg.get(*field)?.as_str()).filter_map(in_package));
+    if !main.is_empty() {
+        out.main = Some(main);
+    }
+    (out.exports.is_some() || out.main.is_some()).then_some(out)
+}
+
+/// A package-relative target (`./src/index.ts`) → project-relative posix, or `None` if it leaves
+/// the package.
+fn package_target(project_root: &str, dir_rel: &str, target: &str) -> Option<String> {
+    let trimmed = js_trim(target);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let package_dir = nodepath::resolve(&[project_root, dir_rel]);
+    let abs = nodepath::resolve(&[&package_dir, trimmed]);
+    let inside = nodepath::relative(&package_dir, &abs);
+    if inside.starts_with("..") || nodepath::is_absolute(&inside) {
+        return None;
+    }
+    Some(nodepath::relative(project_root, &abs).replace('\\', "/"))
 }
 
 fn read_ohpm_main(project_root: &str, dir_rel: &str) -> Option<String> {
     let parsed = parse_jsonc(&read_text(&nodepath::join(&[project_root, dir_rel, OHPM_MANIFEST]))?)?;
     let main = parsed.get("main")?.as_str()?;
-    let main = codegraph_types::jscompat::js_trim(main);
+    let main = js_trim(main);
     if main.is_empty() {
         return None;
     }
@@ -100,16 +247,28 @@ fn read_ohpm_main(project_root: &str, dir_rel: &str) -> Option<String> {
 }
 
 const OHPM_MANIFEST: &str = "oh-package.json5";
+const NPM_MANIFEST: &str = "package.json";
 const OHPM_WALK_MAX_DEPTH: usize = 6;
 const OHPM_WALK_DIR_BUDGET: usize = 8000;
 const OHPM_SKIP_DIRS: [&str; 9] = ["node_modules", "oh_modules", ".git", ".codegraph", ".hvigor", ".preview", "build", "dist", "out"];
 
-/// Scan for `oh-package.json5` manifests and collect their `file:` dependencies, in the
-/// order the JavaScript `Map` would iterate them. A name declared with different target
-/// directories in different manifests is ambiguous and dropped.
-fn collect_ohpm_file_deps(project_root: &str) -> Vec<(String, String)> {
-    let mut by_name: Vec<(String, String)> = Vec::new();
+/// The path dependencies the project's manifests declare.
+struct PathDeps {
+    /// ohpm `file:` dependencies, in the order a JavaScript `Map` would iterate them.
+    ohpm: Vec<(String, String)>,
+    /// package.json `file:`/`link:`/`portal:` dependencies by the declaring manifest's directory
+    /// (`""` for the root).
+    npm: HashMap<String, Vec<(String, String)>>,
+}
+
+/// Scan for `oh-package.json5` manifests and collect their `file:` dependencies; a name
+/// declared with different target directories in different manifests is ambiguous and dropped.
+/// The same walk reads every package.json's path dependencies (#2456): only a directory of the
+/// project counts, other than the root and nothing under `node_modules`.
+fn collect_path_deps(project_root: &str) -> PathDeps {
+    let mut ohpm: Vec<(String, String)> = Vec::new();
     let mut ambiguous: HashSet<String> = HashSet::new();
+    let mut npm: HashMap<String, Vec<(String, String)>> = HashMap::new();
 
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
     queue.push_back((String::new(), 0));
@@ -134,6 +293,27 @@ fn collect_ohpm_file_deps(project_root: &str) -> Vec<(String, String)> {
                 queue.push_back((if rel.is_empty() { name } else { format!("{rel}/{name}") }, depth + 1));
                 continue;
             }
+            if name == NPM_MANIFEST {
+                let mut deps: Vec<(String, String)> = Vec::new();
+                for (dep, target) in read_npm_path_deps(&nodepath::join(&[&abs, &name])) {
+                    let target_abs = nodepath::resolve(&[&abs, &target]);
+                    let target_rel = nodepath::relative(project_root, &target_abs).replace('\\', "/");
+                    if target_rel.is_empty() || target_rel.starts_with("..") || nodepath::is_absolute(&target_rel) {
+                        continue;
+                    }
+                    if re!(r"(?:^|/)node_modules(?:/|$)").is_match(&target_rel) || !std::fs::metadata(&target_abs).is_ok_and(|m| m.is_dir()) {
+                        continue;
+                    }
+                    match deps.iter_mut().find(|(n, _)| *n == dep) {
+                        Some(slot) => slot.1 = target_rel,
+                        None => deps.push((dep, target_rel)),
+                    }
+                }
+                if !deps.is_empty() {
+                    npm.insert(rel.clone(), deps);
+                }
+                continue;
+            }
             if name != OHPM_MANIFEST {
                 continue;
             }
@@ -143,15 +323,15 @@ fn collect_ohpm_file_deps(project_root: &str) -> Vec<(String, String)> {
                 if target_rel.starts_with("..") {
                     continue;
                 }
-                match by_name.iter().position(|(n, _)| *n == dep) {
+                match ohpm.iter().position(|(n, _)| *n == dep) {
                     None => {
                         if !ambiguous.contains(&dep) {
-                            by_name.push((dep, target_rel));
+                            ohpm.push((dep, target_rel));
                         }
                     }
                     Some(i) => {
-                        if by_name[i].1 != target_rel {
-                            by_name.remove(i);
+                        if ohpm[i].1 != target_rel {
+                            ohpm.remove(i);
                             ambiguous.insert(dep);
                         }
                     }
@@ -159,7 +339,27 @@ fn collect_ohpm_file_deps(project_root: &str) -> Vec<(String, String)> {
             }
         }
     }
-    by_name
+    PathDeps { ohpm, npm }
+}
+
+/// A package.json's dependencies on a path (`file:`, `link:`, `portal:`), from every dependency
+/// field → (name, target).
+fn read_npm_path_deps(manifest_abs: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(pkg) = read_text(manifest_abs).and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return out };
+    let Some(pkg) = pkg.as_object() else { return out };
+    for field in ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
+        let Some(Value::Object(deps)) = pkg.get(field) else { continue };
+        for (name, value) in deps {
+            let Some(v) = value.as_str() else { continue };
+            let Some(m) = re!(r"^(?:file|link|portal):(.+)$").captures(js_trim(v)) else { continue };
+            let target = js_trim(m.text(1).unwrap());
+            if !target.is_empty() {
+                out.push((name.clone(), target.to_string()));
+            }
+        }
+    }
+    out
 }
 
 fn read_ohpm_file_deps(manifest_abs: &str) -> Vec<(String, String)> {
@@ -169,7 +369,7 @@ fn read_ohpm_file_deps(manifest_abs: &str) -> Vec<(String, String)> {
     for (name, value) in deps {
         let Some(v) = value.as_str() else { continue };
         let Some(rest) = v.strip_prefix("file:") else { continue };
-        let target = codegraph_types::jscompat::js_trim(rest);
+        let target = js_trim(rest);
         if !target.is_empty() {
             out.push((name.clone(), target.to_string()));
         }
@@ -177,27 +377,165 @@ fn read_ohpm_file_deps(manifest_abs: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Rewrite a bare workspace import to a project-relative path WITHOUT an extension.
-/// `None` when no member package name matches.
-pub fn resolve_workspace_import(import_path: &str, ws: &WorkspacePackages) -> Option<String> {
-    // Longest matching package name wins (first on a tie, in Map order).
-    let mut best: Option<&String> = None;
-    for name in &ws.names_in_order {
-        if import_path == name || (import_path.starts_with(name.as_str()) && import_path[name.len()..].starts_with('/')) {
-            if best.is_none_or(|b| codegraph_jsre::utf16_len(name) > codegraph_jsre::utf16_len(b)) {
-                best = Some(name);
-            }
-        }
-    }
-    let best = best?;
-    let dir = &ws.by_name[best];
-    let subpath = &import_path[best.len()..];
+/// Rewrite a bare workspace import to a project-relative path WITHOUT an extension; `from_file`
+/// sees the path dependencies the manifests above it declare. `None` when no package matches.
+pub fn resolve_workspace_import(import_path: &str, ws: &WorkspacePackages, from_file: Option<&str>) -> Option<String> {
+    let (name, dir) = match_package(import_path, ws, from_file)?;
+    let subpath = &import_path[name.len()..];
     if subpath.is_empty() {
-        if let Some(entry) = ws.entry_by_name.get(best) {
+        if let Some(entry) = ws.entry_by_name.get(name) {
             return Some(entry.clone());
         }
     }
     Some(re!(r"/{2,}", "g").replace_all_str(&format!("{dir}{subpath}"), "/"))
+}
+
+/// Where an import of a package of the project lands: what its manifest declares for the
+/// import, and the directory form. `None` when no package name matches.
+pub fn workspace_import_targets(import_path: &str, ws: &WorkspacePackages, from_file: Option<&str>) -> Option<WorkspaceImportTargets> {
+    let (name, dir) = match_package(import_path, ws, from_file)?;
+    let subpath = &import_path[name.len()..];
+    let directory = re!(r"/{2,}", "g").replace_all_str(&format!("{dir}{subpath}"), "/");
+    let ohpm = if subpath.is_empty() { ws.entry_by_name.get(name) } else { None };
+    let declared = match ohpm {
+        Some(entry) => vec![entry.clone()],
+        None => declared_entries(ws.entries_by_dir.get(dir), subpath),
+    };
+    Some(WorkspaceImportTargets { declared, directory, package_dir: dir.to_string() })
+}
+
+/// The package an import names: a path dependency of the nearest manifest above `from_file`
+/// that declares a matching name, else a workspace member or a root path dependency. The
+/// longest name wins (first on a tie, in declaration order).
+fn match_package<'a>(import_path: &str, ws: &'a WorkspacePackages, from_file: Option<&str>) -> Option<(&'a str, &'a str)> {
+    if let Some(hit) = scoped_package(import_path, ws, from_file) {
+        return Some(hit);
+    }
+    let name = longest_name(import_path, ws.names_in_order.iter().map(String::as_str))?;
+    Some((name, ws.by_name[name].as_str()))
+}
+
+fn scoped_package<'a>(import_path: &str, ws: &'a WorkspacePackages, from_file: Option<&str>) -> Option<(&'a str, &'a str)> {
+    let from_file = from_file?;
+    if ws.scoped_by_name.is_empty() {
+        return None;
+    }
+    let mut dir = from_file.replace('\\', "/");
+    while !dir.is_empty() {
+        dir = match dir.rfind('/') {
+            Some(slash) => dir[..slash].to_string(),
+            None => String::new(),
+        };
+        let Some(names) = ws.scoped_by_name.get(&dir) else { continue };
+        if let Some(name) = longest_name(import_path, names.iter().map(|(n, _)| n.as_str())) {
+            let dir = names.iter().find(|(n, _)| n == name).map(|(_, d)| d.as_str())?;
+            return Some((name, dir));
+        }
+    }
+    None
+}
+
+fn longest_name<'a>(import_path: &str, names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut best: Option<&'a str> = None;
+    for name in names {
+        let matches = import_path == name || (import_path.starts_with(name) && import_path[name.len()..].starts_with('/'));
+        if matches && best.is_none_or(|b| codegraph_jsre::utf16_len(name) > codegraph_jsre::utf16_len(b)) {
+            best = Some(name);
+        }
+    }
+    best
+}
+
+/// The targets a package's manifest declares for `subpath` (`""` or `/widgets`), best first.
+fn declared_entries(entries: Option<&PackageEntries>, subpath: &str) -> Vec<String> {
+    let Some(entries) = entries else { return Vec::new() };
+    let exported = entries.exports.as_ref().map(|e| exported_targets(e, &format!(".{subpath}"))).unwrap_or_default();
+    if !subpath.is_empty() {
+        return exported;
+    }
+    dedupe(exported.into_iter().chain(entries.main.iter().flatten().cloned()))
+}
+
+/// `exports`' targets for `key`: the exact key's, else the `*` pattern's with the longest prefix,
+/// its `*`s filled in.
+fn exported_targets(exports: &[(String, Vec<String>)], key: &str) -> Vec<String> {
+    if let Some((_, exact)) = exports.iter().find(|(k, _)| k == key) {
+        return exact.clone();
+    }
+    let mut best: Option<(&str, &str, &Vec<String>)> = None;
+    for (pattern, targets) in exports {
+        let Some(star) = pattern.find('*') else { continue };
+        if pattern[star + 1..].contains('*') {
+            continue;
+        }
+        let prefix = &pattern[..star];
+        let suffix = &pattern[star + 1..];
+        if key.len() < prefix.len() + suffix.len() || !key.starts_with(prefix) || !key.ends_with(suffix) {
+            continue;
+        }
+        if best.is_some_and(|(p, _, _)| utf16(prefix) <= utf16(p)) {
+            continue;
+        }
+        best = Some((prefix, &key[prefix.len()..key.len() - suffix.len()], targets));
+    }
+    match best {
+        Some((_, matched, targets)) => targets.iter().map(|t| t.replace('*', matched)).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn utf16(s: &str) -> usize {
+    codegraph_jsre::utf16_len(s)
+}
+
+/// The workspace map as a stable digest: every name, scope, directory and declared entry an
+/// import can be resolved by (workspaceFingerprint). Sync compares it with the one the index was
+/// built with to see a package.json edit (#2456, #2502).
+pub fn workspace_fingerprint(ws: Option<&WorkspacePackages>) -> String {
+    let Some(ws) = ws else { return "none".to_string() };
+    fn js_sorted<V: Clone>(items: impl Iterator<Item = (String, V)>) -> Vec<(String, V)> {
+        let mut v: Vec<(String, V)> = items.collect();
+        v.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
+        v
+    }
+    let pairs = |v: Vec<(String, String)>| v.into_iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>();
+    let by_name = js_sorted(ws.by_name.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let entry_by_name = js_sorted(ws.entry_by_name.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let scoped: Vec<Value> = js_sorted(ws.scoped_by_name.iter().map(|(k, v)| (k.clone(), v.clone())))
+        .into_iter()
+        .map(|(dir, names)| {
+            // A JavaScript Map holds one value per name; the last declaration of a name is kept.
+            json!([dir, pairs(js_sorted(names.into_iter()))])
+        })
+        .collect();
+    let entries: Vec<Value> = js_sorted(ws.entries_by_dir.iter().map(|(k, v)| (k.clone(), v.clone())))
+        .into_iter()
+        .map(|(dir, e)| {
+            let exports: Vec<Value> = js_sorted(e.exports.unwrap_or_default().into_iter()).into_iter().map(|(k, t)| json!([k, t])).collect();
+            json!([dir, exports, e.main.unwrap_or_default()])
+        })
+        .collect();
+    let mut canonical = serde_json::Map::new();
+    canonical.insert("byName".into(), Value::Array(pairs(by_name)));
+    canonical.insert("entryByName".into(), Value::Array(pairs(entry_by_name)));
+    canonical.insert("scoped".into(), Value::Array(scoped));
+    canonical.insert("entries".into(), Value::Array(entries));
+    let text = serde_json::to_string(&Value::Object(canonical)).unwrap_or_default();
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The folder of the package `file` is in — a workspace member, or a path dependency's target —
+/// the outermost when packages nest, or `None` (workspacePackageDirOf).
+pub fn workspace_package_dir_of(ws: &WorkspacePackages, file: &str) -> Option<String> {
+    let mut dirs: Vec<&String> = ws.by_name.values().collect();
+    for names in ws.scoped_by_name.values() {
+        dirs.extend(names.iter().map(|(_, d)| d));
+    }
+    let mut seen = HashSet::new();
+    let mut dirs: Vec<&String> = dirs.into_iter().filter(|d| !d.is_empty() && seen.insert(*d)).collect();
+    // A stable sort by length: of two nested folders the outer one is found first.
+    dirs.sort_by_key(|d| utf16(d));
+    dirs.into_iter().find(|dir| file.starts_with(dir.as_str()) && file[dir.len()..].starts_with('/')).cloned()
 }
 
 /// Workspace glob patterns from package.json + pnpm-workspace.yaml.
@@ -413,8 +751,8 @@ mod tests {
         let mut ws = WorkspacePackages::default();
         ws.insert("@s/ui".into(), "packages/ui".into());
         ws.insert("@s/ui/core".into(), "packages/core".into());
-        assert_eq!(resolve_workspace_import("@s/ui/core/x", &ws).as_deref(), Some("packages/core/x"));
-        assert_eq!(resolve_workspace_import("@s/ui/widgets", &ws).as_deref(), Some("packages/ui/widgets"));
-        assert_eq!(resolve_workspace_import("@s/uix", &ws), None);
+        assert_eq!(resolve_workspace_import("@s/ui/core/x", &ws, None).as_deref(), Some("packages/core/x"));
+        assert_eq!(resolve_workspace_import("@s/ui/widgets", &ws, None).as_deref(), Some("packages/ui/widgets"));
+        assert_eq!(resolve_workspace_import("@s/uix", &ws, None), None);
     }
 }

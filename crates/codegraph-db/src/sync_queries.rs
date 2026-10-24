@@ -939,6 +939,23 @@ impl Store {
         Ok(out)
     }
 
+    /// The module edges (`imports` edges into a file node) into any file under the folder `dir`
+    /// (project-relative, no trailing slash): where an import of a package by its name can land.
+    pub fn get_module_imports_under(&self, dir: &str) -> Result<Vec<ResolutionEdge>> {
+        // `dir/` up to `dir0` ('0' is the byte after '/').
+        self.query_resolution_edges(
+            &format!(
+                "SELECT {RES_EDGE_COLS}, tgt.file_path
+           FROM nodes tgt
+           JOIN edges e ON e.target = tgt.id AND e.kind = 'imports'
+           JOIN nodes src ON src.id = e.source
+          WHERE tgt.kind = 'file' AND tgt.file_path >= ? AND tgt.file_path < ?"
+            ),
+            vec![text(&format!("{dir}/")), text(&format!("{dir}0"))],
+            Some(10),
+        )
+    }
+
     /// The module edges (`imports` edges into a file node) into the files an import of `dir/name`
     /// can find instead of a file added there.
     pub fn get_module_imports_named(&self, dir: &str, name: &str) -> Result<Vec<ResolutionEdge>> {

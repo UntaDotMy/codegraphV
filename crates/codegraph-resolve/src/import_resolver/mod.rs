@@ -18,7 +18,7 @@ pub use via_import::*;
 use crate::ctx::Ctx;
 use crate::path_aliases::{alias_and_base_url_candidates, apply_aliases};
 use crate::types::UnresolvedRef;
-use crate::workspace_packages::resolve_workspace_import;
+use crate::workspace_packages::{resolve_workspace_import, workspace_import_targets, WorkspaceImportTargets};
 use codegraph_jsre::re;
 use codegraph_types::{nodepath, EdgeKind, Language, NodeKind};
 use std::cell::RefCell;
@@ -158,7 +158,7 @@ fn resolve_import_path_uncached(import_path: &str, from_file: &str, language: La
     // Skip external/npm packages — but pass the context so the bare-specifier heuristic can
     // consult the project's tsconfig alias map first. What still looks like a package may name a
     // file through the importing app's own config.
-    if is_external_import(import_path, language, ctx, ExternalOpts::default()) {
+    if is_external_import(import_path, language, ctx, ExternalOpts { from_file: Some(from_file), ..ExternalOpts::default() }) {
         return resolve_from_own_config(import_path, from_file, language, ctx);
     }
 
@@ -258,13 +258,17 @@ fn dir_part(p: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ExternalOpts {
+pub struct ExternalOpts<'a> {
     pub alias_prefixes: bool,
+    /// The importing file: a package another package depends on by path
+    /// (`"acme-shared": "file:../common"`) is the project's for the files under the manifest that
+    /// declares it (#2456).
+    pub from_file: Option<&'a str>,
 }
 
-impl Default for ExternalOpts {
+impl Default for ExternalOpts<'_> {
     fn default() -> Self {
-        ExternalOpts { alias_prefixes: true }
+        ExternalOpts { alias_prefixes: true, from_file: None }
     }
 }
 
@@ -322,7 +326,7 @@ pub fn is_external_import(import_path: &str, language: Language, ctx: &Ctx, opti
     // Workspace-member imports (`@scope/ui`, `@scope/ui/widgets`) are LOCAL to a monorepo even
     // though they look like bare npm specifiers (#629).
     if let Some(workspaces) = ctx.get_workspace_packages() {
-        if resolve_workspace_import(import_path, &workspaces).is_some() {
+        if resolve_workspace_import(import_path, &workspaces, options.from_file).is_some() {
             return false;
         }
     }
@@ -420,6 +424,11 @@ fn resolve_relative_import(import_path: &str, from_dir: &str, language: Language
 /// in the specifier (`import x from './util.js'` for `util.ts`, `.mjs` for `.mts`, `.cjs` for
 /// `.cts`), and the source file with that exact name never exists in the repo.
 fn find_source_for_emitted_specifier(relative_path: &str, language: Language, ctx: &Ctx) -> Option<String> {
+    find_source_for_emitted_specifier_in(relative_path, language, &|file| ctx.file_exists(file))
+}
+
+/// `find_source_for_emitted_specifier` with its own idea of which files exist.
+fn find_source_for_emitted_specifier_in(relative_path: &str, language: Language, exists: &dyn Fn(&str) -> bool) -> Option<String> {
     if !matches!(
         language,
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx | Language::Vue | Language::Svelte | Language::Astro | Language::ArkTs
@@ -436,7 +445,7 @@ fn find_source_for_emitted_specifier(relative_path: &str, language: Language, ct
         let Some(stem) = relative_path.strip_suffix(emitted) else { continue };
         for ext in sources {
             let candidate = format!("{stem}{ext}");
-            if ctx.file_exists(&candidate) {
+            if exists(&candidate) {
                 return Some(candidate);
             }
         }
@@ -480,12 +489,27 @@ fn resolve_aliased_import(import_path: &str, project_root: &str, language: Langu
         }
     }
 
-    // 1.5 Workspace packages (`@scope/ui/widgets` → `packages/ui/widgets`).
-    if let Some(workspaces) = ctx.get_workspace_packages() {
-        if let Some(base) = resolve_workspace_import(import_path, &workspaces) {
-            if let Some(hit) = try_with_ext(&base) {
-                return Some(hit);
+    // 1.5 Workspace packages and path dependencies: the entry the package's manifest declares
+    //     for the import (#2502), else the member's directory (`@scope/ui/widgets` →
+    //     `packages/ui/widgets`), where the extension/index permutations find its barrel (#629).
+    //     A path into the package's build output the index lacks (`@acme/utils/lib/path`) is read
+    //     as the source it is built from, before a file only a local build left on disk.
+    let targets = ctx.get_workspace_packages().and_then(|ws| workspace_import_targets(import_path, &ws, from_file));
+    if let Some(targets) = targets {
+        if let Some(declared) = declared_workspace_entry(&targets, language, ctx) {
+            return Some(declared);
+        }
+        let direct = try_with_ext(&targets.directory);
+        if let Some(d) = &direct {
+            if ctx.is_indexed_file(d) {
+                return direct;
             }
+        }
+        if let Some(built) = built_source_of(&targets.directory, &targets.package_dir, language, ctx) {
+            return Some(built);
+        }
+        if direct.is_some() {
+            return direct;
         }
     }
 
@@ -511,15 +535,84 @@ fn resolve_aliased_import(import_path: &str, project_root: &str, language: Langu
 /// emitted `.js`.
 fn try_with_extensions(base_path: &str, language: Language, ctx: &Ctx) -> Option<String> {
     for ext in extensions_for(language) {
-        let candidate = format!("{base_path}{ext}");
+        let candidate = indexed_spelling(&format!("{base_path}{ext}"), language);
         if ctx.file_exists(&candidate) {
             return Some(candidate);
         }
     }
-    if ctx.file_exists(base_path) {
-        return Some(base_path.to_string());
+    let as_is = indexed_spelling(base_path, language);
+    if ctx.file_exists(&as_is) {
+        return Some(as_is);
     }
-    find_source_for_emitted_specifier(base_path, language, ctx)
+    find_source_for_emitted_specifier(&as_is, language, ctx)
+}
+
+/// The file a package's declared entry for an import lands on (#2502): the first declared
+/// target, in order, that the index holds, or that is build output the index lacks, read as the
+/// source it is built from. `None` when none holds.
+fn declared_workspace_entry(targets: &WorkspaceImportTargets, language: Language, ctx: &Ctx) -> Option<String> {
+    targets
+        .declared
+        .iter()
+        .find_map(|target| indexed_target(target, language, ctx).or_else(|| built_source_of(target, &targets.package_dir, language, ctx)))
+}
+
+/// `target`, build output the index lacks, as the indexed source it is built from.
+fn built_source_of(target: &str, package_dir: &str, language: Language, ctx: &Ctx) -> Option<String> {
+    built_sources_of(target, package_dir).iter().find_map(|source| indexed_target(source, language, ctx))
+}
+
+/// `target` as a file the index holds: as written, with the language's extensions or index
+/// files, or as the source of an emitted `.js`. Only the index counts: build output a developer
+/// has built locally is on disk, but nothing links to it.
+fn indexed_target(target: &str, language: Language, ctx: &Ctx) -> Option<String> {
+    let indexed = |file: &str| ctx.is_indexed_file(file);
+    let as_is = indexed_spelling(target, language);
+    if indexed(&as_is) {
+        return Some(as_is);
+    }
+    for ext in extensions_for(language) {
+        let candidate = indexed_spelling(&format!("{target}{ext}"), language);
+        if indexed(&candidate) {
+            return Some(candidate);
+        }
+    }
+    find_source_for_emitted_specifier_in(&as_is, language, &indexed)
+}
+
+/// The source files a package's build output may be built from, extension-less, most literal
+/// first: the build folder mirrored under `src/`, then without a format subfolder. Empty for a
+/// target outside a build folder.
+fn built_sources_of(target: &str, package_dir: &str) -> Vec<String> {
+    let prefix = if package_dir.is_empty() { String::new() } else { format!("{package_dir}/") };
+    let Some(in_package) = target.strip_prefix(prefix.as_str()) else { return Vec::new() };
+    let Some(root) = re!(r"^(?:dist|build|lib|out|output|es|esm|cjs|umd)/").find(in_package) else { return Vec::new() };
+    let mirrored = &in_package[root.end()..];
+    let mut rests = vec![mirrored];
+    if let Some(format) = re!(r"^(?:esm|cjs|es|mjs|module|modules|commonjs|types|typings|umd|node|browser|src)/").find(mirrored) {
+        rests.push(&mirrored[format.end()..]);
+    }
+    let mut seen = std::collections::HashSet::new();
+    rests
+        .into_iter()
+        .map(|rest| re!(r"(?:\.d)?\.(?:[cm]?[jt]s|[jt]sx)$").replace_first(rest, |_| String::new()))
+        .filter(|stem| !stem.is_empty() && !stem.starts_with("src/"))
+        .filter(|stem| seen.insert(stem.clone()))
+        .map(|stem| format!("{prefix}src/{stem}"))
+        .collect()
+}
+
+/// A path as the index keys its files (indexedSpelling, #2577). The alias, workspace and
+/// direct-path branches join a specifier as written, so `@/widgets/Chart/` made
+/// `src/widgets/Chart//index.tsx`; an ES module specifier is read lexically, so `.` and empty
+/// segments drop out and `..` folds. A trailing slash still names a folder. Other languages keep
+/// the path as found (a C include's `a/../b.h` follows the folder on disk).
+fn indexed_spelling(file_path: &str, language: Language) -> String {
+    if is_esm_import_language(language) && re!(r"//|(?:^|/)\.\.?(?:/|$)").is_match(file_path) {
+        nodepath::posix::normalize(file_path)
+    } else {
+        file_path.to_string()
+    }
 }
 
 /// A bare specifier `is_external_import` takes for a package, resolved through the importing app's

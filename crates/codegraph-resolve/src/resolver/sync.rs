@@ -14,6 +14,7 @@ use crate::module_importers::MovedDefault;
 use crate::name_matcher::python_attr_ref_resolves;
 use crate::resurrect_ref::resurrect_ref_from_dropped_edge;
 use crate::types::UnresolvedRef;
+use crate::workspace_packages::{load_workspace_packages, workspace_fingerprint, workspace_package_dir_of};
 use codegraph_db::sync_queries::ResolutionEdge;
 use codegraph_db::Result as DbResult;
 use codegraph_jsre::re;
@@ -223,6 +224,32 @@ impl ReferenceResolver {
     /// a sync after an edit sees the edit. Empty for a project with no Python.
     pub fn get_python_root_fingerprint(&self) -> String {
         python_root_fingerprint(&self.disk_ctx())
+    }
+
+    /// The workspace packages and path dependencies as package.json files declare them now,
+    /// read again from disk, and their fingerprint (refreshWorkspacePackages). When the map
+    /// moved, the resolver takes the new one and drops every memo resolved through the old one;
+    /// the caller re-opens what was linked by it.
+    pub fn refresh_workspace_packages(&self) -> String {
+        let fresh = load_workspace_packages(self.ctx.project_root()).map(Rc::new);
+        let fingerprint = workspace_fingerprint(fresh.as_deref());
+        let current = self.ctx.workspace_packages_if_loaded();
+        if current.as_ref().is_none_or(|c| workspace_fingerprint(c.as_deref()) != fingerprint) {
+            self.ctx.set_workspace_packages(Some(fresh));
+            self.clear_caches();
+        }
+        fingerprint
+    }
+
+    /// The fingerprint of the workspace map this resolver resolves by.
+    pub fn get_workspace_fingerprint(&self) -> String {
+        workspace_fingerprint(self.ctx.get_workspace_packages().as_deref())
+    }
+
+    /// The folder of the workspace package or path dependency `file` is in, or `None`.
+    pub fn workspace_package_dir_of(&self, file: &str) -> Option<String> {
+        let ws = self.ctx.get_workspace_packages()?;
+        workspace_package_dir_of(&ws, file)
     }
 
     /// What a sync must re-open after these Python files were added or removed (see

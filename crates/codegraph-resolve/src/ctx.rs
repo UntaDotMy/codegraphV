@@ -836,7 +836,7 @@ impl Ctx {
     /// repository: a package that is not a relative path, a tsconfig alias, a workspace member
     /// or the repository's own package name, and that resolves to no project file.
     pub fn is_out_of_repo_import(&self, source: &str, from_file: &str, language: Language) -> bool {
-        if !is_external_import(source, language, self, ExternalOpts { alias_prefixes: false }) {
+        if !is_external_import(source, language, self, ExternalOpts { alias_prefixes: false, from_file: Some(from_file) }) {
             return false;
         }
         let resolved = resolve_import_path(source, from_file, language, self);
@@ -901,6 +901,17 @@ impl Ctx {
         let loaded = load_workspace_packages(&self.project_root).map(Rc::new);
         *self.workspace_packages.borrow_mut() = Some(loaded.clone());
         loaded
+    }
+
+    /// The workspace map, when one was read: `Some(None)` for a project with none.
+    pub fn workspace_packages_if_loaded(&self) -> Option<Option<Rc<WorkspacePackages>>> {
+        self.workspace_packages.borrow().clone()
+    }
+
+    /// Replace the workspace map this context resolves by: `None` reads the manifests again on
+    /// the next lookup, `Some(map)` installs a map read elsewhere (a sync's refresh).
+    pub fn set_workspace_packages(&self, packages: Option<Option<Rc<WorkspacePackages>>>) {
+        *self.workspace_packages.borrow_mut() = packages;
     }
 
     /// C/C++ include search directories (relative to the project root).

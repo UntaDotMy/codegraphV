@@ -45,6 +45,12 @@ pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `project_metadata` key for the Python package-root digest (see `sync`).
 const PYTHON_ROOTS_METADATA_KEY: &str = "python_root_fingerprint";
+/// Metadata key: the digest of the workspace packages and path dependencies the index was
+/// resolved by (see `sync`).
+const WORKSPACE_METADATA_KEY: &str = "js_workspace_fingerprint";
+/// The ES module family whose references a moved workspace map re-opens (ESM_IMPORT_LANGUAGES).
+const ESM_IMPORT_LANGUAGES: [Language; 8] =
+    [Language::TypeScript, Language::Tsx, Language::JavaScript, Language::Jsx, Language::ArkTs, Language::Svelte, Language::Vue, Language::Astro];
 
 /// How long a recreated, not-yet-indexed database is treated as a rebuild in progress.
 const RECREATE_GRACE_MS: u128 = 120_000;
@@ -529,6 +535,7 @@ impl CodeGraph {
 
         if result.success {
             self.stamp_python_root_fingerprint(None);
+            self.stamp_workspace_fingerprint(None);
         }
         if result.success && result.files_indexed > 0 {
             let _ = self.store.set_metadata("indexed_with_version", PACKAGE_VERSION);
@@ -598,6 +605,12 @@ impl CodeGraph {
     fn stamp_python_root_fingerprint(&self, fingerprint: Option<String>) {
         let fingerprint = fingerprint.unwrap_or_else(|| self.resolver().get_python_root_fingerprint());
         let _ = self.store.set_metadata(PYTHON_ROOTS_METADATA_KEY, &fingerprint);
+    }
+
+    /// Record the workspace-package digest a later sync compares against.
+    fn stamp_workspace_fingerprint(&self, fingerprint: Option<String>) {
+        let fingerprint = fingerprint.unwrap_or_else(|| self.resolver().get_workspace_fingerprint());
+        let _ = self.store.set_metadata(WORKSPACE_METADATA_KEY, &fingerprint);
     }
 
     /// Resolve every pending reference in batches (memory-bounded), then synthesize.
@@ -768,6 +781,32 @@ impl CodeGraph {
             }
             if timings() {
                 eprintln!("[phase-timing] sync-navigation-retry: {}ms ({} routes changed, {} refs re-opened)", t.elapsed().as_millis(), routes.len(), reopened);
+            }
+        }
+
+        // Workspace packages and path dependencies (#2456, #2502). A package.json edit moves what
+        // an import of the package resolves to in files it never touched. A full reconcile reads
+        // the manifests again; when what they declare moved, every JavaScript-family reference is
+        // re-opened and the orphan sweep resolves them by the new map, as a fresh index would. The
+        // watcher's scoped syncs skip the read. An index stamped by an older engine has no
+        // digest: record one.
+        if full_reconcile {
+            let t = Instant::now();
+            let before = store.get_metadata(WORKSPACE_METADATA_KEY)?;
+            let now = self.resolver().refresh_workspace_packages();
+            if before.as_deref().is_some_and(|b| b != now) {
+                let mut reopened = 0;
+                for language in ESM_IMPORT_LANGUAGES {
+                    reopened += self.orchestrator.resurrect_resolution_edges_for_language(language)?;
+                }
+                refresh_synthesis = true;
+                store.set_metadata("synthesis_pending", "1")?;
+                if timings() {
+                    eprintln!("[phase-timing] sync-workspace-packages: {}ms ({} refs re-opened)", t.elapsed().as_millis(), reopened);
+                }
+            }
+            if before.as_deref() != Some(now.as_str()) {
+                self.stamp_workspace_fingerprint(Some(now));
             }
         }
 
@@ -1048,7 +1087,9 @@ impl CodeGraph {
         }
         if !added.is_empty() {
             let t = Instant::now();
-            let reopened = reopen_references_through_added_files(store, &reader, &added, edges_before_resolution, Some(&module_resolver))?;
+            let package_dir_of = |file: &str| self.resolver().workspace_package_dir_of(file);
+            let reopened =
+                reopen_references_through_added_files(store, &reader, &added, edges_before_resolution, Some(&module_resolver), Some(&package_dir_of))?;
             if timings() {
                 eprintln!("[phase-timing] sync-added-module-importers: {}ms ({} refs re-opened)", t.elapsed().as_millis(), reopened);
             }

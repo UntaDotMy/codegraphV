@@ -314,6 +314,9 @@ impl ReferenceResolver {
 
     /// Detect the frameworks the project uses (call once after the index is populated).
     pub fn initialize(&self) {
+        // A full index resolves by the package.json files on disk now, as the fingerprint it
+        // stamps says, even in a process that read them earlier.
+        self.ctx.set_workspace_packages(None);
         *self.frameworks.borrow_mut() = detect_frameworks(&self.ctx);
         self.frameworks_by_language.borrow_mut().clear();
         self.clear_caches();

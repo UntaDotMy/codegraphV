@@ -609,7 +609,7 @@ pub fn explore(
     };
     // Files in order of importance; each with the symbols to list and the ranges to show.
     let mut relevant = IndexMap::<String, (Vec<Node>, Vec<Focus>)>::new();
-    let mut add = |relevant: &mut IndexMap<String, (Vec<Node>, Vec<Focus>)>, n: &Node, focus: bool| {
+    let add = |relevant: &mut IndexMap<String, (Vec<Node>, Vec<Focus>)>, n: &Node, focus: bool| {
         let (list, ranges) = relevant.entry(n.file_path.clone()).or_default();
         if !list.iter().any(|v| v.id == n.id) {
             list.push(n.clone());

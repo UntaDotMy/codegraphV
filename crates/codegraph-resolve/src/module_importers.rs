@@ -111,6 +111,10 @@ type Bindings = IndexMap<String, Binding>;
 /// names, or `None`.
 pub type ModuleResolver<'a> = &'a dyn Fn(&str, &str, Language) -> Option<String>;
 
+/// The folder of the project's own package (a workspace member, a path dependency) a file is
+/// in, or `None`.
+pub type PackageDirOf<'a> = &'a dyn Fn(&str) -> Option<String>;
+
 /// A file the sync adds or removes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
@@ -221,17 +225,19 @@ pub fn reopen_references_through_removed_files(store: &Store, reader: &ImportRea
 /// there) and the references that failed, the import of the module itself among them. (The
 /// failed-import retry looks those up by the module's name, and skips a name as common as
 /// `models` or `test`.) With `resolve_module`, also an import that resolved to a file beside an
-/// added one that now outranks it (`./button` to `button.vue` while `button.ts` was missing), and
-/// what that statement binds. Returns the number re-opened.
+/// added one that now outranks it (`./button` to `button.vue` while `button.ts` was missing), or,
+/// with `package_dir_of`, to another file of the package an added file is in, and what that
+/// statement binds. Returns the number re-opened.
 pub fn reopen_references_through_added_files(
     store: &Store,
     reader: &ImportReader,
     added: &[ChangedFile],
     resolved_up_to_edge_id: i64,
     resolve_module: Option<ModuleResolver>,
+    package_dir_of: Option<PackageDirOf>,
 ) -> DbResult<usize> {
     let outranked = match resolve_module {
-        Some(resolve) => outranked_imports(store, added, resolve)?,
+        Some(resolve) => outranked_imports(store, added, resolve, package_dir_of)?,
         None => Vec::new(),
     };
     let bindings = bindings_of(&importers_of(store, added, reader, &outranked, None)?, reader);
@@ -548,14 +554,38 @@ struct OutrankedImport {
 /// The module edges an import resolved into a file beside one of `added` — another extension of
 /// its name, or its folder's own entry — when the import's specifier now names the added file:
 /// `./button` resolved to `button.vue` while `button.ts` was missing, and `button.ts` comes first.
-fn outranked_imports(store: &Store, added: &[ChangedFile], resolve_module: ModuleResolver) -> DbResult<Vec<OutrankedImport>> {
+/// With `package_dir_of`, also the imports of a package by its name into any file of the package
+/// an added file is in: the entry its manifest declares outranks the file an import fell back to
+/// while it was missing, such as the folder's own index (#2502).
+fn outranked_imports(
+    store: &Store,
+    added: &[ChangedFile],
+    resolve_module: ModuleResolver,
+    package_dir_of: Option<PackageDirOf>,
+) -> DbResult<Vec<OutrankedImport>> {
     let mut out = Vec::new();
+    let mut package_imports: HashMap<String, Vec<ResolutionEdge>> = HashMap::new();
     for file in added {
         if !is_binding_language(file.language) {
             continue;
         }
         let (dir, name) = imported_name(&file.path);
-        for edge in store.get_module_imports_named(&dir, &name)? {
+        let mut edges = store.get_module_imports_named(&dir, &name)?;
+        if let Some(package_dir) = package_dir_of.and_then(|f| f(&file.path)) {
+            if !package_imports.contains_key(&package_dir) {
+                let imports: Vec<ResolutionEdge> = store
+                    .get_module_imports_under(&package_dir)?
+                    .into_iter()
+                    .filter(|edge| {
+                        edge.edge.metadata.as_ref().and_then(|m| m.get("refName")).and_then(|v| v.as_str()).is_some_and(|s| !s.starts_with('.') && !s.starts_with('/'))
+                    })
+                    .collect();
+                package_imports.insert(package_dir.clone(), imports);
+            }
+            let seen: HashSet<i64> = edges.iter().map(|e| e.edge_id).collect();
+            edges.extend(package_imports[&package_dir].iter().filter(|e| !seen.contains(&e.edge_id)).cloned());
+        }
+        for edge in edges {
             let Some(specifier) = edge.edge.metadata.as_ref().and_then(|m| m.get("refName")).and_then(|v| v.as_str()).map(String::from) else {
                 continue;
             };
