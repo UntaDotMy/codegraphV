@@ -6,6 +6,7 @@ use super::common::*;
 use super::go::{go_method_key, is_go_embedding};
 use crate::ctx::{q, Ctx};
 use crate::meta;
+use crate::override_parameters::OverrideFilter;
 use crate::types::NodeRef;
 use codegraph_jsre::re;
 use codegraph_types::{Edge, EdgeKind, Language, NodeKind, Provenance};
@@ -293,6 +294,24 @@ pub fn interface_override_edges(ctx: &Ctx) -> Vec<Edge> {
         protocol_memo.borrow_mut().insert(base.id.clone(), Rc::clone(&methods));
         methods
     };
+    // Of a class's same-named methods, the ones that can override one of a base's overloads
+    // (#2663): Java, Kotlin, C# and Scala make an override repeat the parameters of what it
+    // overrides. Asked only for a name that is overloaded on either side.
+    let overrides_of = OverrideFilter::new(ctx);
+    let name_counts: RefCell<HashMap<String, Rc<HashMap<String, usize>>>> = RefCell::new(HashMap::new());
+    let declared_named = |base: &NodeRef, name: &str| -> usize {
+        let hit = name_counts.borrow().get(&base.id).cloned();
+        let counts = hit.unwrap_or_else(|| {
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for m in base_methods_of(base).iter() {
+                *counts.entry(m.name.clone()).or_default() += 1;
+            }
+            let counts = Rc::new(counts);
+            name_counts.borrow_mut().insert(base.id.clone(), Rc::clone(&counts));
+            counts
+        });
+        counts.get(name).copied().unwrap_or(0)
+    };
     // A Go struct also satisfies an interface with the methods its embedded types promote into it,
     // and a call through the interface then runs the embedded type's method. Those links are made
     // after the loop, from what the struct's cap has left.
@@ -350,7 +369,9 @@ pub fn interface_override_edges(ctx: &Ctx) -> Vec<Edge> {
                     }
                     continue;
                 };
-                for m in impls {
+                let overloaded = impls.len() > 1 || declared_named(&base, &bm.name) > 1;
+                let candidates: Vec<NodeRef> = if overloaded { overrides_of.filter(bm, impls) } else { impls.clone() };
+                for m in &candidates {
                     if added >= MAX_CALLBACKS_PER_CHANNEL {
                         break;
                     }

@@ -80,7 +80,7 @@ pub fn gate_type_parameter(resolved: Option<ResolvedRef>, r: &UnresolvedRef, ctx
         && matches!(r.reference_kind, ReferenceKind::Edge(EdgeKind::Calls | EdgeKind::References))
         && re!(r"^[A-Za-z_]\w*$").is_match(&r.reference_name)
     {
-        for declaration in enclosing_declarations(r, ctx) {
+        for declaration in enclosing_declarations(&r.file_path, r.line, ctx) {
             if matches!(declaration.kind, NodeKind::Function | NodeKind::Method)
                 && declared_value_parameters(&declaration, ctx).contains(&r.reference_name)
             {
@@ -110,7 +110,7 @@ pub fn gate_type_parameter(resolved: Option<ResolvedRef>, r: &UnresolvedRef, ctx
     if r.language == Language::Cpp {
         let qualifier = re!(r"^([A-Za-z_]\w*)::").captures(&r.reference_name).and_then(|c| c.text(1).map(str::to_string));
         if let Some(qualifier) = qualifier {
-            for declaration in enclosing_declarations(r, ctx) {
+            for declaration in enclosing_declarations(&r.file_path, r.line, ctx) {
                 let parameters = declared_type_parameters(&declaration, ctx);
                 if !parameters.contains_key(&qualifier) {
                     continue;
@@ -130,7 +130,7 @@ pub fn gate_type_parameter(resolved: Option<ResolvedRef>, r: &UnresolvedRef, ctx
     if !re!(r"^[A-Z][A-Za-z0-9_]*$").is_match(name) {
         return Some(result);
     }
-    for declaration in enclosing_declarations(r, ctx) {
+    for declaration in enclosing_declarations(&r.file_path, r.line, ctx) {
         if declared_type_parameters(&declaration, ctx).contains_key(name) {
             return None;
         }
@@ -183,7 +183,7 @@ fn scala_member_in_scope(result: &ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> 
     if inside(owner) {
         return true;
     }
-    for around in enclosing_declarations(r, ctx) {
+    for around in enclosing_declarations(&r.file_path, r.line, ctx) {
         if !is_scala_owner_kind(around.kind) {
             continue;
         }
@@ -204,12 +204,22 @@ fn scala_member_in_scope(result: &ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> 
     Re::cached(&pat, "").is_match(&text)
 }
 
-fn enclosing_declarations(r: &UnresolvedRef, ctx: &Ctx) -> Vec<NodeRef> {
-    ctx.get_nodes_in_file(&r.file_path)
+fn enclosing_declarations(file_path: &str, line: u32, ctx: &Ctx) -> Vec<NodeRef> {
+    ctx.get_nodes_in_file(file_path)
         .iter()
-        .filter(|n| is_declaration_kind(n.kind) && n.start_line <= r.line && n.end_line >= r.line)
+        .filter(|n| is_declaration_kind(n.kind) && n.start_line <= line && n.end_line >= line)
         .cloned()
         .collect()
+}
+
+/// The type parameters in scope at a declaration: its own and those of the declarations around
+/// it — a method's (`<T> T map(Class<T> type)`), its class's, an enclosing class's.
+pub fn type_parameters_in_scope(node: &Node, ctx: &Ctx) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for declaration in enclosing_declarations(&node.file_path, node.start_line, ctx) {
+        names.extend(declared_type_parameters(&declaration, ctx).keys().cloned());
+    }
+    names
 }
 
 fn head_of(node: &Node, ctx: &Ctx) -> Option<(Rc<Vec<String>>, Vec<char>)> {

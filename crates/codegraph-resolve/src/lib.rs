@@ -24,6 +24,7 @@ pub mod js_super_calls;
 pub mod jsx_code;
 pub mod resurrect_ref;
 pub mod shopify_themes;
+pub mod override_parameters;
 pub mod type_parameters;
 pub mod dart_libraries;
 pub mod go_stdlib_methods;
