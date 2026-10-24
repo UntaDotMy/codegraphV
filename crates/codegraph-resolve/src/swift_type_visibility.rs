@@ -46,10 +46,6 @@ fn memo(ctx: &Ctx) -> Rc<SwiftMemo> {
     ctx.memo::<SwiftMemo>()
 }
 
-fn chars_len(s: &str) -> usize {
-    s.chars().count()
-}
-
 fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -238,7 +234,7 @@ fn parent_path(node: &Node) -> Option<String> {
 /// `target` bare: 0 for a top-level type, one more inside the type itself;
 /// `None` when out of scope.
 fn bare_scope_depth(target: &Node, from: Option<&Node>, ctx: &Ctx) -> Option<usize> {
-    let parent = parent_path(target)?;
+    let Some(parent) = parent_path(target) else { return Some(0) };
     let from = from?;
     let scope = &from.qualified_name;
     let inside = |path: &str| -> bool {
@@ -258,7 +254,7 @@ fn bare_scope_depth(target: &Node, from: Option<&Node>, ctx: &Ctx) -> Option<usi
     if inside(&parent) {
         return Some(depth);
     }
-    let parent_name = parent.split("::").next_back().unwrap_or("");
+    let parent_name = parent.rsplit("::").next().unwrap_or("");
     for name in scope.split("::") {
         if inherited_type_names(name, ctx).contains(parent_name) {
             return Some(depth);
@@ -338,7 +334,7 @@ fn fits_path(node: &Node, path: &str, ctx: &Ctx) -> bool {
         return true;
     }
     let head = &path[..path.len() - qn.len() - 2];
-    let parent_name = head.split("::").next_back().unwrap_or("");
+    let parent_name = head.rsplit("::").next().unwrap_or("");
     if ctx
         .get_nodes_in_file(&node.file_path)
         .iter()
@@ -592,8 +588,8 @@ pub fn resolve_swift_type_path_call(reference: &UnresolvedRef, ctx: &Ctx) -> Opt
 }
 
 fn is_reducer_enum(member: &Node, ctx: &Ctx) -> bool {
-    let owner = ctx
-        .get_nodes_in_file(&member.file_path)
+    let in_file = ctx.get_nodes_in_file(&member.file_path);
+    let owner = in_file
         .iter()
         .filter(|t| {
             t.kind == NodeKind::Enum
@@ -602,7 +598,7 @@ fn is_reducer_enum(member: &Node, ctx: &Ctx) -> bool {
         })
         .reduce(|inner, t| {
             if t.start_line >= inner.start_line {
-                Rc::clone(t)
+                t
             } else {
                 inner
             }
@@ -640,8 +636,8 @@ fn owner_path(member: &Node, ctx: &Ctx) -> Option<String> {
     let mut path = cut.map(|i| member.qualified_name[..i].to_owned());
     if let Some(current) = &path {
         let first = current.split("::").next().unwrap_or("");
-        let outer = ctx
-            .get_nodes_in_file(&member.file_path)
+        let in_file = ctx.get_nodes_in_file(&member.file_path);
+        let outer = in_file
             .iter()
             .filter(|t| {
                 t.name == first
@@ -651,7 +647,7 @@ fn owner_path(member: &Node, ctx: &Ctx) -> Option<String> {
             })
             .reduce(|out, t| {
                 if t.start_line < out.start_line {
-                    Rc::clone(t)
+                    t
                 } else {
                     out
                 }

@@ -233,7 +233,7 @@ fn sort_level(level: &mut [HierarchyEntry]) {
     });
 }
 
-fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
+pub fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
     static COLLATOR: LazyLock<CollatorBorrowed<'static>> = LazyLock::new(|| {
         Collator::try_new(Default::default(), CollatorOptions::default())
             .expect("compiled root collation data")

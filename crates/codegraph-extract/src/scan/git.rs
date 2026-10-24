@@ -25,7 +25,7 @@ fn spawn_git(cwd: &Path, args: &[&str]) -> std::io::Result<std::process::Child> 
 /// `execFileSync('git', args, { cwd, encoding: 'utf-8', timeout, maxBuffer })`:
 /// stdout as text, or an error when git cannot run, exits non-zero, runs past the
 /// timeout, or prints more than `max_buffer` bytes.
-pub(crate) fn run_git(cwd: &Path, args: &[&str], timeout: Duration, max_buffer: usize) -> Result<String, String> {
+pub fn run_git(cwd: &Path, args: &[&str], timeout: Duration, max_buffer: usize) -> Result<String, String> {
     let mut child = spawn_git(cwd, args).map_err(|e| format!("spawn git: {e}"))?;
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
@@ -123,7 +123,7 @@ pub(crate) fn gitdir_pointer(text: &str) -> Option<String> {
 
 /// The repository GIT_DIR for `repo_root` (a `.git` directory, or the target of a
 /// `.git` file pointer); none when this isn't a git checkout.
-pub(crate) fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
+pub fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
     let git_path = repo_root.join(".git");
     let meta = std::fs::metadata(&git_path).ok()?;
     if meta.is_dir() {

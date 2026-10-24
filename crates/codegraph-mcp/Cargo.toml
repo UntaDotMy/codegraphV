@@ -1,0 +1,25 @@
+[package]
+name = "codegraph-mcp"
+description = "Native CodeGraph MCP protocol and user-facing retrieval tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+codegraph-core = { path = "../codegraph-core" }
+codegraph-graph = { path = "../codegraph-graph" }
+codegraph-search.workspace = true
+codegraph-types.workspace = true
+codegraph-jsre.workspace = true
+codegraph-context = { path = "../codegraph-context" }
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+sha2.workspace = true
+url = "2"
+globset = "0.4"
+getrandom = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

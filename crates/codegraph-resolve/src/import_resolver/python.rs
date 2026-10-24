@@ -129,7 +129,7 @@ fn build_python_module_index(ctx: &Ctx) -> PythonModuleIndex {
 
     let mut project_roots: IndexSet<String> = IndexSet::from([String::new()]);
     let mut local_roots: IndexMap<String, String> = IndexMap::new();
-    let mut add_local = |local_roots: &mut IndexMap<String, String>, root: String, reach: String| {
+    let add_local = |local_roots: &mut IndexMap<String, String>, root: String, reach: String| {
         let replace = match local_roots.get(&root) {
             None => true,
             // Two claims on one root: the wider reach wins.

@@ -398,28 +398,30 @@ pub struct GraphStats {
 // =============================================================================
 
 /// Input for building task context: a bare query, or a title and description.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum TaskInput {
     Text(String),
     Titled { title: String, description: Option<String> },
 }
 
 /// Options for building task context. `None` means "use the documented default".
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildContextOptions {
-    /// Maximum number of nodes to include (default: 50).
+    /// Maximum number of nodes to include (default: 20).
     pub max_nodes: Option<usize>,
-    /// Maximum number of code blocks to include (default: 10).
+    /// Maximum number of code blocks to include (default: 5).
     pub max_code_blocks: Option<usize>,
-    /// Maximum characters per code block (default: 2000).
+    /// Maximum characters per code block (default: 1500).
     pub max_code_block_size: Option<usize>,
     /// Whether to include code blocks (default: true).
     pub include_code: Option<bool>,
     /// Output format (default: markdown).
     pub format: Option<ContextFormat>,
-    /// Number of semantic search results (default: 5).
+    /// Number of semantic search results (default: 3).
     pub search_limit: Option<usize>,
-    /// Graph traversal depth from entry points (default: 2).
+    /// Graph traversal depth from entry points (default: 1).
     pub traversal_depth: Option<u32>,
     /// Minimum semantic similarity score (default: 0.3).
     pub min_score: Option<f64>,
@@ -454,7 +456,8 @@ pub struct TaskContext {
 }
 
 /// Options for finding relevant context.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FindRelevantContextOptions {
     pub search_limit: Option<usize>,
     pub traversal_depth: Option<u32>,

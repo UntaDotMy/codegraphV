@@ -1275,6 +1275,41 @@ impl Store {
         Ok(())
     }
 
+    /// Every node of one kind in the canonical `(file_path, start_line, id)` order,
+    /// streamed through `visit` (`iterateNodesByKind`); `visit` returns `false` to stop early.
+    pub fn for_each_node_of_kind(&self, kind: NodeKind, mut visit: impl FnMut(Node) -> bool) -> Result<()> {
+        let mut stmt =
+            self.conn.prepare("SELECT * FROM nodes WHERE kind = ? ORDER BY file_path, start_line, id")?;
+        let mut rows = stmt.query([kind.as_str()])?;
+        while let Some(row) = rows.next()? {
+            if !visit(node_from_row(row)?) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every node of a language whose decorator list names `decorator` (a substring pre-filter
+    /// over the JSON column — the caller keeps the exact check), in the canonical order, streamed
+    /// through `visit` (`iterateNodesByLanguageWithDecorator`).
+    pub fn for_each_node_by_language_with_decorator(
+        &self,
+        language: Language,
+        decorator: &str,
+        mut visit: impl FnMut(Node) -> bool,
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM nodes WHERE language = ? AND decorators LIKE '%' || ? || '%' ORDER BY file_path, start_line, id",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![language.as_str(), format!("\"{decorator}\"")])?;
+        while let Some(row) = rows.next()? {
+            if !visit(node_from_row(row)?) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_all_nodes(&self) -> Result<Vec<Node>> {
         self.query_nodes(&format!("SELECT {NODE_COLS} FROM nodes"), &[])
     }
@@ -1498,6 +1533,86 @@ impl Store {
             for row in stmt.query_map(params_from_iter(chunk.iter()), |r| r.get::<_, String>(0))? {
                 found.insert(row?);
             }
+        }
+        Ok(found)
+    }
+
+    /// Files among `file_paths` that declare nothing but types, originate no call edge, and
+    /// that nothing else in the index depends on — ambient declaration shims (CG-28,
+    /// `QueryBuilder.getAmbientDeclarationPathsAmong`). Interface-owned members are
+    /// transparent to every condition.
+    pub fn get_ambient_declaration_paths_among<S: AsRef<str>>(&self, file_paths: &[S]) -> Result<HashSet<String>> {
+        const IS_INTERFACE_MEMBER_N: &str = "EXISTS (
+  SELECT 1 FROM edges ce JOIN nodes owner ON owner.id = ce.source
+   WHERE ce.target = n.id AND ce.kind = 'contains' AND owner.kind = 'interface'
+)";
+        const IS_INTERFACE_MEMBER_T: &str = "EXISTS (
+  SELECT 1 FROM edges ce JOIN nodes owner ON owner.id = ce.source
+   WHERE ce.target = t.id AND ce.kind = 'contains' AND owner.kind = 'interface'
+)";
+        let mut unique: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        for p in file_paths {
+            if seen.insert(p.as_ref().to_string()) {
+                unique.push(p.as_ref().to_string());
+            }
+        }
+        let mut found = HashSet::new();
+        for chunk in unique.chunks(SQLITE_PARAM_CHUNK_SIZE) {
+            let sql = format!(
+                "SELECT n.file_path AS file_path,
+                 SUM(CASE WHEN n.kind NOT IN ('file','import','export','parameter')
+                           AND NOT {IS_INTERFACE_MEMBER_N}
+                          THEN 1 ELSE 0 END) AS declared,
+                 SUM(CASE WHEN n.kind IN ('interface','type_alias','enum','enum_member','namespace')
+                          THEN 1 ELSE 0 END) AS typeDeclared
+          FROM nodes n
+          WHERE n.file_path IN ({})
+          GROUP BY n.file_path",
+                placeholders(chunk.len())
+            );
+            let mut stmt = self.conn.prepare_cached(&sql)?;
+            let rows = stmt
+                .query_map(params_from_iter(chunk.iter()), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let mut candidates: Vec<String> =
+                rows.into_iter().filter(|(_, d, t)| *d > 0 && d == t).map(|(p, _, _)| p).collect();
+            let disqualify = |candidates: &mut Vec<String>, template: &str| -> Result<()> {
+                if candidates.is_empty() {
+                    return Ok(());
+                }
+                let sql = template.replace("$IN$", &placeholders(candidates.len()));
+                let mut stmt = self.conn.prepare(&sql)?;
+                let hit = stmt
+                    .query_map(params_from_iter(candidates.iter()), |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<HashSet<_>, _>>()?;
+                candidates.retain(|p| !hit.contains(p));
+                Ok(())
+            };
+            if candidates.is_empty() {
+                continue;
+            }
+            disqualify(
+                &mut candidates,
+                &format!(
+                    "SELECT DISTINCT n.file_path AS file_path
+        FROM edges e JOIN nodes n ON n.id = e.source
+        WHERE e.kind IN ('calls','instantiates') AND n.file_path IN ($IN$)
+          AND NOT {IS_INTERFACE_MEMBER_N}"
+                ),
+            )?;
+            disqualify(
+                &mut candidates,
+                &format!(
+                    "SELECT DISTINCT t.file_path AS file_path
+        FROM edges e JOIN nodes t ON t.id = e.target JOIN nodes s ON s.id = e.source
+        WHERE t.file_path IN ($IN$) AND s.file_path <> t.file_path
+          AND NOT {IS_INTERFACE_MEMBER_T}"
+                ),
+            )?;
+            found.extend(candidates);
         }
         Ok(found)
     }

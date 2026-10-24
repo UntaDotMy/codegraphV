@@ -11,13 +11,112 @@ use codegraph_types::{
     jscompat::{is_js_space, utf16_len},
     Language, NodeKind, SearchOptions, SearchResult,
 };
+use indexmap::IndexSet;
 use rusqlite::{params_from_iter, types::Value};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub const DEPRIORITIZED_NAME_BONUS_SCALE: f64 = 0.75;
 pub type DeprioritizedPath<'a> = &'a dyn Fn(&str) -> bool;
 
+/// Lexical evidence for an empty explore result (`QueryBuilder.getExploreMissDiagnostics`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExploreMissDiagnostics {
+    /// Query words some symbol's name, qualified name, signature or docstring starts a token with.
+    pub matched: Vec<String>,
+    pub unmatched: Vec<String>,
+    /// Up to 12 distinct symbol names carrying a checked word.
+    pub candidates: Vec<String>,
+    /// Some words were skipped: longer than 64 UTF-16 units, or past the 16th.
+    pub limited: bool,
+}
+
 impl Store {
+    /// Bounded miss diagnostics, independent of relevance filters and ranking.
+    pub fn get_explore_miss_diagnostics(&self, query: &str) -> Result<ExploreMissDiagnostics> {
+        let words: IndexSet<String> = re!(r"[\p{L}\p{N}]+", "gu")
+            .captures_iter(query)
+            .filter_map(|c| c.text(0).map(str::to_lowercase))
+            .collect();
+        let checked: Vec<&String> = words.iter().filter(|w| utf16_len(w) <= 64).take(16).collect();
+        let limited = checked.len() != words.len();
+        if checked.is_empty() {
+            return Ok(ExploreMissDiagnostics {
+                limited,
+                ..Default::default()
+            });
+        }
+
+        // EXISTS uses FTS postings and the segment primary key, never source scans.
+        // Vocab rows can outlive deleted definitions, so verify them against nodes.
+        let sql = format!(
+            "
+      WITH words(word, pattern) AS (VALUES {})
+      SELECT word, (
+        EXISTS (SELECT 1 FROM nodes_fts WHERE nodes_fts MATCH pattern)
+        OR EXISTS (
+          SELECT 1 FROM name_segment_vocab v WHERE v.segment = word
+          AND EXISTS (SELECT 1 FROM nodes n WHERE n.name = v.name AND n.kind NOT IN ('file', 'import'))
+        )
+      ) AS matched FROM words
+    ",
+            vec!["(?, ?)"; checked.len()].join(", ")
+        );
+        let params: Vec<Value> = checked
+            .iter()
+            .flat_map(|w| {
+                [
+                    Value::Text((*w).clone()),
+                    Value::Text(format!("{{name qualified_name signature docstring}} : \"{w}\"*")),
+                ]
+            })
+            .collect();
+        let mut stmt = self.conn().prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_from_iter(params), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let sql = format!(
+            "
+      SELECT name FROM (
+        SELECT v.name FROM name_segment_vocab v
+        WHERE v.segment IN ({})
+        AND EXISTS (SELECT 1 FROM nodes n WHERE n.name = v.name AND n.kind NOT IN ('file', 'import'))
+        LIMIT 12
+      )
+      UNION ALL
+      SELECT name FROM (
+        SELECT n.name FROM nodes_fts JOIN nodes n ON n.rowid = nodes_fts.rowid
+        WHERE nodes_fts MATCH ? AND n.kind NOT IN ('file', 'import')
+        LIMIT 12
+      )
+    ",
+            vec!["?"; checked.len()].join(", ")
+        );
+        let mut params: Vec<Value> = checked.iter().map(|w| Value::Text((*w).clone())).collect();
+        params.push(Value::Text(format!(
+            "name : ({})",
+            checked
+                .iter()
+                .map(|w| format!("\"{w}\"*"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        )));
+        let mut stmt = self.conn().prepare(&sql)?;
+        let names: IndexSet<String> = stmt
+            .query_map(params_from_iter(params), |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ExploreMissDiagnostics {
+            matched: rows.iter().filter(|(_, m)| *m).map(|(w, _)| w.clone()).collect(),
+            unmatched: rows.iter().filter(|(_, m)| !*m).map(|(w, _)| w.clone()).collect(),
+            candidates: names.into_iter().take(12).collect(),
+            limited,
+        })
+    }
+
     pub fn find_nodes_by_name_substring(
         &self,
         substring: &str,

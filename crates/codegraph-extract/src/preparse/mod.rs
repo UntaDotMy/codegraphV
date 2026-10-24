@@ -8,6 +8,12 @@
 //! UTF-16 units.
 
 mod cmask;
+
+/// `maskCppRawStrings(source).source`: the text with C++ raw-string literal bodies blanked (offsets kept).
+pub fn mask_cpp_raw_strings_source(source: &str) -> String {
+    cmask::mask_cpp_raw_strings(source).source
+}
+
 mod conly;
 mod cpp;
 mod cshared;

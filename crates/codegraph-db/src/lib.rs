@@ -13,6 +13,8 @@ pub mod resolver_queries;
 pub mod rows;
 pub mod schema;
 pub mod search_queries;
+pub mod segment_queries;
+pub mod sync_queries;
 mod store;
 
 pub use error::{DbError, Result};

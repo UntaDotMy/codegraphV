@@ -22,11 +22,17 @@ fs.copyFileSync(path.join(oracleRoot, 'src/db/schema.sql'), path.join(oracleRoot
 run('cargo', ['build', '-p', 'codegraph-graph', '--example', 'graph_probe']);
 run('cargo', ['build', '-p', 'codegraph-search', '--example', 'query_paths_probe']);
 run('cargo', ['build', '-p', 'codegraph-extract', '--example', 'sfc_probe']);
+run('cargo', ['build', '-p', 'codegraph-context', '--example', 'context_probe']);
+run('cargo', ['build', '-p', 'codegraph-sync', '--example', 'sync_probe']);
+run('cargo', ['build', '-p', 'codegraph-sync', '--example', 'watcher_probe']);
 const suffix = process.platform === 'win32' ? '.exe' : '';
 run(process.execPath, ['scripts/rust-golden/graph.mjs', `target/debug/examples/graph_probe${suffix}`, '--write']);
 run(process.execPath, ['scripts/rust-golden/query-paths.mjs', `target/debug/examples/query_paths_probe${suffix}`, '--write']);
 run(process.execPath, ['scripts/rust-golden/sfc.mjs', `target/debug/examples/sfc_probe${suffix}`, '--write', path.join(oracleRoot, 'ui/src'), ...process.argv.slice(2)]);
 run(process.execPath, ['scripts/rust-golden/templates.mjs', `target/debug/examples/sfc_probe${suffix}`, '--write', ...process.argv.slice(2)]);
+run(process.execPath, ['scripts/rust-golden/context.mjs', `target/debug/examples/context_probe${suffix}`, '--write']);
+run(process.execPath, ['scripts/rust-golden/sync.mjs', `target/debug/examples/sync_probe${suffix}`]);
+run(process.execPath, ['scripts/rust-golden/watcher.mjs', `target/debug/examples/watcher_probe${suffix}`, '--write']);
 run('cargo', ['test', '--workspace', '--quiet']);
 recordValidated(commands);
-console.log('\nImplemented graph/search, component and template extraction validated against the latest TypeScript sources; checkpoint recorded.');
+console.log('\nImplemented graph/search, component/template extraction, context retrieval and git sync utilities validated against the latest TypeScript sources; checkpoint recorded.');

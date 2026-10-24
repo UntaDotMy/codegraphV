@@ -312,3 +312,49 @@ pub fn is_cpp_define_signature(signature: &str) -> bool {
 
 pub type NodeRef = Rc<Node>;
 pub type NodeList = Rc<Vec<NodeRef>>;
+
+/// A TypeScript `T | null | undefined` result: `Undefined` means "this strategy has no opinion,
+/// keep looking", `Null` means "decided: nothing", `Value` a hit.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Tri<T> {
+    #[default]
+    Undefined,
+    Null,
+    Value(T),
+}
+
+impl<T> Tri<T> {
+    pub fn is_undefined(&self) -> bool {
+        matches!(self, Tri::Undefined)
+    }
+    /// The value, collapsing `Undefined` and `Null` into `None` (`result ?? null`).
+    pub fn value(self) -> Option<T> {
+        match self {
+            Tri::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn as_value(&self) -> Option<&T> {
+        match self {
+            Tri::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Tri<U> {
+        match self {
+            Tri::Undefined => Tri::Undefined,
+            Tri::Null => Tri::Null,
+            Tri::Value(v) => Tri::Value(f(v)),
+        }
+    }
+}
+
+impl<T> From<Option<T>> for Tri<T> {
+    /// `None` is `Null` — a decided "nothing" — not `Undefined`.
+    fn from(o: Option<T>) -> Self {
+        match o {
+            Some(v) => Tri::Value(v),
+            None => Tri::Null,
+        }
+    }
+}

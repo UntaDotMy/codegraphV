@@ -11,9 +11,11 @@ codegraph-types.workspace = true
 codegraph-db = { path = "../codegraph-db" }
 codegraph-extract = { path = "../codegraph-extract" }
 codegraph-search.workspace = true
+codegraph-text = { path = "../codegraph-text" }
 codegraph-jsre.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
 regex.workspace = true
 jsonc-parser.workspace = true
 sha1.workspace = true
+icu_collator = "2.3"

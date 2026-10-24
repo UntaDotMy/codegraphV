@@ -1,0 +1,20 @@
+[package]
+name = "codegraph-sync"
+description = "Native file watching, git sync hooks and worktree awareness for CodeGraph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+codegraph-types.workspace = true
+codegraph-jsre.workspace = true
+codegraph-extract = { path = "../codegraph-extract" }
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+notify = "8.2"
+
+[dev-dependencies]
+tempfile = "3"
+sha2.workspace = true

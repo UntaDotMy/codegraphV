@@ -38,11 +38,19 @@ This runs, in order:
 6. Compare the grammar-free template extractors (Liquid, Razor, MyBatis XML,
    DFM) and the config languages they sit beside, including the literal inputs
    of the MyBatis robustness suite; persist their fixtures.
-7. Run `cargo test --workspace` against the persisted vectors.
-8. Record revision, commands and SHA-256 source/native fingerprints on success.
+7. Compare native context retrieval, segment seeding, source extraction and
+   markdown/JSON/tree/call-path formatting on shared databases; persist the
+   reference outputs only after every comparison matches.
+8. Compare git hook bytes/results and worktree diagnostics on real temporary
+   repositories, including preserved user hooks and multiple indexed subprojects.
+9. Compare the live watcher's clock-driven scheduler against TypeScript and
+   persist its pending/retry/recovery snapshots for native replay.
+10. Run `cargo test --workspace` against the persisted vectors.
+11. Record revision, commands and SHA-256 source/native fingerprints on success.
 
 The checkpoint validates implemented graph/search, Svelte/Vue/Astro extraction
-and the grammar-free template extractors; it does not attest to the rest of
+and the grammar-free template extractors, plus context retrieval/formatting and
+git hook/worktree utilities. It does not attest to the rest of
 extraction/resolution/CLI/MCP/viewer parity. Their existing differential scripts
 and regression suites remain required as each area lands. Test the new upstream
 TypeScript regression files too, especially those outside the implemented Rust
@@ -53,6 +61,45 @@ once the vectors have been recorded. Ranked search scores compare exactly;
 the JSON parser enables accurate floating-point round-tripping. Optional
 visibility/provenance nulls are normalized across the existing store adapters,
 while node/edge identity, ordering, metadata and flow contents remain checked.
+
+To run the context gate on its own:
+
+```text
+cargo build -p codegraph-context --example context_probe
+node scripts/rust-golden/context.mjs target/debug/examples/context_probe.exe --write
+cargo test -p codegraph-context -p codegraph-core
+```
+
+Omit `.exe` on Unix. This checks hybrid retrieval and graph budgets, segment
+seeds, confidence, copybook entries, generated-file ordering, source extraction,
+and exact markdown/JSON/tree/call-path output. The native facade tests additionally
+index and incrementally sync real source files. Config-key redaction, path
+traversal refusal and Windows junction escape have dedicated native coverage.
+These checks do not assert MCP/CLI/viewer parity. The git utilities have their
+own gate:
+
+```text
+cargo build -p codegraph-sync --example sync_probe
+node scripts/rust-golden/sync.mjs target/debug/examples/sync_probe.exe
+cargo test -p codegraph-sync
+```
+
+This covers hooks and worktree detection. Live watching has a separate gate:
+
+```text
+cargo build -p codegraph-sync --example watcher_probe
+node scripts/rust-golden/watcher.mjs target/debug/examples/watcher_probe.exe --write
+cargo test -p codegraph-sync -p codegraph-core
+```
+
+The scheduler gate compares 6,508 clock-driven snapshots, including scoped/full
+sync selection, edits during sync, bounded retries and lock recovery. Large
+pending sets retain samples plus a SHA-256 digest of the complete ordered list
+in the portable fixtures. The native tests replay these without Node and also
+exercise real OS delivery and background SQLite indexing. Windows tests cover
+separate-process reads, cached-node refresh, directory junctions and retargeting.
+Linux/macOS native-event validation remains pending; Docker is unavailable on
+the Windows environment used for this validation run.
 
 The reference engine may live in a separate upstream checkout. Set
 `CODEGRAPH_TS_ORACLE_ROOT` to its absolute directory (with its Node dependencies

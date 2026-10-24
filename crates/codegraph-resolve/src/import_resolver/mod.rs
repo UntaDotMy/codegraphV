@@ -4,10 +4,12 @@
 
 pub mod cpp_include;
 pub mod exports;
+pub mod find_exported;
 pub mod mappings;
 pub mod python;
 pub mod via_import;
 
+pub use find_exported::*;
 pub use cpp_include::{clear_cpp_include_dir_cache, load_cpp_include_dirs};
 pub use mappings::{extract_import_mappings, extract_re_exports};
 pub use python::{python_package_importers, python_reopen_scope, python_root_fingerprint};

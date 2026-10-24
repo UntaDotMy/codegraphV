@@ -1,0 +1,15 @@
+[package]
+name = "codegraph-installer"
+description = "Native agent configuration installer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+[dependencies]
+codegraph-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jsonc-parser = { workspace = true, features = ["cst"] }
+toml_edit = "0.25"
+[dev-dependencies]
+tempfile = "3"

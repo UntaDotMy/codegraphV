@@ -149,4 +149,4 @@ pub fn extract_source(file_path: &str, source: &str, language: Language) -> Resu
     Ok(result)
 }
 
-pub use preparse::{enable_stage_timing as enable_preparse_stage_timing, pre_parse, stage_timings as preparse_stage_timings};
+pub use preparse::{enable_stage_timing as enable_preparse_stage_timing, mask_cpp_raw_strings_source, pre_parse, stage_timings as preparse_stage_timings};

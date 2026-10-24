@@ -28,6 +28,16 @@ pub fn js_trim(s: &str) -> &str {
     s.trim_matches(is_js_space)
 }
 
+/// `String.prototype.trimStart`.
+pub fn js_trim_start(s: &str) -> &str {
+    s.trim_start_matches(is_js_space)
+}
+
+/// `String.prototype.trimEnd`.
+pub fn js_trim_end(s: &str) -> &str {
+    s.trim_end_matches(is_js_space)
+}
+
 /// `String.prototype.length`: UTF-16 code units.
 pub fn utf16_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
@@ -44,6 +54,38 @@ pub fn utf16_prefix(s: &str, n: usize) -> &str {
         }
     }
     s
+}
+
+/// The byte index of UTF-16 offset `n` in `s`, clamped to the string (an offset inside a
+/// surrogate pair rounds down to the character).
+pub fn utf16_byte_index(s: &str, n: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in s.char_indices() {
+        if units >= n {
+            return i;
+        }
+        units += c.len_utf16();
+        if units > n {
+            return i;
+        }
+    }
+    s.len()
+}
+
+/// `s.slice(from, to)` for UTF-16 offsets (`to` clamped; `from > to` gives `""`).
+pub fn utf16_slice(s: &str, from: usize, to: usize) -> &str {
+    let a = utf16_byte_index(s, from);
+    let b = utf16_byte_index(s, to);
+    if a >= b {
+        ""
+    } else {
+        &s[a..b]
+    }
+}
+
+/// `s.slice(from)` for a UTF-16 offset.
+pub fn utf16_from(s: &str, from: usize) -> &str {
+    &s[utf16_byte_index(s, from)..]
 }
 
 /// The UTF-16 column of byte offset `byte_pos` within the line that starts at

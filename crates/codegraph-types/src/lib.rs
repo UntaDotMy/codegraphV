@@ -5,6 +5,7 @@
 
 mod ids;
 pub mod jscompat;
+pub mod jssort;
 mod kinds;
 pub mod log;
 mod model;

@@ -85,12 +85,23 @@ pub fn file_from_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
         content_hash: row.get(1)?,
         language: Language::parse(&language).ok_or_else(|| bad_value(2, "language", &language))?,
         size: row.get(3)?,
-        modified_at: row.get(4)?,
+        modified_at: millis(row.get_ref(4)?),
         indexed_at: row.get(5)?,
         node_count: row.get(6)?,
         errors: json(row.get(7)?),
         generated: Some(row.get::<_, Option<i64>>(8)? == Some(1)),
     })
+}
+
+/// A timestamp column: the TypeScript engine stores `stat.mtimeMs`, a fractional number of
+/// milliseconds, which an INTEGER-affinity column keeps as a REAL. Change detection compares
+/// `floor(ms)`, so the whole milliseconds are all that is read back.
+fn millis(value: rusqlite::types::ValueRef<'_>) -> i64 {
+    match value {
+        rusqlite::types::ValueRef::Integer(i) => i,
+        rusqlite::types::ValueRef::Real(f) => f.floor() as i64,
+        _ => 0,
+    }
 }
 
 pub fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<UnresolvedReference> {

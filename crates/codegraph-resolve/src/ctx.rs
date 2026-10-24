@@ -104,7 +104,7 @@ pub struct ManifestScope {
 
 /// Unwrap a store read; a failed read logs and reads as empty, as a thrown query would
 /// have ended that reference's resolution in the TypeScript engine's catch.
-fn q<T: Default>(what: &str, r: codegraph_db::Result<T>) -> T {
+pub(crate) fn q<T: Default>(what: &str, r: codegraph_db::Result<T>) -> T {
     match r {
         Ok(v) => v,
         Err(e) => {
@@ -161,6 +161,8 @@ pub struct Ctx {
     manifest_scopes: RefCell<HashMap<String, Rc<ManifestScope>>>,
     /// Module-level memos (the TypeScript per-context `WeakMap`s), by memo type.
     memos: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
+    /// A file list standing in for the index's, for framework detection before anything is stored.
+    file_list: RefCell<Option<Rc<Vec<String>>>>,
 }
 
 impl Ctx {
@@ -198,7 +200,17 @@ impl Ctx {
             workspace_packages: RefCell::new(None),
             manifest_scopes: RefCell::new(HashMap::new()),
             memos: RefCell::new(HashMap::new()),
+            file_list: RefCell::new(None),
         })
+    }
+
+    /// A context whose file list is `files` rather than the index's — the orchestrator's
+    /// detection context, built from a scan before any file is stored. Node queries still go to
+    /// `store` (an empty scratch database there), as detectors only read files.
+    pub fn with_file_list(project_root: impl Into<String>, store: Rc<Store>, files: Vec<String>) -> Rc<Ctx> {
+        let ctx = Ctx::new(project_root, store);
+        *ctx.file_list.borrow_mut() = Some(Rc::new(files));
+        ctx
     }
 
     pub fn store(&self) -> &Rc<Store> {
@@ -383,7 +395,10 @@ impl Ctx {
 
     /// Stream nodes of a kind one at a time, without populating the per-kind cache.
     pub fn for_each_node_of_kind(&self, kind: NodeKind, mut visit: impl FnMut(Node)) {
-        let r = self.store.for_each_node_of_kind_in(&[kind], None, &mut |n| visit(n));
+        let r = self.store.for_each_node_of_kind(kind, |n| {
+            visit(n);
+            true
+        });
         q("iterateNodesByKind", r.map(|_| ()));
     }
 
@@ -447,6 +462,9 @@ impl Ctx {
 
     /// Every indexed file path, in path order.
     pub fn get_all_files(&self) -> Vec<String> {
+        if let Some(files) = self.file_list.borrow().as_ref() {
+            return files.as_ref().clone();
+        }
         q("getAllFilePaths", self.store.get_all_file_paths())
     }
 

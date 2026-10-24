@@ -21,8 +21,17 @@ const groups = [
     native: ['crates/codegraph-extract', 'crates/codegraph-text', 'crates/codegraph-types', 'crates/codegraph-jsre', 'scripts/rust-golden/sfc.mjs', 'scripts/rust-golden/templates.mjs', 'scripts/rust-golden/extraction-compare.mjs', 'Cargo.toml', 'Cargo.lock'],
     note: 'Svelte/Vue/Astro wrappers and their delegated JS/TS extraction, plus the grammar-free Liquid/Razor/MyBatis/DFM extractors, are compared. This does not attest to the other extraction languages, indexing orchestration or full framework flow resolution.' },
   { name: 'extraction', status: 'partial', sources: ['src/extraction', 'codegraph-kernel/src', 'codegraph-kernel/grammars', 'codegraph-kernel/build.rs', 'codegraph-kernel/Cargo.toml'], native: ['crates/codegraph-extract'], note: 'Native walkers/discovery exist. This runner does not refresh extraction differential attestations.' },
-  { name: 'resolution', status: 'partial', sources: ['src/resolution'], native: ['crates/codegraph-resolve'], note: 'Resolver foundations only; the full resolver is not yet compiled/ported.' },
-  { name: 'runtime-and-viewer', status: 'pending', sources: ['AGENTS.md', 'src/index.ts', 'src/directory.ts', 'src/project-config.ts', 'src/mcp', 'src/bin', 'src/context', 'src/sync', 'src/installer', 'src/upgrade', 'src/ui-server', 'ui/src'], native: [], note: 'CLI/MCP/context/watching/installer/viewer replacement remains pending.' },
+  { name: 'resolution', status: 'partial', sources: ['src/resolution'], native: ['crates/codegraph-resolve'], note: 'The resolver, name matcher, framework registry and synthesis passes compile. Full differential attestations remain separate from this runner.' },
+  { name: 'context', status: 'implemented', verifiedByRunner: true,
+    sources: ['src/context', 'src/index.ts'], native: ['crates/codegraph-context', 'crates/codegraph-core/src/query.rs', 'crates/codegraph-db/src/segment_queries.rs', 'crates/codegraph-types/src/paths.rs', 'scripts/rust-golden/context.mjs'],
+    note: 'Same-DB retrieval, segment seeds, code extraction, markdown/JSON/tree/call-path rendering match the current reference; facade integration and source-boundary tests run natively. This does not attest to CLI/MCP rendering.' },
+  { name: 'git-sync', status: 'implemented', verifiedByRunner: true,
+    sources: ['src/sync/git-hooks.ts', 'src/sync/worktree.ts'], native: ['crates/codegraph-sync', 'scripts/rust-golden/sync.mjs'],
+    note: 'Git hook bytes/results and worktree diagnostics are compared on real repositories. Native tests exercise preservation, per-root ownership, quoting, linked worktrees and embedded repos. Live watching remains pending.' },
+  { name: 'watcher', status: 'partial', verifiedByRunner: true,
+    sources: ['src/sync/watcher.ts', 'src/sync/watch-policy.ts', 'src/index.ts'], native: ['crates/codegraph-sync/src/watcher', 'crates/codegraph-sync/src/watch_policy.rs', 'crates/codegraph-sync/examples/watcher_probe.rs', 'crates/codegraph-sync/tests/watcher.rs', 'crates/codegraph-sync/tests/watcher_state.rs', 'crates/codegraph-sync/tests/watcher_golden.rs', 'crates/codegraph-sync/tests/support/watcher_model.rs', 'crates/codegraph-sync/tests/fixtures/watcher.json', 'crates/codegraph-core/src/watch.rs', 'crates/codegraph-core/tests/watcher.rs', 'scripts/rust-golden/watcher.mjs'],
+    note: 'Clock-driven scheduler states match TypeScript; native Windows tests cover OS events, background indexing, cached readers, access noise and external junction retargeting. Linux/macOS native-event validation is still pending.' },
+  { name: 'runtime-and-viewer', status: 'partial', sources: ['AGENTS.md', 'src/index.ts', 'src/directory.ts', 'src/project-config.ts', 'src/mcp', 'src/bin', 'src/installer', 'src/upgrade', 'src/ui-server', 'ui/src'], native: ['crates/codegraph-core'], note: 'Indexing/sync orchestration and the query facade compile; CLI/MCP/installer/viewer replacement remains pending.' },
   { name: 'reference-tests', status: 'specification', sources: ['__tests__'], native: [], note: 'New or changed regressions are the specification. Port assertions with their matching feature; this runner does not run every TypeScript suite.' },
 ];
 const extensions = new Set(['.ts', '.js', '.mjs', '.rs', '.sql', '.toml', '.lock', '.json', '.svelte', '.c', '.h', '.cc', '.cpp', '.wasm']);
@@ -53,7 +62,7 @@ export function snapshot() {
 }
 export function recordValidated(commands) {
   const current = snapshot();
-  current.validation = { groups: ['graph-search', 'component-extraction'], commands };
+  current.validation = { groups: ['graph-search', 'component-extraction', 'context', 'git-sync', 'watcher'], commands };
   fs.writeFileSync(checkpointPath, JSON.stringify(current, null, 2) + '\n');
 }
 export function audit() {

@@ -1,0 +1,33 @@
+[package]
+name = "codegraph-cli"
+description = "The native codegraph command-line executable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "codegraph"
+path = "src/main.rs"
+
+[dependencies]
+codegraph-core = { path = "../codegraph-core" }
+codegraph-db = { path = "../codegraph-db" }
+codegraph-graph = { path = "../codegraph-graph" }
+codegraph-mcp = { path = "../codegraph-mcp" }
+codegraph-installer = { path = "../codegraph-installer" }
+codegraph-ui-server = { path = "../codegraph-ui-server" }
+codegraph-types.workspace = true
+codegraph-search.workspace = true
+codegraph-sync = { path = "../codegraph-sync" }
+codegraph-context = { path = "../codegraph-context" }
+serde_json.workspace = true
+serde.workspace = true
+regex.workspace = true
+indexmap.workspace = true
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+time = { version = "0.3", features = ["formatting"] }
+
+[dev-dependencies]
+tempfile = "3"

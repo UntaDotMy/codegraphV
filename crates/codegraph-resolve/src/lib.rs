@@ -1,6 +1,38 @@
 //! Reference resolution — port of `src/resolution/*`.
 
+pub mod alias_binding;
+pub mod c_feature_variants;
+pub mod cpp_constructor;
+pub mod cpp_includers;
+pub mod cpp_macro_visibility;
+pub mod cpp_namespaces;
+pub mod cpp_raw_strings;
+pub mod cpp_supertypes;
+pub mod cpp_type_aliases;
+pub mod ctx;
 pub mod go_module;
+pub mod import_resolver;
 pub mod name_matcher;
 pub mod path_aliases;
+pub mod swift_objc_bridge;
+pub mod swift_type_visibility;
+pub mod synth_utils;
+pub mod types;
 pub mod workspace_packages;
+pub mod js_builtins;
+pub mod jsx_code;
+pub mod resurrect_ref;
+pub mod shopify_themes;
+pub mod type_parameters;
+pub mod dart_libraries;
+pub mod go_stdlib_methods;
+pub mod dart_local_scope;
+pub mod ambient_modules;
+pub mod rust_scopes;
+pub mod frameworks;
+pub mod callback_synthesizer;
+pub mod module_importers;
+pub mod resolver;
+pub mod vbnet_receivers;
+
+pub use resolver::ReferenceResolver;

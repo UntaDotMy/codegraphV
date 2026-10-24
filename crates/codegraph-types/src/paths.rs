@@ -1,6 +1,7 @@
 //! Path conventions every layer shares — the `normalizePath` helper of
 //! `src/utils.ts` and the data-directory naming of `src/directory.ts`.
 
+use crate::nodepath;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -88,6 +89,111 @@ pub fn lexical_path_within_root(project_root: &str, file_path: &str) -> Option<S
     is_within_dir(&resolved, &crate::nodepath::resolve(&[project_root])).then_some(resolved)
 }
 
+/// `fs.realpathSync`: the canonical path, without the `\\?\` verbatim prefix Windows adds.
+pub fn real_path(p: &Path) -> std::io::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(p)?;
+    Ok(strip_verbatim(canonical))
+}
+
+/// `\\?\C:\x` → `C:\x`, `\\?\UNC\server\share` → `\\server\share`.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    if !cfg!(windows) {
+        return p;
+    }
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return PathBuf::from(rest.to_string());
+        }
+    }
+    p
+}
+
+/// Node's non-native `fs.realpathSync`: resolve symlinks while retaining the
+/// spelling of ordinary components (notably Windows 8.3 aliases). Path identity
+/// consumers need this distinction; content-serving containment uses the native
+/// canonicalization above. A failed lookup is returned to the caller, which may
+/// choose to retain its lexical input.
+pub fn real_path_preserving_spelling(path: &Path) -> std::io::Result<PathBuf> {
+    fn walk(path: &Path, depth: usize) -> std::io::Result<PathBuf> {
+        if depth > 40 {
+            return Err(std::io::Error::other("Too many symbolic links"));
+        }
+        let mut result = PathBuf::new();
+        for part in path.components() {
+            result.push(part.as_os_str());
+            if matches!(part, std::path::Component::Prefix(_)) { continue; }
+            let meta = std::fs::symlink_metadata(&result)?;
+            let is_link = meta.file_type().is_symlink();
+            #[cfg(windows)]
+            let is_link = {
+                use std::os::windows::fs::MetadataExt;
+                is_link || meta.file_attributes() & 0x400 != 0
+            };
+            if is_link {
+                let target = strip_verbatim(std::fs::read_link(&result)?);
+                let target = if target.is_absolute() { target } else { result.parent().unwrap_or(Path::new("")).join(target) };
+                result = walk(&resolve_path(target), depth + 1)?;
+            }
+        }
+        Ok(result)
+    }
+    walk(&resolve_path(path), 0)
+}
+
+/// Options of [`validate_path_within_root`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ValidateOptions {
+    /// Follow in-root symlinks out of the root (indexing read path only); the content-serving
+    /// sinks must never set this.
+    pub allow_symlink_escape: bool,
+}
+
+/// Validate that a file path stays within the project root, resolving symlinks.
+///
+/// Two layers: a cheap lexical check that catches `../` traversal, then a realpath check that
+/// catches symlink escapes — an in-repo symlink whose logical path is inside the root but whose
+/// real target points outside it (issue #527). A symlink that stays within the root is still
+/// allowed, so legitimate in-tree symlinks keep working. Both content-serving read sinks
+/// (`codegraph_node` `includeCode`, `codegraph_explore` source) go through here, so this is the
+/// chokepoint that keeps out-of-root file contents from leaking.
+///
+/// `allow_symlink_escape` waives **only** the realpath-escape rejection (the lexical `../` guard
+/// still applies) for the INDEXING read path. The directory walk deliberately descends into
+/// in-root symlinks whose targets live outside the root (e.g. a `game/` symlink in a Dota
+/// custom-game tree, #935); discovery and the reader must agree, or every file the walk
+/// enumerated fails to index.
+///
+/// Returns the resolved absolute path (realpath when it exists), or `None` if it escapes the root.
+pub fn validate_path_within_root(project_root: &str, file_path: &str, options: ValidateOptions) -> Option<String> {
+    // 1. Lexical containment — cheap, catches `../` traversal.
+    let resolved = lexical_path_within_root(project_root, file_path)?;
+    let normalized_root = nodepath::resolve(&[project_root]);
+
+    // 2. Symlink-aware containment — resolve symlinks on both sides and re-check.
+    let real_root = real_path(Path::new(&normalized_root));
+    let real_resolved = real_path(Path::new(&resolved));
+    match (real_root, real_resolved) {
+        (Ok(root), Ok(resolved_real)) => {
+            let resolved_real = resolved_real.to_string_lossy().into_owned();
+            if options.allow_symlink_escape {
+                return Some(resolved_real);
+            }
+            is_within_dir(&resolved_real, &root.to_string_lossy()).then_some(resolved_real)
+        }
+        // ENOENT: the path doesn't exist yet (a file about to be written, or an index entry for a
+        // since-deleted file) — no symlink to follow, and the lexical check already passed, so
+        // allow the lexical path. Any other resolution failure (ELOOP, EACCES, …) is treated as
+        // unsafe → reject.
+        (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Some(resolved),
+        _ => None,
+    }
+}
+
 /// The user's home directory (`os.homedir()`).
 pub fn home_dir() -> Option<PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
@@ -112,5 +218,14 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(resolve_path("a/./b/../c"), cwd.join("a").join("c"));
         assert_eq!(normalize_path(r"a\b/c"), "a/b/c");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_native_realpath_keeps_short_alias_and_case_spelling() {
+        let temp = std::env::temp_dir();
+        let input = resolve_path(&temp).to_string_lossy().to_lowercase();
+        assert_eq!(real_path_preserving_spelling(Path::new(&input)).unwrap().to_string_lossy(), input);
+        assert!(real_path(Path::new(&input)).is_ok());
     }
 }
