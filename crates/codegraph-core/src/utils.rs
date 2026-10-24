@@ -243,7 +243,10 @@ mod tests {
 
     #[test]
     fn sensitive_dirs_refused() {
-        assert!(validate_project_path("/").is_some());
+        // An absolute sensitive path: on Windows "/" resolves against the cwd's drive, which
+        // is D: on CI runners.
+        let root = if cfg!(windows) { r"C:\Windows" } else { "/" };
+        assert!(validate_project_path(root).is_some());
         assert!(validate_project_path(".").is_none());
     }
 }

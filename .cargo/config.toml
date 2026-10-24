@@ -1,0 +1,5 @@
+[env]
+# Always compile the bundled PCRE2. A system libpcre2 found through pkg-config (Ubuntu 22.04
+# ships 10.39) rejects \p{ID_Start}/\p{ID_Continue}, which the ported JS regexes use, and a
+# dynamically linked one would make the release binary depend on the user's distro.
+PCRE2_SYS_STATIC = "1"
