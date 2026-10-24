@@ -467,6 +467,108 @@ pub fn explore_budget(files: usize) -> ExploreBudget {
         per_file,
     }
 }
+/// Definitions kept per query token: the token's best few, not every same-named symbol.
+const NAMED_PER_TOKEN: usize = 3;
+
+/// The definitions the query names, best first: one under a path the query also names
+/// (`mpsc channel` → `sync/mpsc/…`), then one whose file defines more of the other named
+/// symbols, then source over tests; a declaration beats a same-named member or variable.
+/// Also returns the tokens nothing in the index defines.
+fn named_definitions(cg: &CodeGraph, tokens: &[String], paths: &[String]) -> Result<(IndexMap<String, Node>, Vec<String>)> {
+    let segments: HashSet<String> = paths
+        .iter()
+        .flat_map(|p| p.split('/').map(|s| s.split('.').next().unwrap_or(s).to_lowercase()))
+        .collect();
+    let scopes: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).filter(|t| segments.contains(t)).collect();
+    let in_scope = |path: &str| {
+        let lower = path.to_lowercase();
+        scopes.iter().any(|s| lower.split('/').any(|seg| seg.split('.').next() == Some(s.as_str())))
+    };
+    let mut per_token: Vec<Vec<Node>> = Vec::new();
+    for token in tokens {
+        let hits: Vec<Node> = lookup(cg, token)?
+            .into_iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File | NodeKind::Import | NodeKind::Export | NodeKind::Parameter))
+            .collect();
+        per_token.push(hits);
+    }
+    let mut out = IndexMap::new();
+    let mut undefined = Vec::new();
+    for (i, hits) in per_token.iter().enumerate() {
+        if hits.is_empty() {
+            // A bare path word (`mpsc`) is a scope, not a missing definition.
+            if !segments.contains(&tokens[i]) {
+                undefined.push(tokens[i].clone());
+            }
+            continue;
+        }
+        let colocated = |file: &str| {
+            per_token
+                .iter()
+                .enumerate()
+                .filter(|(j, h)| *j != i && h.iter().any(|n| n.file_path == file))
+                .count()
+        };
+        let mut ranked: Vec<&Node> = hits.iter().collect();
+        ranked.sort_by_key(|n| {
+            (
+                !scopes.is_empty() && !in_scope(&n.file_path),
+                // A declaration before a member that shares its name (an enum variant, a field).
+                matches!(n.kind, NodeKind::EnumMember | NodeKind::Field | NodeKind::Property | NodeKind::Variable),
+                std::cmp::Reverse(colocated(&n.file_path)),
+                codegraph_search::is_test_file(&n.file_path),
+                n.file_path.len(),
+                n.start_line,
+            )
+        });
+        for n in ranked.into_iter().take(NAMED_PER_TOKEN) {
+            out.entry(n.id.clone()).or_insert_with(|| n.clone());
+        }
+    }
+    Ok((out, undefined))
+}
+
+/// Declaration lines for names the parser did not see (a type inside `pin_project! { … }`).
+fn declaration_lines(lines: &[&str], names: &[String]) -> Vec<u32> {
+    let mut found = Vec::new();
+    for name in names {
+        let re = codegraph_jsre::Re::cached(
+            &format!(
+                r"\b(?:struct|enum|union|trait|class|interface|type|fn|def|func|function|const|static|let|var|val|object|protocol|module|record)\s+{}\b",
+                codegraph_jsre::escape_regex(name)
+            ),
+            "",
+        );
+        if let Some(i) = lines.iter().position(|l| re.is_match(l)) {
+            found.push(i as u32 + 1);
+        }
+    }
+    found
+}
+
+/// The query's symbol tokens: words and `a.b` / `a::b` paths, deduplicated in order.
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    query
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':' | '#')))
+        .map(|t| t.trim_matches(|c| matches!(c, '.' | ':')))
+        .filter(|t| t.chars().any(|c| c.is_alphabetic() || c == '_'))
+        .filter(|t| seen.insert(t.to_string()))
+        .map(str::to_string)
+        .take(16)
+        .collect()
+}
+
+/// Lines of each focus range taken before any range's full body.
+const HEAD_LINES: u32 = 12;
+
+/// A source range to show, most important first: a named definition, then an explicit line
+/// anchor, then a step on the flow among the named symbols.
+struct Focus {
+    start: u32,
+    end: u32,
+}
+
 pub fn explore(
     cg: &CodeGraph,
     args: &Value,
@@ -490,6 +592,7 @@ pub fn explore(
         &NamedSymbolFlowOptions::default(),
         Some(&go),
     )?;
+    let (named, undefined) = named_definitions(cg, &query_tokens(&extracted.stripped_query), &paths)?;
     let graph = cg.find_relevant_context(
         &extracted.stripped_query,
         &FindRelevantContextOptions {
@@ -498,7 +601,20 @@ pub fn explore(
             ..Default::default()
         },
     )?;
-    let mut relevant = IndexMap::<String, Vec<Node>>::new();
+    // Files in order of importance; each with the symbols to list and the ranges to show.
+    let mut relevant = IndexMap::<String, (Vec<Node>, Vec<Focus>)>::new();
+    let mut add = |relevant: &mut IndexMap<String, (Vec<Node>, Vec<Focus>)>, n: &Node, focus: bool| {
+        let (list, ranges) = relevant.entry(n.file_path.clone()).or_default();
+        if !list.iter().any(|v| v.id == n.id) {
+            list.push(n.clone());
+        }
+        if focus {
+            ranges.push(Focus { start: n.start_line, end: n.end_line });
+        }
+    };
+    for n in named.values() {
+        add(&mut relevant, n, true);
+    }
     let mut out = format!("**Explore: {query}**\n\n");
     if !flow.chains.is_empty() {
         out.push_str("**Flow among named symbols**\n\n");
@@ -510,29 +626,30 @@ pub fn explore(
                     location(&step.node),
                     step.edge.as_ref().map(hop).unwrap_or_default()
                 ));
-                relevant
-                    .entry(step.node.file_path.clone())
-                    .or_default()
-                    .push(step.node.clone());
+                add(&mut relevant, &step.node, true);
             }
             out.push('\n');
         }
+    }
+    for anchor in &extracted.line_anchors {
+        relevant
+            .entry(anchor.file.clone())
+            .or_default()
+            .1
+            .push(Focus { start: anchor.start.saturating_sub(3).max(1), end: anchor.end.saturating_add(5) });
     }
     for file in &extracted.pinned_files {
         relevant.entry(file.clone()).or_default();
     }
     for n in flow.named.values().chain(graph.nodes.values()) {
-        let list = relevant.entry(n.file_path.clone()).or_default();
-        if !list.iter().any(|v| v.id == n.id) {
-            list.push(n.clone());
-        }
+        add(&mut relevant, n, false);
     }
     if relevant.is_empty() {
         return Ok(ToolResult::text(format!("No indexed symbols or files match \"{query}\". Try exact symbol names or indexed paths.")));
     }
     let max_files = number(args, "maxFiles", budget.files, 1, 20);
     let mut omitted = vec![];
-    for (index, (file, mut nodes)) in relevant.into_iter().enumerate() {
+    for (index, (file, (mut nodes, focus))) in relevant.into_iter().enumerate() {
         if index >= max_files || out.chars().count() > budget.chars - 1500 {
             omitted.push(file);
             continue;
@@ -567,27 +684,32 @@ pub fn explore(
             out.push_str("Configuration keys only; values withheld.\n\n");
             continue;
         }
+        // A file named only as context is listed, not printed; a pinned file with nothing
+        // named in it is printed from the top.
+        let pinned = extracted.pinned_files.contains(&file);
+        if focus.is_empty() && !pinned && undefined.is_empty() {
+            out.push('\n');
+            continue;
+        }
         let Some(source) = read_source(cg, &file) else {
             out.push_str("Source unavailable on disk.\n\n");
             continue;
         };
         let lines: Vec<_> = source.split('\n').collect();
-        // Include named bodies and explicit anchors before surrounding file text.
-        let mut wanted = std::collections::BTreeSet::new();
-        for a in extracted.line_anchors.iter().filter(|a| a.file == file) {
-            wanted.extend(
-                a.start.saturating_sub(3).max(1)..=a.end.saturating_add(5).min(lines.len() as u32),
-            );
+        let last = lines.len() as u32;
+        let mut focus = focus;
+        for line in declaration_lines(&lines, &undefined) {
+            focus.push(Focus { start: line, end: line + HEAD_LINES });
         }
-        for n in &nodes {
-            wanted.extend(
-                n.start_line.saturating_sub(2).max(1)
-                    ..=n.end_line.saturating_add(2).min(lines.len() as u32),
-            );
+        if focus.is_empty() && !pinned {
+            out.push('\n');
+            continue;
         }
-        if wanted.is_empty() {
-            wanted.extend(1..=lines.len() as u32);
-        }
+        let ranges: Vec<(u32, u32)> = if focus.is_empty() {
+            vec![(1, last)]
+        } else {
+            focus.iter().map(|f| (f.start.saturating_sub(2).max(1), f.end.saturating_add(1).min(last))).collect()
+        };
         // Scope emission state to project, file, and current content. An edit must be shown again.
         use sha2::{Digest, Sha256};
         let key = format!(
@@ -596,32 +718,46 @@ pub fn explore(
             Sha256::digest(source.as_bytes())
         );
         let seen = shown.entry(key).or_default();
+        // Take ranges in priority order (each from its first line) until the budgets run out,
+        // then print what was taken in line order.
+        let mut taken = std::collections::BTreeMap::<u32, String>::new();
         let mut used = 0;
-        let mut previous = 0;
-        out.push_str(&format!("\n```{}\n", record.language));
+        let room = (budget.chars - 500).saturating_sub(out.chars().count());
         let mut more = false;
-        for line_no in wanted {
-            if seen.contains(&line_no) {
-                continue;
+        // Two passes: every range's head first, so one long body cannot crowd out the rest.
+        'ranges: for (pass, &(start, end)) in [0, 1].iter().flat_map(|p| ranges.iter().map(move |r| (*p, r))) {
+            let stop = if pass == 0 { end.min(start + HEAD_LINES) } else { end };
+            for line_no in start..=stop {
+                if seen.contains(&line_no) || taken.contains_key(&line_no) {
+                    continue;
+                }
+                let Some(line) = lines.get(line_no.saturating_sub(1) as usize) else {
+                    continue;
+                };
+                let text = format!("{line_no:>6}\t{}\n", line.trim_end_matches('\r'));
+                let cost = text.chars().count();
+                if used + cost > budget.per_file || used + cost > room {
+                    more = true;
+                    break 'ranges;
+                }
+                used += cost;
+                taken.insert(line_no, text);
             }
-            let Some(line) = lines.get(line_no.saturating_sub(1) as usize) else {
-                continue;
-            };
-            let text = format!("{line_no:>6}\t{}\n", line.trim_end_matches('\r'));
-            let cost = text.chars().count();
-            if used + cost > budget.per_file || out.chars().count() + cost > budget.chars - 500 {
-                more = true;
-                break;
-            }
-            if previous != 0 && line_no > previous + 1 {
-                out.push_str("     …\n");
-            }
-            out.push_str(&text);
-            seen.insert(line_no);
-            previous = line_no;
-            used += cost;
         }
-        out.push_str("```\n\n");
+        if !taken.is_empty() {
+            out.push_str(&format!("\n```{}\n", record.language));
+            let mut previous = 0;
+            for (line_no, text) in taken {
+                if previous != 0 && line_no > previous + 1 {
+                    out.push_str("     …\n");
+                }
+                out.push_str(&text);
+                seen.insert(line_no);
+                previous = line_no;
+            }
+            out.push_str("```\n");
+        }
+        out.push('\n');
         if more {
             out.push_str(&format!("More source in `{file}`: call codegraph_explore again with the same symbols, or codegraph_node with file and offset.\n\n"));
         }
