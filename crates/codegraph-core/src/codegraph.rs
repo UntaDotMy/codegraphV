@@ -614,16 +614,28 @@ impl CodeGraph {
             self.store.begin_bulk_edge_load()?;
             self.store.begin_bulk_ref_load()?;
         }
+        let t = Instant::now();
         let stats = self.resolver.resolve_and_persist_batched(Some(&report), 5000, false);
+        if timings() {
+            eprintln!("[phase-timing]   resolve-batches: {}ms ({total} refs)", t.elapsed().as_millis());
+        }
+        let t = Instant::now();
         if bulk {
             self.store.end_bulk_ref_load()?;
             self.store.end_bulk_edge_load(true)?;
             self.store.create_synthesis_site_index()?;
         }
+        if timings() {
+            eprintln!("[phase-timing]   bulk-index-rebuild: {}ms", t.elapsed().as_millis());
+        }
         let mut stats = stats?;
         if synthesize {
+            let t = Instant::now();
             let count = synthesize_callback_edges(&self.store, self.resolver.context()).unwrap_or(0);
             stats.by_method.insert("callback-synthesis".to_string(), count);
+            if timings() {
+                eprintln!("[phase-timing]   synthesis: {}ms", t.elapsed().as_millis());
+            }
         }
         Ok(stats)
     }

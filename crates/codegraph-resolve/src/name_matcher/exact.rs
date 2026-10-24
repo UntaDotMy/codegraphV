@@ -95,6 +95,14 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         }
         bare_type_name.get().unwrap()
     };
+    // Depends on the reference only, so it is asked once, not per same-named candidate.
+    let locally_bound: Cell<Option<bool>> = Cell::new(None);
+    let js_locally_bound = || {
+        if locally_bound.get().is_none() {
+            locally_bound.set(Some(is_locally_bound_js_name(&r.reference_name, &r.file_path, ctx)));
+        }
+        locally_bound.get().unwrap()
+    };
     let same_name = ctx.get_nodes_by_name(&r.reference_name);
     let c_macro_call = is_calls(r)
         && is_c_family(r.language)
@@ -119,7 +127,7 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
                 && is_lexically_reachable(n, r, ctx)
                 && is_visible_by_language(n, r, ctx)
                 && (!import_ref || n.file_path == r.file_path || !is_esm_family(n.language) || !is_sealed_module(&n.file_path, ctx))
-                && !(bare_js && n.file_path != r.file_path && is_locally_bound_js_name(&r.reference_name, &r.file_path, ctx))
+                && !(bare_js && n.file_path != r.file_path && js_locally_bound())
         })
         .cloned()
         .collect();

@@ -197,6 +197,85 @@ struct PersistOutcome {
     removed: usize,
 }
 
+/// Below this many pending references a run stays on one thread: a worker's own connection and
+/// cold caches cost more than it saves.
+const PARALLEL_MIN_REFS: usize = 100_000;
+const MAX_RESOLVE_WORKERS: usize = 4;
+/// Address space for a worker's stack, as for the parse workers: the matchers recurse.
+const RESOLVE_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+/// `CODEGRAPH_RESOLVE_WORKERS` sets the count (1 = single-threaded); unset, a big run takes half
+/// the cores, at most four, so indexing leaves the machine responsive.
+fn resolve_worker_count(total: usize) -> usize {
+    if let Some(n) = std::env::var("CODEGRAPH_RESOLVE_WORKERS").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
+        return n.clamp(1, 16);
+    }
+    if total < PARALLEL_MIN_REFS {
+        return 1;
+    }
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    (cpus / 2).clamp(1, MAX_RESOLVE_WORKERS)
+}
+
+/// One chunk's result, with the references its resolver parked for the deferred passes.
+struct ChunkOutcome {
+    result: ResolutionResult,
+    chain: Vec<UnresolvedRef>,
+    this_member: Vec<UnresolvedRef>,
+}
+
+impl ChunkOutcome {
+    /// Resolved on the calling resolver, which parks into its own queues directly.
+    fn local(resolver: &ReferenceResolver, chunk: &[UnresolvedReference]) -> ChunkOutcome {
+        ChunkOutcome { result: resolver.resolve_batch(chunk), chain: Vec::new(), this_member: Vec::new() }
+    }
+}
+
+/// A resolve worker thread with a read-only connection and a resolver of its own.
+struct Worker {
+    jobs: std::sync::mpsc::Sender<Vec<UnresolvedReference>>,
+    results: std::sync::mpsc::Receiver<ChunkOutcome>,
+}
+
+impl Worker {
+    fn spawn<'scope>(
+        scope: &'scope std::thread::Scope<'scope, '_>,
+        n: usize,
+        db_path: &std::path::Path,
+        project_root: &str,
+    ) -> Option<Worker> {
+        let (jobs, job_rx) = std::sync::mpsc::channel::<Vec<UnresolvedReference>>();
+        let (result_tx, results) = std::sync::mpsc::channel::<ChunkOutcome>();
+        let db_path = db_path.to_path_buf();
+        let root = project_root.to_string();
+        let body = move || {
+            let store = match Store::open(&db_path, codegraph_db::OpenOptions { read_only: true }) {
+                Ok(store) => store,
+                Err(e) => {
+                    log_debug("resolve worker could not open the index", &[("error", e.to_string())]);
+                    return;
+                }
+            };
+            let resolver = ReferenceResolver::create(&root, Rc::new(store));
+            for chunk in job_rx {
+                let result = resolver.resolve_batch(&chunk);
+                let chain = std::mem::take(&mut *resolver.deferred_chain_refs.borrow_mut());
+                let this_member = std::mem::take(&mut *resolver.deferred_this_member_refs.borrow_mut());
+                resolver.deferred_row_ids.borrow_mut().clear();
+                if result_tx.send(ChunkOutcome { result, chain, this_member }).is_err() {
+                    break;
+                }
+            }
+        };
+        std::thread::Builder::new()
+            .name(format!("codegraph-resolve-{n}"))
+            .stack_size(RESOLVE_STACK_BYTES)
+            .spawn_scoped(scope, body)
+            .ok()
+            .map(|_| Worker { jobs, results })
+    }
+}
+
 pub struct ReferenceResolver {
     ctx: Rc<Ctx>,
     store: Rc<Store>,
@@ -1134,6 +1213,11 @@ impl ReferenceResolver {
 
     /// Resolve every pending reference in keyset batches, persisting each batch before the next
     /// is read, then synthesize the callback edges. Returns the aggregate stats.
+    ///
+    /// A big run splits each batch across worker threads (see [`resolve_worker_count`]). Every
+    /// worker owns a read-only connection and its own resolver; a reference reads only what the
+    /// batches before its own persisted, so the merged result (chunks in order) is the one a
+    /// single thread produces.
     pub fn resolve_and_persist_batched(
         &self,
         on_progress: Option<&dyn Fn(usize, usize)>,
@@ -1142,6 +1226,31 @@ impl ReferenceResolver {
     ) -> codegraph_db::Result<ResolutionStats> {
         self.warm_caches();
         let total = self.store.get_unresolved_references_count()? as usize;
+        let workers = resolve_worker_count(total);
+        let db_path = self.store.path().to_path_buf();
+        let parallel = workers > 1 && db_path.is_file();
+        let mut aggregate = std::thread::scope(|scope| {
+            let pool: Vec<Worker> = if parallel {
+                (0..workers).filter_map(|n| Worker::spawn(scope, n, &db_path, self.ctx.project_root())).collect()
+            } else {
+                Vec::new()
+            };
+            self.run_batches(&pool, on_progress, batch_size, total)
+        })?;
+        if synthesize {
+            let count = synthesize_callback_edges(&self.store, &self.ctx).unwrap_or(0);
+            aggregate.by_method.insert("callback-synthesis".to_string(), count);
+        }
+        Ok(aggregate)
+    }
+
+    fn run_batches(
+        &self,
+        pool: &[Worker],
+        on_progress: Option<&dyn Fn(usize, usize)>,
+        batch_size: usize,
+        total: usize,
+    ) -> codegraph_db::Result<ResolutionStats> {
         let mut processed = 0usize;
         let mut aggregate = ResolutionStats::default();
 
@@ -1162,11 +1271,19 @@ impl ReferenceResolver {
             Ok(next)
         };
         let mut prev_remaining = i64::MAX;
+        let timed = std::env::var("CODEGRAPH_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty());
+        let (mut read_ms, mut resolve_ms, mut persist_ms) = (0u128, 0u128, 0u128);
         let mut batch = read_next_batch(&mut prerequisites, &mut after_row_id)?;
         while !batch.is_empty() {
+            let t = std::time::Instant::now();
             let next_batch = read_next_batch(&mut prerequisites, &mut after_row_id)?;
-            let result = self.resolve_batch(&batch);
+            read_ms += t.elapsed().as_millis();
+            let t = std::time::Instant::now();
+            let result = if pool.is_empty() { self.resolve_batch(&batch) } else { self.resolve_batch_on(pool, &batch) };
+            resolve_ms += t.elapsed().as_millis();
+            let t = std::time::Instant::now();
             let (_, outcome) = self.persist_resolution_result(&result)?;
+            persist_ms += t.elapsed().as_millis();
             let deferred_count = result.unresolved.len() - self.non_deferred_failures(&result.unresolved).len();
 
             aggregate.total += result.stats.total;
@@ -1191,12 +1308,39 @@ impl ReferenceResolver {
             }
             batch = next_batch;
         }
-
-        if synthesize {
-            let count = synthesize_callback_edges(&self.store, &self.ctx).unwrap_or(0);
-            aggregate.by_method.insert("callback-synthesis".to_string(), count);
+        if timed {
+            eprintln!("[phase-timing]     read {read_ms}ms, resolve {resolve_ms}ms, persist {persist_ms}ms ({} workers)", pool.len().max(1));
         }
         Ok(aggregate)
+    }
+
+    /// One batch across the pool: contiguous chunks, merged back in order. A chunk whose worker
+    /// is gone (its connection failed to open) is resolved here.
+    fn resolve_batch_on(&self, pool: &[Worker], batch: &[UnresolvedReference]) -> ResolutionResult {
+        let per = batch.len().div_ceil(pool.len());
+        let chunks: Vec<&[UnresolvedReference]> = batch.chunks(per).collect();
+        let sent: Vec<bool> = chunks.iter().zip(pool).map(|(chunk, w)| w.jobs.send(chunk.to_vec()).is_ok()).collect();
+        let mut merged = ResolutionResult { resolved: Vec::new(), unresolved: Vec::new(), stats: ResolutionStats::default() };
+        for ((chunk, w), sent) in chunks.iter().zip(pool).zip(sent) {
+            let part = if sent { w.results.recv().ok() } else { None };
+            let part = part.unwrap_or_else(|| ChunkOutcome::local(self, chunk));
+            for r in &part.chain {
+                self.defer_reference(r, &self.deferred_chain_refs);
+            }
+            for r in &part.this_member {
+                self.defer_reference(r, &self.deferred_this_member_refs);
+            }
+            let stats = &mut merged.stats;
+            stats.total += part.result.stats.total;
+            stats.resolved += part.result.stats.resolved;
+            stats.unresolved += part.result.stats.unresolved;
+            for (method, count) in part.result.stats.by_method {
+                *stats.by_method.entry(method).or_insert(0) += count;
+            }
+            merged.resolved.extend(part.result.resolved);
+            merged.unresolved.extend(part.result.unresolved);
+        }
+        merged
     }
 
     fn resolve_batch(&self, batch: &[UnresolvedReference]) -> ResolutionResult {

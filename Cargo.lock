@@ -377,7 +377,7 @@ dependencies = [
 name = "codegraph-jsre"
 version = "1.6.2"
 dependencies = [
- "pcre2",
+ "pcre2-sys",
 ]
 
 [[package]]

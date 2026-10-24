@@ -24,7 +24,9 @@
 //! units; the two agree on BMP-only text and callers that publish columns convert
 //! with [`utf16_len`]. Astral characters match as one unit here, two in V8.
 
-use pcre2::bytes::{CaptureLocations, Regex, RegexBuilder};
+mod pcre;
+
+use pcre::{CaptureLocations, Regex};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -394,7 +396,6 @@ pub struct Re {
     pool: Pool,
     names: Arc<[(String, usize)]>,
     group_count: usize,
-    sticky: bool,
     source: String,
 }
 
@@ -417,13 +418,7 @@ impl Re {
         let pcre = js_to_pcre(source, multiline, flags.contains('s'), flags.contains('u'))?;
         let sticky = flags.contains('y');
         let pattern = if sticky { format!(r"\G(?:{pcre})") } else { pcre };
-        let inner = RegexBuilder::new()
-            .utf(true)
-            .caseless(flags.contains('i'))
-            .jit_if_available(true)
-            .max_jit_stack_size(Some(JIT_STACK_BYTES))
-            .build(&pattern)
-            .map_err(|e| e.to_string())?;
+        let inner = Regex::new(&pattern, flags.contains('i'))?;
         let mut names = Vec::new();
         for (idx, name) in inner.capture_names().iter().enumerate() {
             if let Some(name) = name {
@@ -431,7 +426,7 @@ impl Re {
             }
         }
         let group_count = inner.captures_len();
-        Ok(Re { inner, pool: Pool::default(), names: names.into(), group_count, sticky, source: source.to_string() })
+        Ok(Re { inner, pool: Pool::default(), names: names.into(), group_count, source: source.to_string() })
     }
 
     /// A shared compiled regex for a pattern built at run time.
@@ -472,10 +467,7 @@ impl Re {
 
     /// `regex.test(s)` (a non-global regex: always from the start).
     pub fn is_match(&self, s: &str) -> bool {
-        if self.sticky {
-            return self.captures_at(s, 0).is_some();
-        }
-        self.inner.is_match(s.as_bytes()).unwrap_or(false)
+        self.captures_at(s, 0).is_some()
     }
 
     /// `regex.exec(s)` with `lastIndex = 0`.
@@ -490,9 +482,9 @@ impl Re {
             return None;
         }
         let taken = self.pool.lock().unwrap().pop();
-        let mut locs = taken.unwrap_or_else(|| self.inner.capture_locations());
-        match self.inner.captures_read_at(&mut locs, s.as_bytes(), pos) {
-            Ok(Some(_)) => Some(Caps { text: s, locs: Some(locs), pool: Arc::clone(&self.pool), names: Arc::clone(&self.names), len: self.group_count }),
+        let mut locs = taken.unwrap_or_else(|| self.inner.capture_locations(JIT_STACK_BYTES));
+        match self.inner.captures_read_at(&mut locs, s, pos) {
+            true => Some(Caps { text: s, locs: Some(locs), pool: Arc::clone(&self.pool), names: Arc::clone(&self.names), len: self.group_count }),
             _ => {
                 self.pool.lock().unwrap().push(locs);
                 None

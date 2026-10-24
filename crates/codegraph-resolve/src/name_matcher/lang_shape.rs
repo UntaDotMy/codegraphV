@@ -56,7 +56,8 @@ impl RefShape for AllOf {
 
 pub struct LangShape {
     pub type_ref: bool,
-    pub rust_bare: bool,
+    /// A bare Rust name: the scope test, its per-reference half computed once.
+    pub rust_scope: Option<super::rust::scope::RustRefScope>,
     pub python: Option<PythonCallShape>,
     pub lang: Option<Box<dyn RefShape>>,
 }
@@ -65,7 +66,8 @@ impl LangShape {
     pub fn compute(r: &UnresolvedRef, ctx: &Ctx) -> LangShape {
         LangShape {
             type_ref: is_dot_net_type_ref(r, ctx),
-            rust_bare: r.language == Language::Rust && re!(r"^[A-Za-z_]\w*$").is_match(&r.reference_name),
+            rust_scope: (r.language == Language::Rust && re!(r"^[A-Za-z_]\w*$").is_match(&r.reference_name))
+                .then(|| super::rust::scope::RustRefScope::of(r, ctx)),
             python: python_call_shape(r, ctx),
             lang: super::pending::language_shape(r, ctx),
         }
@@ -74,7 +76,7 @@ impl LangShape {
     /// Tests both matchers share: does the shape rule this candidate out?
     pub fn excludes(&self, n: &NodeRef, r: &UnresolvedRef, ctx: &Ctx) -> bool {
         (self.type_ref && !can_name_in_type_position(n))
-            || (self.rust_bare && !super::rust::is_rust_name_in_scope(n, r, ctx))
+            || self.rust_scope.as_ref().is_some_and(|s| !s.admits(n, r, ctx))
             || self.python.as_ref().is_some_and(|shape| !fits_python_call_shape(n, shape, r, ctx))
             || self.lang.as_ref().is_some_and(|l| l.excludes(n, r, ctx))
             || super::pending::is_hidden_by_language(n, r, ctx)
