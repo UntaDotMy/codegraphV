@@ -710,7 +710,12 @@ fn resolve_module_import_to_file(r: &UnresolvedRef, imports: &[ImportMapping], c
 }
 
 fn resolve_python_absolute_module(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
-    if !r.is_kind(EdgeKind::Imports) || !r.reference_name.contains('.') {
+    // A dotted `import a.b.c` names its module's full path, and so does the module a
+    // from-import names, dotted or not (`from loader import X`, 23a80a84).
+    if !r.is_kind(EdgeKind::Imports) {
+        return None;
+    }
+    if !r.reference_name.contains('.') && !crate::name_matcher::is_python_from_import_module(r, ctx) {
         return None;
     }
     python_module_file_node(&r.reference_name, &r.file_path, ctx).map(|hit| imported(r, &hit.id, 0.9))

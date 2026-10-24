@@ -153,10 +153,46 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
     let best = cpp_function_overload(&nearest, &candidates, r, ctx);
     if is_cross_file_reachable(&best, r, ctx) {
         let proximity = compute_path_proximity(&r.file_path, &best.file_path);
-        let confidence = if proximity >= 30 { 0.7 } else { 0.4 };
+        let confidence = if is_decisive_same_file_match(&best, r, &candidates, ctx) {
+            0.9
+        } else if proximity >= 30 {
+            0.7
+        } else {
+            0.4
+        };
         return Some(ResolvedRef::new(r, best.id.clone(), confidence, ResolvedBy::ExactMatch));
     }
     None
+}
+
+/// isDecisiveSameFileMatch (name-matcher.ts, cde4cd74): `best` won because it is
+/// THE definition in the reference's own file — the only same-file candidate,
+/// not the caller itself, and (as a member of a declared type, module or
+/// namespace) inside the owner the caller is in. Scores like a lone candidate.
+fn is_decisive_same_file_match(best: &NodeRef, r: &UnresolvedRef, candidates: &[NodeRef], ctx: &Ctx) -> bool {
+    if best.file_path != r.file_path || best.id == r.from_node_id {
+        return false;
+    }
+    if candidates.iter().any(|c| c.id != best.id && c.file_path == r.file_path) {
+        return false;
+    }
+    let Some(sep) = best.qualified_name.rfind("::").filter(|&s| s > 0) else {
+        return best.kind != NodeKind::Method;
+    };
+    let owner = &best.qualified_name[..sep];
+    if best.kind != NodeKind::Method {
+        let owner_name = owner.rfind("::").map_or(owner, |cut| &owner[cut + 2..]);
+        let declared_only_functions = ctx
+            .get_nodes_in_file_named(&best.file_path, owner_name)
+            .iter()
+            .filter(|n| n.qualified_name == owner)
+            .all(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method));
+        if declared_only_functions {
+            return true;
+        }
+    }
+    ctx.node_by_id(&r.from_node_id)
+        .is_some_and(|from| from.qualified_name == owner || from.qualified_name.starts_with(&format!("{owner}::")))
 }
 
 /// `qn` ends with `name` at a `::` or `.` boundary.
