@@ -15,7 +15,11 @@ fn compile(root: &PathBuf, name: &str, c11: bool, silence_unused_function: bool)
     }
     c.include(&dir);
     c.file(dir.join("parser.c"));
-    c.file(dir.join("scanner.c"));
+    // A grammar without external tokens (solidity) ships no scanner.
+    let scanner = dir.join("scanner.c");
+    if scanner.exists() {
+        c.file(scanner);
+    }
     c.flag_if_supported("-Wno-unused-parameter");
     c.flag_if_supported("-Wno-unused-but-set-variable");
     c.flag_if_supported("-Wno-trigraphs");
@@ -39,4 +43,6 @@ fn main() {
     compile(&root, "swift", true, false);
     // nix: nix-community 3d0173d regenerated with tree-sitter-cli 0.25.10 (ABI 15).
     compile(&root, "nix", false, false);
+    // solidity: JoranHonig b239a95 src/ as published (ABI 14) — the commit tree-sitter-wasms 0.1.13 built.
+    compile(&root, "solidity", false, false);
 }

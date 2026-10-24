@@ -43,14 +43,16 @@ extern "C" {
 // with tree-sitter-cli 0.25.10, the build the vendored wasm came from).
 extern "C" {
     fn tree_sitter_nix() -> *const ();
+    // JoranHonig/tree-sitter-solidity b239a95, src/ as published (ABI 14).
+    fn tree_sitter_solidity() -> *const ();
 }
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 21] = [
+pub const LANGUAGES: [&str; 22] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
     "csharp", "ruby", "php", "swift", "kotlin", "r", "lua", "luau", "scala", "dart",
-    "nix",
+    "nix", "solidity",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {
@@ -109,6 +111,7 @@ pub fn grammar_for(language: &str) -> Option<Language> {
             Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_dart) }.into())
         }
         "nix" => Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_nix) }.into()),
+        "solidity" => Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_solidity) }.into()),
         _ => None,
     }
 }
