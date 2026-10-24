@@ -357,6 +357,12 @@ pub fn interface_override_edges(ctx: &Ctx) -> Vec<Edge> {
                     if bm.id == m.id {
                         continue;
                     }
+                    // A JS/TS static method overrides only a static one, and an instance method
+                    // only an instance one (#2761): a call to one never runs the other.
+                    let static_split = matches!(m.language, Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx);
+                    if static_split && (bm.is_static == Some(true)) != (m.is_static == Some(true)) {
+                        continue;
+                    }
                     if !seen.insert(format!("{}>{}", bm.id, m.id)) {
                         continue;
                     }
