@@ -79,6 +79,7 @@ pub fn ambiguous_name_ceiling() -> usize {
 
 mod gate;
 mod pending;
+pub mod kotlin_call_result;
 pub mod python;
 pub mod util;
 pub mod calls;

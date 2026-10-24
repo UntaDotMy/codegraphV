@@ -484,6 +484,15 @@ fn match_reference_inner(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             return lent.value();
         }
     }
+    // A Kotlin call on what an unqualified call returns, recorded by its bare name —
+    // `repository().pending(1)` — is a call on the type that function declares, or on nothing
+    // (#2805).
+    if r.language == Language::Kotlin && r.is_kind(EdgeKind::Calls) && re!(r"^[A-Za-z_]\w*$").is_match(&r.reference_name) {
+        let on_result = super::kotlin_call_result::match_kotlin_call_result_call(r, ctx);
+        if !on_result.is_undefined() {
+            return on_result.value();
+        }
+    }
     if let Some(result) = match_by_file_path(r, ctx) {
         return Some(result);
     }

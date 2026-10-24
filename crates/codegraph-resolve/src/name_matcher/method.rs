@@ -373,6 +373,11 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         if inferred_type.is_none() && r.language == Language::Python && dot {
             inferred_type = python_fixture_return_type(&object_or_class, r, ctx);
         }
+        // A Kotlin local set from an unqualified call holds what that function declares it returns:
+        // `val repo = repository()` (#2805), where the receiver's name led to the interface `Repo`.
+        if inferred_type.is_none() && r.language == Language::Kotlin && dot && re!(r"^[a-z_]\w*$").is_match(&object_or_class) {
+            inferred_type = super::kotlin_call_result::kotlin_local_call_result_type(&object_or_class, r, ctx);
+        }
         if inferred_type.is_none() && r.language == Language::Python && dot && is_python_outside_module_receiver(&object_or_class, r, ctx) {
             return None;
         }
