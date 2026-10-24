@@ -338,7 +338,9 @@ else:
 # --------------------------------------------------------------------------
 
 def rust_bin() -> Path:
-    exe = ROOT / 'target' / 'release' / ('codegraph.exe' if os.name == 'nt' else 'codegraph')
+    # CODEGRAPH_RUST_BIN points the parity tools at another build (a debug binary for small fixtures).
+    override = os.environ.get('CODEGRAPH_RUST_BIN')
+    exe = Path(override) if override else ROOT / 'target' / 'release' / ('codegraph.exe' if os.name == 'nt' else 'codegraph')
     if not exe.exists():
         sys.exit(f'missing {exe}: run `cargo build --release -p codegraph-cli` first')
     return exe

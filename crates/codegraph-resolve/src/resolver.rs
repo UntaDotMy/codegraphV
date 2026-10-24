@@ -5,6 +5,7 @@
 //! worker pool and profiling hooks have no counterpart: resolution here is sequential, which
 //! is also the path the pool must agree with byte for byte.
 
+use crate::import_resolver::is_esm_import_language;
 use codegraph_search::is_test_path;
 use crate::alias_binding::resolve_alias_binding;
 use crate::ambient_modules::ambient_module_declarations;
@@ -1688,6 +1689,19 @@ impl ReferenceResolver {
 
     // -- Gates ---------------------------------------------------------------------
 
+    /// The value a file declares beside a type of the same name — `export function Ok()` beside
+    /// `export interface Ok`, a class merged with an interface — which a call or `new` written
+    /// with the name reaches. The first by position; `None` when the file declares none.
+    fn same_named_value_of_type(&self, ty: &Node) -> Option<NodeRef> {
+        const TYPE_COMPANION_VALUE_KINDS: [NodeKind; 5] = [NodeKind::Function, NodeKind::Class, NodeKind::Component, NodeKind::Constant, NodeKind::Variable];
+        self.ctx
+            .get_nodes_in_file(&ty.file_path)
+            .iter()
+            .filter(|n| n.name == ty.name && TYPE_COMPANION_VALUE_KINDS.contains(&n.kind))
+            .min_by_key(|n| (n.start_line, n.start_column))
+            .cloned()
+    }
+
     fn gate_target_kind(&self, result: Option<ResolvedRef>, r: &UnresolvedRef) -> Option<ResolvedRef> {
         let mut result = result?;
         let ctx = &*self.ctx;
@@ -1706,6 +1720,18 @@ impl ReferenceResolver {
                 }
                 if r.language == Language::Go && is_go_type_kind(t.kind) && !r.reference_name.contains('.') && !is_go_bare_name(r, ctx) {
                     return None;
+                }
+            }
+        }
+        // A TypeScript interface or type alias is no value: nothing calls one or makes an
+        // instance of it. A strategy that found one by name meant the value its file declares
+        // beside it (`interface Ok` and `function Ok`); with none there, the name is a value from
+        // elsewhere the project only types (`new Response()`), and links nothing.
+        if (r.is_kind(EdgeKind::Calls) || r.is_kind(EdgeKind::Instantiates)) && is_esm_import_language(r.language) {
+            if let Some(t) = self.node_by_id(&result.target_node_id) {
+                if t.kind == NodeKind::Interface || t.kind == NodeKind::TypeAlias {
+                    let value = self.same_named_value_of_type(&t)?;
+                    result.target_node_id = value.id.clone();
                 }
             }
         }
