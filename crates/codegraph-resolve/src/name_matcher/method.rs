@@ -4,6 +4,7 @@
 use super::exact::prefer_call_site_file;
 use super::infer::{array_element_type, infer_esm_awaited_call_type, infer_java_field_receiver_type, infer_local_receiver_type, normalize_inferred_type_name, ts_imported_type_file, GoReceiverDecl};
 use super::js_imports::{is_import_binding, is_imported_module_receiver, is_vue_component_method};
+use super::js_scope::is_locally_bound_js_name;
 use super::lang_shape::is_method_owner_kind;
 use super::members::{class_strategy_method, infer_member_receiver_type, inherited_class_method, is_member_typed_language, type_parameter_bound};
 use super::object_literal::{es_class_supertypes, es_inherited_method, resolve_object_path_member};
@@ -413,6 +414,25 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 _ => return None,
             }
         }
+        // A TS/JS receiver the calling function doesn't type is read by its binding in scope at
+        // the call (#2589): a module's `let root: Root | null`, a `let popupRoot: Root` in the
+        // function around the one calling, or an outer function's typed parameter.
+        if inferred_type.is_none()
+            && awaited.is_none()
+            && dot
+            && re!(r"^[A-Za-z_$][\w$]*$").is_match(&object_or_class)
+            && matches!(r.language, Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx)
+            && object_or_class != "this"
+            && object_or_class != "super"
+            && !is_import_binding(&object_or_class, r, ctx)
+            && is_locally_bound_js_name(&object_or_class, &r.file_path, ctx)
+        {
+            if let Some(reading) = super::js_binding::js_receiver_binding_reading(&object_or_class, r, ctx) {
+                inferred_type = Some(reading.ty);
+                decl.raw = Some(reading.raw);
+                decl.line = Some(reading.line);
+            }
+        }
         if let Some(t) = inferred_type.clone() {
             if is_esm_family(r.language) && t.ends_with(']') {
                 let element = array_element_type(&t);
@@ -749,6 +769,13 @@ fn match_by_method_name(
     target = reachable;
     if is_js_family(r.language) {
         let kept: Vec<NodeRef> = target.iter().filter(|m| !is_vue_component_method(m) || (object_or_class == "this" && m.file_path == r.file_path)).cloned().collect();
+        narrowed |= kept.len() != target.len();
+        target = kept;
+    }
+    // A React class component's `render()` and lifecycle methods are React's to call (#2589):
+    // react-dom's `root.render(<App />)` is no error boundary's `render`.
+    if is_js_family(r.language) && object_or_class != "this" && object_or_class != "super" {
+        let kept: Vec<NodeRef> = target.iter().filter(|m| !super::js_binding::is_react_lifecycle_method(m, ctx)).cloned().collect();
         narrowed |= kept.len() != target.len();
         target = kept;
     }

@@ -85,6 +85,7 @@ pub mod calls;
 pub mod python_scope;
 pub mod python_attr;
 pub mod js_scope;
+pub mod js_binding;
 pub mod object_literal;
 pub mod reach;
 pub mod js_imports;
