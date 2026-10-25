@@ -353,12 +353,14 @@ impl Environment {
                 .profile(loc, "CLAUDE_CONFIG_DIR", ".claude")
                 .join("settings.json");
             let before = read(&settings)?;
+            let parse = |text: &str| -> Result<Value> {
+                Ok(jsonc_parser::parse_to_serde_value(if text.trim().is_empty() { "{}" } else { text }, &Default::default())?
+                    .unwrap_or(json!({})))
+            };
+            // Permissions, then the prompt hook, applied in turn to the same file.
+            let mut after: Option<String> = Some(before.clone());
             if !before.is_empty() || !remove && options.auto_allow {
-                let mut data = jsonc_parser::parse_to_serde_value(
-                    if before.is_empty() { "{}" } else { &before },
-                    &Default::default(),
-                )?
-                .unwrap_or(json!({}));
+                let data = parse(&before)?;
                 let mut allow = data["permissions"]["allow"]
                     .as_array()
                     .cloned()
@@ -369,14 +371,27 @@ impl Environment {
                     allow.push(json!("mcp__codegraph__*"));
                 }
                 if allow != prior {
-                    let after = if allow.is_empty() {
+                    after = if allow.is_empty() {
                         remove_json(&before, &before, &["permissions", "allow"])?
                     } else {
                         Some(edit::json(&before, &["permissions", "allow"], Some(&json!(allow)))?)
                     };
-                    planned.push((settings, before, after));
                 }
-                data.take();
+            }
+            let hook_choice = if remove { Some(false) } else { options.prompt_hook };
+            if let (Some(on), Some(text)) = (hook_choice, after.clone()) {
+                let data = parse(&text)?;
+                let current = data.get("hooks");
+                let next = prompt_hook_hooks(current, on);
+                if next.as_ref() != current {
+                    after = match next {
+                        Some(hooks) => Some(edit::json(&text, &["hooks"], Some(&hooks))?),
+                        None => remove_json(&before, &text, &["hooks"])?,
+                    };
+                }
+            }
+            if after.as_ref() != Some(&before) {
+                planned.push((settings, before, after));
             }
             if loc == Location::Local {
                 let file = self.project.join(".claude.json");
@@ -449,11 +464,77 @@ fn config_keys(id: &str) -> Vec<&'static str> {
 #[derive(Debug, Clone, Copy)]
 pub struct InstallOptions {
     pub auto_allow: bool,
+    /// Claude's front-load `UserPromptSubmit` hook: Some(true) writes it, Some(false) strips it
+    /// (an opt-out round-trips), None leaves whatever is there (a refresh).
+    pub prompt_hook: Option<bool>,
 }
 impl Default for InstallOptions {
     fn default() -> Self {
-        Self { auto_allow: true }
+        Self {
+            auto_allow: true,
+            prompt_hook: None,
+        }
     }
+}
+
+/// The hook command `install` writes. The native binary is `codegraph.exe` on Windows, which Git
+/// Bash (Claude Code's hook shell) resolves without the extension.
+pub const PROMPT_HOOK_COMMAND: &str = "codegraph prompt-hook";
+/// Every spelling an installer has written (the TS one wrote `codegraph.cmd` on Windows).
+const PROMPT_HOOK_FORMS: [&str; 2] = ["codegraph prompt-hook", "codegraph.cmd prompt-hook"];
+
+fn is_prompt_hook_command(command: &Value) -> bool {
+    command.as_str().is_some_and(|c| PROMPT_HOOK_FORMS.iter().any(|f| c.contains(f)))
+}
+
+/// `settings.hooks` with the prompt hook written (`on`) or removed; Ok(None) = drop `hooks`.
+/// Unchanged input comes back equal, so the caller writes nothing.
+fn prompt_hook_hooks(hooks: Option<&Value>, on: bool) -> Option<Value> {
+    if on {
+        let mut hooks = hooks.filter(|h| h.is_object()).cloned().unwrap_or_else(|| json!({}));
+        if !hooks["UserPromptSubmit"].is_array() {
+            hooks["UserPromptSubmit"] = json!([]);
+        }
+        let groups = hooks["UserPromptSubmit"].as_array_mut().unwrap();
+        // Rewrite an installer-written spelling to this one in place; an `npx …` or hand-edited
+        // variant is the user's own and stays.
+        for group in groups.iter_mut() {
+            for h in group["hooks"].as_array_mut().into_iter().flatten() {
+                if h["command"].as_str().is_some_and(|c| PROMPT_HOOK_FORMS.contains(&c) && c != PROMPT_HOOK_COMMAND) {
+                    h["command"] = json!(PROMPT_HOOK_COMMAND);
+                }
+            }
+        }
+        let already = groups
+            .iter()
+            .any(|g| g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_prompt_hook_command(&h["command"]))));
+        if !already {
+            groups.push(json!({"hooks": [{"type": "command", "command": PROMPT_HOOK_COMMAND}]}));
+        }
+        return Some(hooks);
+    }
+    let original = hooks?;
+    let mut hooks = original.clone();
+    let Some(events) = hooks.as_object_mut() else { return Some(hooks) };
+    let mut removed = false;
+    for groups in events.values_mut().filter_map(Value::as_array_mut) {
+        for group in groups.iter_mut() {
+            if let Some(hs) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                let before = hs.len();
+                hs.retain(|h| !is_prompt_hook_command(&h["command"]));
+                removed |= hs.len() != before;
+            }
+        }
+    }
+    if !removed {
+        return Some(original.clone());
+    }
+    // Prune emptied groups, then events with no groups left, then `hooks` itself.
+    for groups in events.values_mut().filter_map(Value::as_array_mut) {
+        groups.retain(|g| !g["hooks"].as_array().is_some_and(|hs| hs.is_empty()));
+    }
+    events.retain(|_, groups| !groups.as_array().is_some_and(|g| g.is_empty()));
+    (!events.is_empty()).then_some(hooks)
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct WriteResult {

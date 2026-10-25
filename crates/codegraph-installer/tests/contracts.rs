@@ -152,3 +152,47 @@ fn claude_uninstall_restores_user_files_byte_for_byte() {
         assert_eq!(after.len(), before.len(), "{:?}", after.keys().collect::<Vec<_>>());
     }
 }
+/// DEV-65: the Claude front-load hook (TS writePromptHookEntry / removePromptHookEntry).
+#[test]
+fn claude_prompt_hook_is_added_migrated_idempotent_and_removed_without_touching_siblings() {
+    let read = |p: &std::path::Path| -> serde_json::Value { serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap() };
+    let commands = |v: &serde_json::Value| -> Vec<String> {
+        v["hooks"]["UserPromptSubmit"].as_array().into_iter().flatten()
+            .flat_map(|g| g["hooks"].as_array().cloned().unwrap_or_default())
+            .map(|h| h["command"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let hook = |on: Option<bool>| InstallOptions { prompt_hook: on, ..InstallOptions::default() };
+    let dir = tempfile::tempdir().unwrap();
+    let first_env = env(&dir);
+    let settings = first_env.home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    // A TS install's Windows spelling plus the user's own hooks.
+    fs::write(&settings, r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"my-own"}]},{"hooks":[{"type":"command","command":"codegraph.cmd prompt-hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"stop-hook"}]}]}}"#).unwrap();
+    first_env.apply("claude", Location::Global, hook(Some(true)), false).unwrap();
+    let v = read(&settings);
+    assert_eq!(commands(&v), vec!["my-own", "codegraph prompt-hook"], "migrated in place, no duplicate");
+    assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "stop-hook");
+    let first = fs::read_to_string(&settings).unwrap();
+    let again = first_env.apply("claude", Location::Global, hook(Some(true)), false).unwrap();
+    assert!(again.files.iter().all(|f| f.action == "unchanged"), "{again:?}");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), first);
+    // None (a refresh) leaves the user's choice alone.
+    first_env.apply("claude", Location::Global, hook(None), false).unwrap();
+    assert_eq!(fs::read_to_string(&settings).unwrap(), first);
+    // Opting out strips only ours.
+    first_env.apply("claude", Location::Global, hook(Some(false)), false).unwrap();
+    let v = read(&settings);
+    assert_eq!(commands(&v), vec!["my-own"]);
+    assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "stop-hook");
+    // A fresh settings.json gets one entry; uninstall removes it and the emptied keys.
+    let dir2 = tempfile::tempdir().unwrap();
+    let env2 = env(&dir2);
+    env2.apply("claude", Location::Global, hook(Some(true)), false).unwrap();
+    let settings2 = env2.home.join(".claude").join("settings.json");
+    assert_eq!(commands(&read(&settings2)), vec!["codegraph prompt-hook"]);
+    env2.apply("claude", Location::Global, InstallOptions::default(), true).unwrap();
+    let left = fs::read_to_string(&settings2).unwrap_or_default();
+    assert!(!left.contains("prompt-hook"), "{left}");
+    assert!(!left.contains("UserPromptSubmit"), "{left}");
+}

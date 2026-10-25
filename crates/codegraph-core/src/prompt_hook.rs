@@ -311,6 +311,33 @@ pub fn is_agent_message(prompt: &str) -> bool {
     RE.is_match(prompt)
 }
 
+/// A message another local Claude Code session sends to this one arrives as a
+/// `<cross-session-message from="…">…</cross-session-message>` prompt, which UserPromptSubmit
+/// hooks also receive (#2635). Same rule as [`is_task_notification`].
+pub fn is_cross_session_message(prompt: &str) -> bool {
+    static RE: LazyLock<Re> =
+        LazyLock::new(|| Re::new(r"^\s*<cross-session-message(?:\s[^>]*)?>[\s\S]*</cross-session-message>\s*$", ""));
+    RE.is_match(prompt)
+}
+
+const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
+
+/// The prompt the user typed, without the `<system-reminder>…</system-reminder>` blocks Claude
+/// Code's desktop app puts in front of it (#2635): every complete block becomes a newline and the
+/// rest is trimmed; a `<system-reminder>` the user only mentions, with no closing tag, stays.
+pub fn strip_system_reminders(prompt: &str) -> String {
+    // The attribute run stops at `<`, so a tag left open in pasted text can't make the scan
+    // quadratic; only the text up to the last closing tag can hold a complete block.
+    static BLOCK: LazyLock<Re> =
+        LazyLock::new(|| Re::new(r"<system-reminder(?:\s[^<>]*)?>[\s\S]*?</system-reminder>", ""));
+    let Some(end) = prompt.rfind(SYSTEM_REMINDER_CLOSE) else {
+        return codegraph_types::jscompat::js_trim(prompt).to_string();
+    };
+    let head_end = end + SYSTEM_REMINDER_CLOSE.len();
+    let head = BLOCK.replace_all(&prompt[..head_end], |_| Some("\n".to_string()));
+    codegraph_types::jscompat::js_trim(&(head + &prompt[head_end..])).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +365,17 @@ mod tests {
         assert!(is_task_notification("<task-notification>done</task-notification>"));
         assert!(!is_task_notification("see <task-notification>x</task-notification> please"));
         assert!(is_agent_message("<agent-message from=\"a\">hi</agent-message>"));
+        assert!(is_cross_session_message("<cross-session-message from=\"s\">x</cross-session-message>"));
+        assert!(!is_cross_session_message("about <cross-session-message> tags"));
+        assert_eq!(
+            strip_system_reminders("<system-reminder>linked</system-reminder>
+<system-reminder a=\"1\">x</system-reminder> how does login work "),
+            "how does login work"
+        );
+        assert_eq!(strip_system_reminders(" mention <system-reminder> only "), "mention <system-reminder> only");
+        assert!(is_task_notification(&strip_system_reminders(
+            "<system-reminder>s</system-reminder><task-notification>done</task-notification>"
+        )));
         assert_eq!(cap_prompt_hook_injection("abcdef", 3), "abc\n…(truncated; call codegraph_explore for the rest)");
         assert_eq!(cap_prompt_hook_injection("abc", 3), "abc");
     }

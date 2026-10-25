@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+mod prompt_hook;
 mod upgrade;
 mod wire;
 use codegraph_core::{directory, CodeGraph, IndexOptions, OpenOptions};
@@ -253,6 +254,10 @@ enum Command {
         #[arg(long)]
         keep_cli: bool,
     },
+    /// Claude UserPromptSubmit hook: inject CodeGraph context for structural prompts (reads
+    /// {prompt,cwd} JSON on stdin).
+    #[command(hide = true)]
+    PromptHook,
     /// Update codegraph to the latest release, or to the version given.
     Upgrade {
         /// Release to install, for example v0.0.2 (default: the latest)
@@ -321,6 +326,7 @@ fn run() -> Result<()> {
     };
     match command {
         Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
+        Command::PromptHook => prompt_hook::run(),
         Command::Upgrade { version, check, force } => {
             let code = upgrade::run(version, check, force);
             if code != 0 {
@@ -750,12 +756,24 @@ fn run() -> Result<()> {
             {
                 return Ok(());
             }
+            // Claude Code's front-load prompt hook: opt-in, default yes; --yes turns it on and a
+            // refresh leaves the earlier choice alone.
+            let prompt_hook = if refresh || !targets.iter().any(|t| t == "claude") {
+                None
+            } else if yes {
+                Some(true)
+            } else {
+                Some(confirm_default_yes(
+                    "Front-load CodeGraph on \"how / where / trace\" prompts? Auto-injects structural context so answers need fewer steps (adds a moment to those prompts; Claude Code only).",
+                )?)
+            };
             for id in targets {
                 let result = environment.apply(
                     &id,
                     loc,
                     InstallOptions {
                         auto_allow: !no_permissions,
+                        prompt_hook,
                     },
                     false,
                 )?;
@@ -829,6 +847,17 @@ fn symbol_command(s: Symbol, callers: bool) -> Result<()> {
     }
     cg.close();
     Ok(())
+}
+/// A yes/no question whose default (Enter) is yes; no terminal answers yes, as --yes would.
+fn confirm_default_yes(message: &str) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        return Ok(true);
+    }
+    print!("{message} [Y/n] ");
+    io::stdout().flush()?;
+    let mut reply = String::new();
+    io::stdin().read_line(&mut reply)?;
+    Ok(!matches!(reply.trim().to_lowercase().as_str(), "n" | "no"))
 }
 fn confirm(message: &str) -> Result<bool> {
     if !io::stdin().is_terminal() {
