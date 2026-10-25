@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 mod prompt_hook;
+mod remove_cli;
 mod upgrade;
 mod wire;
 use codegraph_core::{directory, CodeGraph, IndexOptions, OpenOptions};
@@ -806,7 +807,7 @@ fn run() -> Result<()> {
             target,
             location,
             yes,
-            ..
+            keep_cli,
         } => {
             use codegraph_installer::{Environment, InstallOptions, Location};
             let environment = Environment::current()?;
@@ -831,6 +832,18 @@ fn run() -> Result<()> {
                 }
                 for note in result.notes {
                     println!("{note}");
+                }
+            }
+            // Like the original: a global uninstall also removes the CLI unless --keep-cli.
+            if loc == Location::Global && !keep_cli {
+                let exe = std::env::current_exe()?;
+                let env = |name: &str| std::env::var(name).ok();
+                match codegraph_types::paths::home_dir() {
+                    Some(home) => {
+                        let plan = remove_cli::plan(&exe, &env, &home);
+                        remove_cli::execute(&plan, &exe, &env, &home);
+                    }
+                    None => println!("No home directory found; the codegraph CLI was left installed."),
                 }
             }
         }
