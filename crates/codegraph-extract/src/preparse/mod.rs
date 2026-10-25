@@ -41,7 +41,8 @@ pub fn pre_parse(file_path: &str, source: &str, language: Language) -> String {
         "swift" => with_shadow(source, small::join_swift_composition_continuations),
         // Flow syntax only in `@flow` files, which `detectLanguage` sends here from `.js`; then
         // `export type *`, in every file.
-        "typescript" | "tsx" => {
+        // ArkTS takes the typescript extractor's preParse (its paths are never Flow candidates).
+        "typescript" | "tsx" | "arkts" => {
             let flow = small::is_flow_candidate_path(file_path) && has_flow_pragma(source);
             if !flow && !small::has_export_type_star(source) {
                 return source.to_string();

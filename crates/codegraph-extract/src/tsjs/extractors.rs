@@ -6,7 +6,7 @@
 use crate::textutil as util;
 use super::{
     body_of, is_builtin_type, is_host_global_root, is_literal_receiver, is_object_member_function,
-    is_react_hoc, is_static_object_key, is_variable_type, is_vue_collection_name, Extra, Scope, Walker,
+    is_react_hoc, is_static_object_key, is_variable_type, is_vue_collection_name, Extra, Scope, Variant, Walker,
 };
 use crate::buffers::edge_kind_index;
 use std::collections::HashSet;
@@ -85,7 +85,7 @@ impl<'t> Walker<'t> {
     /// are not. A function with no body never runs. Mirrors
     /// TreeSitterExtractor.visitParameterDefaults.
     fn visit_parameter_defaults(&mut self, func: Node<'t>, body: Option<Node<'t>>) {
-        let Some(body) = body else { return };
+        let Some(body) = body.filter(|_| self.variant.is_chain()) else { return };
         // A class field holds its function: `onPick = (item = first()) => {…}`.
         let owner = if matches!(func.kind(), "public_field_definition" | "field_definition") {
             body.parent()
@@ -142,6 +142,9 @@ impl<'t> Walker<'t> {
     /// any other assignment. The node must be the assignment's whole
     /// right-hand side. Mirrors TreeSitterExtractor.commonJsExportName.
     fn common_js_export_name(&self, assignment: Node<'t>, value: Node<'t>) -> Option<String> {
+        if !self.variant.is_chain() {
+            return None;
+        }
         let right = assignment.child_by_field_name("right")?;
         if right.start_byte() != value.start_byte() || right.end_byte() != value.end_byte() {
             return None;
@@ -436,6 +439,32 @@ impl<'t> Walker<'t> {
         self.visit_parameter_defaults(node, body);
         if let Some(body) = body {
             self.visit_function_body(body);
+        }
+        self.stack.pop();
+    }
+
+    // --- extractStruct (ArkTS) ------------------------------------------------------
+
+    /// extractAggregate (tree-sitter.ts) as it runs for an ArkTS `struct_declaration`: a struct
+    /// node, its inheritance, then each member of its body through the dispatcher.
+    pub(super) fn extract_struct(&mut self, node: Node<'t>) {
+        let Some(body) = body_of(node) else { return };
+        let name = self.extract_name(node);
+        let extra = Extra {
+            docstring: crate::docstring::preceding_docstring(node, self.src),
+            visibility: self.visibility_of(node),
+            is_exported: Some(self.is_exported(node)),
+            ..Extra::default()
+        };
+        let Some(row) = self.create_node("struct", &name, node, extra) else {
+            return;
+        };
+        self.extract_inheritance(node, row);
+        self.stack.push(Scope { row, kind: "struct", name });
+        for i in 0..body.named_child_count() {
+            if let Some(c) = body.named_child(i) {
+                self.visit_node(c);
+            }
         }
         self.stack.pop();
     }
@@ -1589,6 +1618,12 @@ impl<'t> Walker<'t> {
         if self.stack.is_empty() {
             return;
         }
+        if self.variant == Variant::Arkts {
+            if !self.extract_arkui_call(node) {
+                self.extract_arkts_call(node);
+            }
+            return;
+        }
         let raw = node.child_by_field_name("function").or_else(|| node.named_child(0));
         let func = raw.map(|f| self.peel_await_callee(f));
         // Where the reference sits: the call, or the callee an `await` was
@@ -1709,6 +1744,150 @@ impl<'t> Walker<'t> {
 
         if !callee_name.is_empty() {
             self.push_call_ref(&callee_name.clone(), at);
+        }
+    }
+
+    /// The arkts branch of extractCall (tree-sitter.ts): an ArkUI component (`Text(x).fontSize(16)`
+    /// is ONE node), a chained attribute on a call result, and a detached chain segment. Each
+    /// attribute is a `.attr` call; an `onXxx(this.handler)` binding also calls the handler.
+    /// False when the node is an ordinary call.
+    fn extract_arkui_call(&mut self, node: Node<'t>) -> bool {
+        let is_on = |name: &str| name.len() > 2 && name.starts_with("on") && name.as_bytes()[2].is_ascii_uppercase();
+        match node.kind() {
+            "arkui_component_expression" => {
+                if let Some(component) = node.child_by_field_name("function").filter(|f| f.kind() == "identifier") {
+                    let name = self.text(component);
+                    self.push_call_ref(name, node);
+                }
+                for i in 0..node.child_count() {
+                    let Some(child) = node.child(i).filter(|c| c.kind() == "property_identifier") else { continue };
+                    self.arkui_attr(child);
+                    if is_on(self.text(child)) {
+                        let mut args = None;
+                        for k in i + 1..node.child_count() {
+                            let Some(next) = node.child(k) else { continue };
+                            if next.kind() == "property_identifier" {
+                                break;
+                            }
+                            if next.kind() == "arguments" {
+                                args = Some(next);
+                                break;
+                            }
+                        }
+                        self.arkui_this_handlers(args);
+                    }
+                }
+                true
+            }
+            "call_expression" => {
+                let func = node.child_by_field_name("function");
+                if let Some(f) = func.filter(|f| matches!(f.kind(), "member_expression" | "arkui_dsl_decorator_member_expression")) {
+                    let object = f.child_by_field_name("object");
+                    if let Some(prop) = f.child_by_field_name("property") {
+                        if f.kind() == "arkui_dsl_decorator_member_expression"
+                            || object.is_some_and(|o| matches!(o.kind(), "call_expression" | "arkui_component_expression"))
+                        {
+                            self.arkui_attr(prop);
+                            if is_on(self.text(prop)) {
+                                self.arkui_this_handlers(node.child_by_field_name("arguments"));
+                            }
+                            return true;
+                        }
+                    }
+                }
+                if let Some(f) = func.filter(|f| f.kind() == "identifier") {
+                    let mut p = node.parent();
+                    while let Some(up) = p.filter(|u| matches!(u.kind(), "member_expression" | "call_expression")) {
+                        p = up.parent();
+                    }
+                    if p.is_some_and(|p| p.kind() == "leading_dot_expression") {
+                        self.arkui_attr(f);
+                        if is_on(self.text(f)) {
+                            self.arkui_this_handlers(node.child_by_field_name("arguments"));
+                        }
+                        return true;
+                    }
+                }
+                false
+            }
+            "leading_dot_expression" => {
+                let only = if node.named_child_count() == 1 { node.named_child(0) } else { None };
+                if let Some(only) = only.filter(|o| o.kind() == "identifier") {
+                    self.arkui_attr(only);
+                    if is_on(self.text(only)) {
+                        let paren = node
+                            .parent()
+                            .and_then(|stmt| stmt.next_named_sibling())
+                            .and_then(|next| next.named_child(0))
+                            .filter(|p| p.kind() == "parenthesized_expression");
+                        if paren.is_some() {
+                            self.arkui_this_handlers(paren);
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A chained ArkUI attribute: a call of `.<attr>`, which resolves only to an attribute helper.
+    fn arkui_attr(&mut self, name_node: Node<'t>) {
+        let name = self.text(name_node);
+        if !name.is_empty() {
+            self.push_call_ref(&format!(".{name}"), name_node);
+        }
+    }
+
+    /// Each bare `this.handler` among an on-attribute's arguments is a call of `handler`.
+    fn arkui_this_handlers(&mut self, args: Option<Node<'t>>) {
+        let Some(args) = args else { return };
+        for j in 0..args.named_child_count() {
+            let Some(arg) = args.named_child(j).filter(|a| a.kind() == "member_expression") else { continue };
+            let object = arg.child_by_field_name("object");
+            if let (Some(_), Some(prop)) = (object.filter(|o| o.kind() == "this"), arg.child_by_field_name("property")) {
+                let name = self.text(prop);
+                self.push_call_ref(name, arg);
+            }
+        }
+    }
+
+    /// The generic extractCall path as it runs for ArkTS, which is outside TS_JS_CHAIN_LANGUAGES:
+    /// the callee past `await` and prefix operators; a member call keeps an identifier receiver
+    /// (`x.m`) and is otherwise the bare method name; any other callee is its text.
+    fn extract_arkts_call(&mut self, node: Node<'t>) {
+        let raw = node.child_by_field_name("function").or_else(|| node.named_child(0));
+        let Some(raw) = raw else { return };
+        let func = self.peel_await_callee(raw);
+        let at = if func.id() != raw.id() { func } else { node };
+        let mut callee_name;
+        if func.kind() == "member_expression" {
+            let property = func
+                .child_by_field_name("property")
+                .or_else(|| func.child_by_field_name("field"))
+                .or_else(|| func.named_child(1));
+            let Some(property) = property else { return };
+            let method_name = self.text(property);
+            let receiver = func
+                .child_by_field_name("object")
+                .or_else(|| func.child_by_field_name("operand"))
+                .or_else(|| func.child_by_field_name("argument"))
+                .or_else(|| func.named_child(0));
+            if receiver.is_some_and(|r| is_literal_receiver(r.kind())) {
+                return;
+            }
+            callee_name = match receiver.filter(|r| matches!(r.kind(), "identifier" | "simple_identifier" | "field_identifier")) {
+                Some(r) if !matches!(self.text(r), "self" | "this" | "cls" | "super") => format!("{}.{method_name}", self.text(r)),
+                _ => method_name.to_string(),
+            };
+        } else {
+            callee_name = self.text(func).to_string();
+        }
+        if let Some(c) = util::paren_conversion().captures(&callee_name) {
+            callee_name = c[1].to_string();
+        }
+        if !callee_name.is_empty() {
+            self.push_call_ref(&callee_name, at);
         }
     }
 

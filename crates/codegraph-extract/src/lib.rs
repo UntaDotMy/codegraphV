@@ -105,7 +105,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result
         "erlang" => erlang::extract(file_path, source),
         "terraform" => terraform::extract(file_path, source),
         "cobol" => cobol::extract(file_path, source),
-        "typescript" | "tsx" | "javascript" | "jsx" => tsjs::extract(file_path, source, lang),
+        "typescript" | "tsx" | "javascript" | "jsx" | "arkts" => tsjs::extract(file_path, source, lang),
         other => Err(format!("no native walker for language {other}")),
     })?;
     let mut result = decode::decode_tables(&out, file_path, language)?;
@@ -151,7 +151,7 @@ pub fn extract_source(file_path: &str, source: &str, language: Language) -> Resu
     }
     let pre = pre_parse(file_path, source, language);
     let mut result = extract_file(file_path, &pre, language)?;
-    if matches!(language, Language::TypeScript | Language::Tsx) && pre != source && preparse::blanks_export_type_star(source) {
+    if matches!(language, Language::TypeScript | Language::Tsx | Language::ArkTs) && pre != source && preparse::blanks_export_type_star(source) {
         restore_re_export_signatures(&mut result, source);
     }
     result.unresolved_references.extend(commonjs::commonjs_require_refs(file_path, source, language));

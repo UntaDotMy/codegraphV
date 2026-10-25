@@ -29,6 +29,9 @@ pub enum Variant {
     Tsx,
     Javascript,
     Jsx,
+    /// ArkTS (`.ets`): the typescript extractor plus `struct_declaration`, the ArkUI call
+    /// shapes and decorator names on nodes (languages/arkts.ts). Outside TS_JS_CHAIN_LANGUAGES.
+    Arkts,
 }
 
 impl Variant {
@@ -38,13 +41,19 @@ impl Variant {
             "tsx" => Some(Variant::Tsx),
             "javascript" => Some(Variant::Javascript),
             "jsx" => Some(Variant::Jsx),
+            "arkts" => Some(Variant::Arkts),
             _ => None,
         }
     }
     /// TS-family (typescript/tsx): type annotations, interfaces, enums,
     /// aliases, visibility. The JS family lacks all of those hooks.
     fn is_ts(self) -> bool {
-        matches!(self, Variant::Typescript | Variant::Tsx)
+        matches!(self, Variant::Typescript | Variant::Tsx | Variant::Arkts)
+    }
+    /// TS_JS_CHAIN_LANGUAGES (tree-sitter.ts) and the gates that spell those four out: every
+    /// variant but ArkTS. ArkTS has no function-as-value spec either (FN_REF_SPECS).
+    fn is_chain(self) -> bool {
+        !matches!(self, Variant::Arkts)
     }
 }
 
@@ -250,7 +259,7 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
         value_scopes: Vec::new(),
         vue_store_file: None,
         object_path_owners: HashMap::new(),
-        owns_objects: !util::is_generated_file(file_path) && !util::is_minified_content(file_path, source),
+        owns_objects: variant.is_chain() && !util::is_generated_file(file_path) && !util::is_minified_content(file_path, source),
     };
 
     // File node (TreeSitterExtractor.extract): id `file:<path>`, endLine =
@@ -422,6 +431,15 @@ impl<'t> Walker<'t> {
         let id_ref = self.arena.put(&id);
         let doc_ref = opt_str(&mut self.arena, extra.docstring.as_deref());
         let sig_ref = opt_str(&mut self.arena, extra.signature.as_deref());
+        // arktsExtractor.extractModifiers: the decorator names, on the declarations that carry them.
+        let decorators = if self.variant == Variant::Arkts {
+            match arkts_decorator_names(node, self.src) {
+                Some(names) => self.arena.put_list(&names),
+                None => NONE_STR,
+            }
+        } else {
+            NONE_STR
+        };
         let row = self.tables.push_node(&NodeRow {
             kind: node_kind_index(kind).unwrap(),
             visibility: extra.visibility.unwrap_or(0),
@@ -435,7 +453,7 @@ impl<'t> Walker<'t> {
             id: id_ref,
             docstring: doc_ref,
             signature: sig_ref,
-            decorators: NONE_STR,
+            decorators,
             type_parameters: NONE_STR,
             return_type: NONE_STR,
             extra_json: NONE_STR,
@@ -588,6 +606,9 @@ impl<'t> Walker<'t> {
     // --- function-as-value refs (#756) -----------------------------------------
 
     fn maybe_capture_fn_refs(&mut self, node: Node<'t>) {
+        if !self.variant.is_chain() {
+            return;
+        }
         let Some(mode) = fnref::dispatch(node.kind()) else { return };
         if self.stack.is_empty() {
             return;
@@ -709,6 +730,9 @@ impl<'t> Walker<'t> {
         } else if self.variant.is_ts() && kind == "interface_declaration" {
             self.extract_interface(node);
             skip_children = true;
+        } else if self.variant == Variant::Arkts && kind == "struct_declaration" {
+            self.extract_struct(node);
+            skip_children = true;
         } else if self.variant.is_ts() && kind == "enum_declaration" {
             self.extract_enum(node);
             skip_children = true;
@@ -731,7 +755,7 @@ impl<'t> Walker<'t> {
             self.extract_import(node);
             crate::stack::note_re_export_imports(self.tables.node_count - before);
             self.emit_re_export_refs(node);
-        } else if kind == "export_statement" && self.looks_like_vue_store_file() {
+        } else if kind == "export_statement" && self.variant.is_chain() && self.looks_like_vue_store_file() {
             // Vuex MODULE default export (`export default { actions: {…} }`).
             if let Some(exported) = node.child_by_field_name("value") {
                 if matches!(exported.kind(), "object" | "object_expression") {
@@ -739,7 +763,7 @@ impl<'t> Walker<'t> {
                     skip_children = true;
                 }
             }
-        } else if kind == "call_expression" {
+        } else if self.is_call_type(kind) {
             self.extract_call(node);
         } else if kind == "new_expression" {
             self.extract_instantiation(node);
@@ -791,7 +815,7 @@ impl<'t> Walker<'t> {
             return;
         }
 
-        if kind == "call_expression" {
+        if self.is_call_type(kind) {
             self.extract_call(node);
         } else if kind == "new_expression" {
             self.extract_instantiation(node);
@@ -837,6 +861,10 @@ impl<'t> Walker<'t> {
             self.extract_class(node);
             return;
         }
+        if self.variant == Variant::Arkts && kind == "struct_declaration" {
+            self.extract_struct(node);
+            return;
+        }
         if self.variant.is_ts() && kind == "enum_declaration" {
             self.extract_enum(node);
             return;
@@ -859,7 +887,7 @@ impl<'t> Walker<'t> {
     /// `variable_declarator` with a plain identifier name —
     /// `const NAME = () => {…}` / `= function () {…}`.
     fn declarator_bound_function(&self, node: Node<'t>) -> bool {
-        if !matches!(node.kind(), "arrow_function" | "function_expression") {
+        if !self.variant.is_chain() || !matches!(node.kind(), "arrow_function" | "function_expression") {
             return false;
         }
         let Some(declarator) = node.parent() else { return false };
@@ -882,7 +910,7 @@ impl<'t> Walker<'t> {
     /// must be the call's FIRST argument and the call's value must be bound
     /// directly by a `variable_declarator`.
     fn react_hook_bound_name(&self, node: Node<'t>) -> Option<String> {
-        if !matches!(node.kind(), "arrow_function" | "function_expression") {
+        if !self.variant.is_chain() || !matches!(node.kind(), "arrow_function" | "function_expression") {
             return None;
         }
         let args = node.parent()?;
@@ -933,7 +961,7 @@ impl<'t> Walker<'t> {
     ///
     /// Mirrors TreeSitterExtractor's curriedWrapperBoundName.
     fn curried_wrapper_bound_name(&self, node: Node<'t>) -> Option<String> {
-        if !matches!(
+        if !self.variant.is_chain() || !matches!(
             node.kind(),
             "arrow_function" | "function_expression" | "generator_function"
         ) {
@@ -1049,6 +1077,12 @@ impl<'t> Walker<'t> {
             cur = p.parent();
         }
         is_ambient_export(node)
+    }
+
+    /// The typescript extractor's callTypes, plus ArkTS's ArkUI component and detached-chain shapes.
+    fn is_call_type(&self, kind: &str) -> bool {
+        kind == "call_expression"
+            || (self.variant == Variant::Arkts && matches!(kind, "arkui_component_expression" | "leading_dot_expression"))
     }
 
     fn has_keyword_child(&self, node: Node, kw: &str) -> bool {
@@ -1213,6 +1247,48 @@ fn has_export_declaration(block: Node) -> bool {
         }
     }
     false
+}
+
+/// collectDecoratorNames (languages/arkts.ts): the decorators written on a struct, field, method
+/// or function: the `decorator` siblings right before it, then its own `decorator` children.
+fn arkts_decorator_names(node: Node, src: &str) -> Option<Vec<String>> {
+    if !matches!(node.kind(), "struct_declaration" | "public_field_definition" | "method_definition" | "function_declaration") {
+        return None;
+    }
+    let name_of = |dec: Node| -> Option<String> {
+        for i in 0..dec.named_child_count() {
+            let Some(child) = dec.named_child(i) else { continue };
+            if child.kind() == "identifier" {
+                return Some(src[child.byte_range()].to_string());
+            }
+            if child.kind() == "call_expression" {
+                let f = child.child_by_field_name("function")?;
+                return (f.kind() == "identifier").then(|| src[f.byte_range()].to_string());
+            }
+        }
+        None
+    };
+    let mut names = Vec::new();
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i).filter(|c| c.kind() == "decorator") {
+            names.extend(name_of(child));
+        }
+    }
+    if let Some(parent) = node.parent() {
+        let start = node.start_byte();
+        let idx = (0..parent.named_child_count()).find(|&i| parent.named_child(i).is_some_and(|s| s.start_byte() == start));
+        let mut before = Vec::new();
+        let mut i = idx.map_or(-1, |i| i as isize) - 1;
+        while i >= 0 {
+            let Some(sib) = parent.named_child(i as usize).filter(|s| s.kind() == "decorator") else { break };
+            before.extend(name_of(sib));
+            i -= 1;
+        }
+        before.reverse();
+        before.extend(names);
+        names = before;
+    }
+    (!names.is_empty()).then_some(names)
 }
 
 fn opt_str(arena: &mut Arena, s: Option<&str>) -> StrRef {
