@@ -16,6 +16,8 @@
 
 use super::now_ms;
 use crate::ctx::Ctx;
+use crate::name_matcher::reference::{is_java_outside_import, retarget_self_overload};
+use crate::types::NodeRef;
 use crate::types::{FrameworkExtractionResult, FrameworkResolver, ResolvedBy, ResolvedRef, UnresolvedRef};
 use codegraph_extract::languages::is_play_routes_file;
 use codegraph_jsre::re;
@@ -68,13 +70,60 @@ impl FrameworkResolver for PlayResolver {
         let m = qualified_action_re().captures(&r.reference_name)?;
         let class_name = m.text(1)?;
         let method_name = m.text(2)?;
-        let class_nodes: Vec<_> = ctx.get_nodes_by_name(class_name).iter().filter(|n| n.kind == NodeKind::Class).cloned().collect();
-        for cls in &class_nodes {
-            let method = ctx.get_nodes_in_file(&cls.file_path).iter().find(|n| matches!(n.kind, NodeKind::Method | NodeKind::Function) && n.name == method_name).cloned();
-            if let Some(method) = method {
-                return Some(ResolvedRef::new(r, method.id.clone(), 0.9, ResolvedBy::Framework));
-            }
+        let route = is_play_routes_file(&r.file_path);
+        // `import org.apache.logging.log4j.core.config.Configurator` makes a Java file's
+        // `Configurator` that library's, never a project type of the name.
+        if !route && r.language == Language::Java && is_java_outside_import(class_name, r, ctx) {
+            return None;
         }
+        // A route's controller is a class or a Scala `object` (a companion shares its class's
+        // qualified name); a call in code may also name a Java interface or enum, which hold
+        // static members of their own.
+        let owner_kind = |kind: NodeKind| {
+            matches!(kind, NodeKind::Class | NodeKind::Module) || (!route && matches!(kind, NodeKind::Interface | NodeKind::Enum))
+        };
+        let owners: Vec<NodeRef> = ctx.get_nodes_by_name(class_name).iter().filter(|n| owner_kind(n.kind)).cloned().collect();
+        // A call's own language comes first: Play's `RequestAuthority` is both a Scala case class
+        // and a Java record, and each language's callers mean their own; the other language's
+        // types follow, since Play's Java API calls its Scala classes. A route file has no
+        // language of its own.
+        let groups: Vec<Vec<&NodeRef>> = if route {
+            vec![owners.iter().collect()]
+        } else {
+            vec![
+                owners.iter().filter(|n| n.language == r.language).collect(),
+                owners.iter().filter(|n| n.language != r.language).collect(),
+            ]
+        };
+        for group in groups {
+            // Only a member of THAT type counts: a file can hold many classes (Java nested
+            // classes, a Scala class + its companion + siblings), and the first same-named method
+            // in the file is usually another class's.
+            let mut members: Vec<NodeRef> = Vec::new();
+            for cls in group {
+                let member_qn = format!("{}::{method_name}", cls.qualified_name);
+                for n in ctx.get_nodes_in_file(&cls.file_path).iter() {
+                    if matches!(n.kind, NodeKind::Method | NodeKind::Function)
+                        && n.name == method_name
+                        && n.qualified_name == member_qn
+                        && !members.iter().any(|m| m.id == n.id)
+                    {
+                        members.push(n.clone());
+                    }
+                }
+            }
+            if members.is_empty() {
+                continue;
+            }
+            // Same-named types in several packages (Scala names carry no package): the one in
+            // the caller's own file comes first.
+            let pick = if route { None } else { members.iter().find(|n| n.file_path == r.file_path) }.unwrap_or(&members[0]);
+            let result = ResolvedRef::new(r, pick.id.clone(), 0.9, ResolvedBy::Framework);
+            // Overloads: the one the call's arguments fit, as the generic resolver picks it.
+            return Some(if route { result } else { retarget_self_overload(result, r, ctx) });
+        }
+        // An inherited member isn't looked up here: the generic resolver finds it through the
+        // class's declared supertypes.
         None
     }
 

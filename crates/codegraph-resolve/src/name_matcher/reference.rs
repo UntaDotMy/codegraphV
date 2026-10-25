@@ -246,7 +246,7 @@ fn swift_labels_fit(labels: &[String], param_list: &str) -> bool {
 
 /// A call that resolved to one overload may belong to a sibling that takes its argument count
 /// (or, in Swift, its argument labels).
-fn retarget_self_overload(result: ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> ResolvedRef {
+pub(crate) fn retarget_self_overload(result: ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> ResolvedRef {
     if !r.is_kind(EdgeKind::Calls) || !overloads(r.language) {
         return result;
     }
@@ -308,7 +308,7 @@ fn is_scala_type_kind(k: NodeKind) -> bool {
 memo_map!(JvmPackagesMemo, String, Rc<HashSet<String>>);
 
 /// `isJavaOutsideImport`: the name is bound by an import of a package the project does not declare.
-fn is_java_outside_import(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+pub(crate) fn is_java_outside_import(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     let imports = ctx.get_import_mappings(&r.file_path, r.language);
     let Some(binding) = imports.iter().find(|m| m.local_name == name) else { return false };
     let call = r.is_kind(EdgeKind::Calls) && name == r.reference_name;
