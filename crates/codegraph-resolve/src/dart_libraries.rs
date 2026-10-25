@@ -910,3 +910,15 @@ pub fn in_same_dart_library(from_file: &str, decl_file: &str, ctx: &Ctx) -> bool
     let memo = ctx.memo::<Memo>();
     scope_of(from_file, ctx, &memo).is_some_and(|s| s.own.contains(decl_file))
 }
+
+/// Whether a private `_name` declared in `decl_file` can be named in `from_file`: both are files
+/// of one library, the library file and its parts (#2466). Unlike `in_same_dart_library` this
+/// needs no pubspec.yaml: a part names its library by a path or a library name. False when the
+/// library of `from_file` is unknown.
+pub fn dart_private_visible(from_file: &str, decl_file: &str, ctx: &Ctx) -> bool {
+    if from_file == decl_file {
+        return true;
+    }
+    let memo = ctx.memo::<Memo>();
+    library_of(from_file, ctx, &memo).is_some_and(|library| members_of(&library, ctx, &memo).contains(decl_file))
+}

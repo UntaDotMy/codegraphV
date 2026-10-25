@@ -21,7 +21,7 @@ use super::scala::is_scala_package_object_member_visible;
 use super::util::*;
 use crate::cpp_includers::cpp_includers;
 use crate::ctx::Ctx;
-use crate::dart_libraries::in_same_dart_library;
+use crate::dart_libraries::{dart_private_visible, in_same_dart_library};
 use crate::types::UnresolvedRef;
 use codegraph_jsre::re;
 use codegraph_search::generated::is_minified_content;
@@ -119,11 +119,12 @@ pub fn is_sfc_private(n: &Node, ctx: &Ctx) -> bool {
 }
 
 /// Languages whose `private` is class- or file-local: an Android `editor.apply()` resolved onto an
-/// unrelated class's `private fun apply`.
+/// unrelated class's `private fun apply`. (A Dart `_name` is its library's, which can span several
+/// files: see `is_visible_across_files`.)
 fn private_is_file_local(language: Language) -> bool {
     matches!(
         language,
-        Language::Kotlin | Language::Java | Language::CSharp | Language::Swift | Language::Scala | Language::Dart | Language::Php
+        Language::Kotlin | Language::Java | Language::CSharp | Language::Swift | Language::Scala | Language::Php
     )
 }
 
@@ -221,6 +222,12 @@ pub fn is_visible_across_files(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -
     }
     if lang == Language::Rust {
         return is_rust_visible_across_files(candidate, r, ctx);
+    }
+    // A Dart `_name` is its library's, which spans the library file and its parts: a generated
+    // `part 'main.g.dart'` declares the `_$Counter` its library's class extends.
+    if lang == Language::Dart {
+        return candidate.visibility != Some(codegraph_types::Visibility::Private)
+            || (r.language == Language::Dart && dart_private_visible(&r.file_path, &candidate.file_path, ctx));
     }
     if private_is_file_local(lang) {
         return candidate.visibility != Some(codegraph_types::Visibility::Private);

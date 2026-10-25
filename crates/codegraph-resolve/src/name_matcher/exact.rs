@@ -113,6 +113,7 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         .iter()
         .filter(|n| {
             !shape.excludes(n, r, ctx)
+                && !(r.language == Language::Dart && super::dart::is_dart_private_of_another_library(n, r, ctx))
                 && !(c_macro_call && !matches!(n.kind, NodeKind::Function | NodeKind::Method))
                 && !(scala_symbolic_reference && matches!(n.kind, NodeKind::Method | NodeKind::Function))
                 && (!value_ref || same_language_family(n.language, r.language))

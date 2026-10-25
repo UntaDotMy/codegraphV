@@ -8,7 +8,7 @@ use super::members::{class_member_lines, class_member_type, declared_type_parame
 use super::reach::is_lexically_reachable;
 use super::util::*;
 use crate::ctx::Ctx;
-use crate::dart_libraries::{dart_import_prefixes, dart_library_sees, dart_prefix_sees, in_same_dart_library};
+use crate::dart_libraries::{dart_import_prefixes, dart_library_sees, dart_prefix_sees, dart_private_visible, in_same_dart_library};
 use crate::dart_local_scope::is_dart_locally_bound;
 use crate::types::{is_inheritance_ref, NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
 use codegraph_jsre::{escape_regex, re, Re};
@@ -954,6 +954,18 @@ pub struct DartShape {
     bare: bool,
     type_ref: bool,
     prefix: Option<String>,
+}
+
+/// Whether `n` is a Dart `_name` another library declares, which nothing written in the
+/// reference's library can mean (#2466). It leaves the candidates before one is picked, so the
+/// library's own declaration wins where another library's namesake would have ranked first and
+/// then been declined. `matchByExactName` alone applies it; `is_visible_across_files` applies the
+/// same rule to the pipeline's pick.
+pub fn is_dart_private_of_another_library(n: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    n.language == Language::Dart
+        && n.visibility == Some(codegraph_types::Visibility::Private)
+        && n.file_path != r.file_path
+        && !dart_private_visible(&r.file_path, &n.file_path, ctx)
 }
 
 impl DartShape {
