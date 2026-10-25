@@ -14,7 +14,8 @@ use crate::errors::{CodeGraphError, Result};
 use crate::extract::has_grammar_load_failure;
 use crate::orchestrator::{ChangedFiles, ExtractionOrchestrator, IndexPhase, IndexProgress, IndexResult, ProgressFn, SyncResult};
 use crate::utils::FileLock;
-use codegraph_db::{database_path, remove_database_files, OpenOptions as DbOpenOptions, Store};
+use crate::directory::database_path;
+use codegraph_db::{remove_database_files, OpenOptions as DbOpenOptions, Store};
 use codegraph_extract::languages::is_file_level_only_language;
 use codegraph_extract::scan::config::load_deprioritize_patterns;
 use codegraph_extract::scan::ignore::Ignore;
@@ -123,7 +124,7 @@ fn env_flag(name: &str) -> bool {
 }
 
 fn timings() -> bool {
-    std::env::var("CODEGRAPH_SYNTH_TIMINGS").map(|v| !v.is_empty()).unwrap_or(false)
+    std::env::var("CODEGRAPHV_SYNTH_TIMINGS").map(|v| !v.is_empty()).unwrap_or(false)
 }
 
 fn is_python_init(path: &str) -> bool {
@@ -214,7 +215,7 @@ impl CodeGraph {
     pub fn init(project_root: &str) -> Result<CodeGraph> {
         let root = Self::resolve_root(project_root);
         if is_initialized(&root) {
-            return Err(CodeGraphError::other(format!("CodeGraph already initialized in {root}")));
+            return Err(CodeGraphError::other(format!("CodeGraphV already initialized in {root}")));
         }
         create_directory(&root).map_err(CodeGraphError::other)?;
         let store = Store::initialize(database_path(Path::new(&root)))?;
@@ -232,11 +233,11 @@ impl CodeGraph {
     pub fn open(project_root: &str, options: OpenOptions) -> Result<CodeGraph> {
         let root = Self::resolve_root(project_root);
         if !is_initialized(&root) {
-            return Err(CodeGraphError::other(format!("CodeGraph not initialized in {root}. Run init() first.")));
+            return Err(CodeGraphError::other(format!("CodeGraphV not initialized in {root}. Run init() first.")));
         }
         let validation = validate_directory(&root);
         if !validation.valid {
-            return Err(CodeGraphError::other(format!("Invalid CodeGraph directory: {}", validation.errors.join(", "))));
+            return Err(CodeGraphError::other(format!("Invalid CodeGraphV directory: {}", validation.errors.join(", "))));
         }
         let store = Store::open(database_path(Path::new(&root)), DbOpenOptions { read_only: options.read_only, ..Default::default() })?;
         let mut instance = Self::from_store(Rc::new(store), root);
@@ -252,12 +253,12 @@ impl CodeGraph {
     pub fn recreate(project_root: &str) -> Result<CodeGraph> {
         let root = Self::resolve_root(project_root);
         if !is_initialized(&root) {
-            return Err(CodeGraphError::other(format!("CodeGraph not initialized in {root}. Run init() first.")));
+            return Err(CodeGraphError::other(format!("CodeGraphV not initialized in {root}. Run init() first.")));
         }
         let db_path = database_path(Path::new(&root));
         if let Err(err) = remove_database_files(&db_path) {
             return Err(CodeGraphError::other(format!(
-                "Could not rebuild the index — the database file is in use ({err}). Stop any running CodeGraph MCP server/daemon for this project and retry, or remove the {} directory and run \"codegraph init\".",
+                "Could not rebuild the index — the database file is in use ({err}). Stop any running CodeGraphV MCP server/daemon for this project and retry, or remove the {} directory and run \"codegraphV init\".",
                 crate::directory::get_code_graph_dir(&root)
             )));
         }
@@ -401,7 +402,7 @@ impl CodeGraph {
 
     fn begin_indexing(&self) -> Result<IndexingGuard<'_>> {
         if self.indexing.replace(true) {
-            return Err(CodeGraphError::other("An index or sync is already running on this CodeGraph instance"));
+            return Err(CodeGraphError::other("An index or sync is already running on this CodeGraphV instance"));
         }
         Ok(IndexingGuard(&self.indexing))
     }
@@ -425,13 +426,13 @@ impl CodeGraph {
         // Kill switch: CODEGRAPH_NO_FAST_INIT=1.
         let (nodes_before, edges_before) = self.store.get_node_and_edge_count()?;
         let fresh_db = nodes_before == 0;
-        let fast_init = !env_flag("CODEGRAPH_NO_FAST_INIT") && fresh_db;
+        let fast_init = !env_flag("CODEGRAPHV_NO_FAST_INIT") && fresh_db;
         if fast_init {
             let _ = self.store.conn().execute_batch("PRAGMA journal_mode = MEMORY; PRAGMA synchronous = OFF;");
         }
         // Defer WAL auto-checkpointing for the whole bulk run (#1231); runMaintenance does the
         // final fold-up before the interval is restored. Kill switch: CODEGRAPH_NO_WAL_DEFER=1.
-        let defer_wal = !fast_init && !env_flag("CODEGRAPH_NO_WAL_DEFER") && self.store.journal_mode().map(|m| m == "wal").unwrap_or(false);
+        let defer_wal = !fast_init && !env_flag("CODEGRAPHV_NO_WAL_DEFER") && self.store.journal_mode().map(|m| m == "wal").unwrap_or(false);
         let mut prior_autocheckpoint = 1000i64;
         if defer_wal {
             prior_autocheckpoint = self.store.wal_autocheckpoint().unwrap_or(1000);
@@ -562,7 +563,7 @@ impl CodeGraph {
                 let _ = self.store.set_metadata("index_files_accounted", &accounted.to_string());
                 result.errors.push(ExtractionError {
                     message: format!(
-                        "Index is missing {shortfall} of {discovered} discovered files (indexed {}, skipped {}, errored {}). The index is PARTIAL — re-run `codegraph index`.",
+                        "Index is missing {shortfall} of {discovered} discovered files (indexed {}, skipped {}, errored {}). The index is PARTIAL — re-run `codegraphV index`.",
                         result.files_indexed, result.files_skipped, result.files_errored
                     ),
                     file_path: None,
@@ -665,7 +666,7 @@ impl CodeGraph {
     /// [`CodeGraphError::LockUnavailable`] if the cross-process write lock is unavailable.
     pub fn sync(&mut self, options: &IndexOptions, mut on_progress: Option<ProgressFn<'_>>) -> Result<SyncResult> {
         if self.indexing.get() {
-            return Err(CodeGraphError::other("An index or sync is already running on this CodeGraph instance"));
+            return Err(CodeGraphError::other("An index or sync is already running on this CodeGraphV instance"));
         }
         let started = Instant::now();
         if let Err(err) = self.file_lock.borrow_mut().acquire() {
@@ -701,7 +702,7 @@ impl CodeGraph {
         self.resolver();
         // Defer WAL auto-checkpointing for the whole incremental run, exactly as index_all does for
         // the bulk path (#1231); runMaintenance at the end folds the WAL.
-        let defer_wal = !env_flag("CODEGRAPH_NO_WAL_DEFER") && self.store.journal_mode().map(|m| m == "wal").unwrap_or(false);
+        let defer_wal = !env_flag("CODEGRAPHV_NO_WAL_DEFER") && self.store.journal_mode().map(|m| m == "wal").unwrap_or(false);
         let mut prior_autocheckpoint = 1000i64;
         if defer_wal {
             prior_autocheckpoint = self.store.wal_autocheckpoint().unwrap_or(1000);
@@ -841,7 +842,7 @@ impl CodeGraph {
         // below resolves them. `definition_delta` is empty for a body-only edit.
         // CODEGRAPH_NO_REBIND=1 disables it.
         if let Some(delta) = &result.definition_delta {
-            if !env_flag("CODEGRAPH_NO_REBIND") {
+            if !env_flag("CODEGRAPHV_NO_REBIND") {
                 let t = Instant::now();
                 let rebound = self.orchestrator.resurrect_stale_resolution_edges(delta, result.changed_file_paths.as_deref().unwrap_or(&[]), edges_before_retry)?;
                 if timings() {
@@ -940,14 +941,14 @@ impl CodeGraph {
 
         // Python attribute types read from OTHER files — a factory's return, a base class's
         // `__init__` — change with a body-only edit the definition delta cannot see.
-        if !env_flag("CODEGRAPH_NO_REBIND") {
+        if !env_flag("CODEGRAPHV_NO_REBIND") {
             let touched: Vec<String> = result.changed_file_paths.iter().flatten().chain(result.removed_file_paths.iter().flatten()).cloned().collect();
             let touched_py: Vec<String> = touched.into_iter().filter(|p| is_python_file(p)).collect();
             if !touched_py.is_empty() {
                 let t = Instant::now();
                 let reopened_files = self.orchestrator.resurrect_type_dependent_edges(&touched_py, result.changed_file_paths.as_deref().unwrap_or(&[]))?;
                 // CODEGRAPH_PY_ATTR_RETRY_CEILING overrides the candidate ceiling (tests).
-                let ceiling = std::env::var("CODEGRAPH_PY_ATTR_RETRY_CEILING").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(2000);
+                let ceiling = std::env::var("CODEGRAPHV_PY_ATTR_RETRY_CEILING").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(2000);
                 let failed = self.resolver().python_attr_retry_candidates(&touched_py, ceiling)?;
                 let mut retry = store.get_unresolved_references_by_files(&reopened_files)?;
                 let over_ceiling = failed.is_none();
@@ -1323,7 +1324,7 @@ impl CodeGraph {
 /// `minRefsForPool`: the pending-ref count past which a resolution run drops the non-unique
 /// edge/ref indexes for its batch loop.
 fn min_refs_for_bulk() -> usize {
-    std::env::var("CODEGRAPH_PARALLEL_RESOLVE_MIN").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(150_000)
+    std::env::var("CODEGRAPHV_PARALLEL_RESOLVE_MIN").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(150_000)
 }
 
 #[allow(dead_code)]

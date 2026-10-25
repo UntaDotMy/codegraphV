@@ -80,7 +80,7 @@ pub fn find_all_symbols(cg: &CodeGraph, symbol: &str) -> Vec<Node> {
 
 /// The surface `tools/list` shows: `CODEGRAPH_MCP_TOOLS` when set, else `explore` alone.
 pub fn is_tool_served(name: &str) -> bool {
-    let short = name.strip_prefix("codegraph_").unwrap_or(name);
+    let short = name.strip_prefix("codegraphV_").unwrap_or(name);
     match tool_allowlist() {
         Some(allow) => allow.contains(short),
         None => short == "explore",
@@ -88,7 +88,7 @@ pub fn is_tool_served(name: &str) -> bool {
 }
 
 fn tool_allowlist() -> Option<HashSet<String>> {
-    let raw = std::env::var("CODEGRAPH_MCP_TOOLS").ok()?;
+    let raw = std::env::var("CODEGRAPHV_MCP_TOOLS").ok()?;
     if raw.trim().is_empty() {
         return None;
     }
@@ -96,7 +96,7 @@ fn tool_allowlist() -> Option<HashSet<String>> {
         .split(',')
         .map(|s| {
             let t = s.trim();
-            t.strip_prefix("codegraph_").unwrap_or(t).to_string()
+            t.strip_prefix("codegraphV_").unwrap_or(t).to_string()
         })
         .filter(|s| !s.is_empty())
         .collect();
@@ -456,11 +456,11 @@ pub fn build_dynamic_boundaries(cg: &CodeGraph, scan_list: &[Node], named: &Inde
     if notes.is_empty() {
         return String::new();
     }
-    let node_hint = if is_tool_served("node") { " or codegraph_node" } else { "" };
+    let node_hint = if is_tool_served("node") { " or codegraphV_node" } else { "" };
     let mut out = vec!["**Dynamic boundaries (the static path ends at runtime dispatch)**".to_string(), String::new()];
     out.extend(notes);
     out.push(String::new());
-    out.push(format!("> These sites choose their call target at runtime (registry / bus / reflection) — the site shown IS where the flow continues. To follow it, run codegraph_explore{node_hint} on a candidate; source for the sites above is included below."));
+    out.push(format!("> These sites choose their call target at runtime (registry / bus / reflection) — the site shown IS where the flow continues. To follow it, run codegraphV_explore{node_hint} on a candidate; source for the sites above is included below."));
     out.push(String::new());
     out.join("\n")
 }
@@ -641,7 +641,7 @@ pub fn build_polymorphic_boundaries(cg: &CodeGraph, candidates: &[(String, Vec<N
     let mut out = vec!["**Interface dispatch (a named method has many implementations)**".to_string(), String::new()];
     out.extend(notes);
     out.push(String::new());
-    out.push("> The method above is dispatched at runtime to one of the listed implementations (a registry / plugin / strategy interface) — there is no single static caller→callee edge; the implementations ARE the continuations. To follow one, run codegraph_explore on a listed target.".to_string());
+    out.push("> The method above is dispatched at runtime to one of the listed implementations (a registry / plugin / strategy interface) — there is no single static caller→callee edge; the implementations ARE the continuations. To follow one, run codegraphV_explore on a listed target.".to_string());
     out.push(String::new());
     out.join("\n")
 }

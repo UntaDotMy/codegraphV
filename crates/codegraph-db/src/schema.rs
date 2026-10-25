@@ -44,7 +44,7 @@ pub fn apply_schema(conn: &Connection) -> Result<bool> {
         Ok(()) => true,
         Err(e) => {
             eprintln!(
-                "[codegraph] FTS5 not available in this SQLite build ({e}). \
+                "[codegraphV] FTS5 not available in this SQLite build ({e}). \
                  Search will fall back to LIKE + fuzzy matching."
             );
             false

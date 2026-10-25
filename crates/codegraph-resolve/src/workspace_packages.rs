@@ -250,7 +250,7 @@ const OHPM_MANIFEST: &str = "oh-package.json5";
 const NPM_MANIFEST: &str = "package.json";
 const OHPM_WALK_MAX_DEPTH: usize = 6;
 const OHPM_WALK_DIR_BUDGET: usize = 8000;
-const OHPM_SKIP_DIRS: [&str; 9] = ["node_modules", "oh_modules", ".git", ".codegraph", ".hvigor", ".preview", "build", "dist", "out"];
+const OHPM_SKIP_DIRS: [&str; 10] = ["node_modules", "oh_modules", ".git", ".codegraphV", ".codegraph", ".hvigor", ".preview", "build", "dist", "out"];
 
 /// The path dependencies the project's manifests declare.
 struct PathDeps {

@@ -33,8 +33,8 @@ fn default_install_is_executable_idempotent_and_removable() {
     for h in DEFAULT_SYNC_HOOKS {
         let p = dir.path().join(".git/hooks").join(h.as_str());
         let original = fs::read_to_string(&p).unwrap();
-        assert!(original.contains("command -v codegraph"));
-        assert!(original.contains("codegraph sync"));
+        assert!(original.contains("command -v codegraphV"));
+        assert!(original.contains("codegraphV sync"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -62,7 +62,7 @@ fn preserves_user_shell_content_and_puts_sync_before_exit() {
     install_git_sync_hook(root, Some(COMMIT)).unwrap();
     let body = fs::read_to_string(&p).unwrap();
     assert!(body.starts_with("#!/bin/sh\n# >>>"));
-    assert!(body.find("codegraph sync").unwrap() < body.find("exit 0").unwrap());
+    assert!(body.find("codegraphV sync").unwrap() < body.find("exit 0").unwrap());
     install_git_sync_hook(root, Some(COMMIT)).unwrap();
     assert_eq!(fs::read_to_string(&p).unwrap(), body);
     remove_git_sync_hook(root, Some(COMMIT)).unwrap();
@@ -86,7 +86,7 @@ fn one_block_per_project_and_removal_preserves_sibling_roots() {
     assert_eq!(
         fs::read_to_string(&p)
             .unwrap()
-            .matches("# >>> codegraph sync hook >>>")
+            .matches("# >>> codegraphV sync hook >>>")
             .count(),
         2
     );
@@ -102,7 +102,7 @@ fn legacy_blocks_belong_to_the_worktree_root_and_are_upgraded() {
     let p = dir.path().join(".git/hooks/post-commit");
     fs::write(
         &p,
-        "#!/bin/sh\n# >>> codegraph sync hook >>>\ncodegraph sync\n# <<< codegraph sync hook <<<\n",
+        "#!/bin/sh\n# >>> codegraphV sync hook >>>\ncodegraphV sync\n# <<< codegraphV sync hook <<<\n",
     )
     .unwrap();
     let sub = dir.path().join("sub");
@@ -111,8 +111,8 @@ fn legacy_blocks_belong_to_the_worktree_root_and_are_upgraded() {
     assert!(!is_sync_hook_installed(sub.to_str().unwrap(), Some(COMMIT)).unwrap());
     install_git_sync_hook(root, Some(COMMIT)).unwrap();
     let body = fs::read_to_string(p).unwrap();
-    assert_eq!(body.matches("# >>> codegraph sync hook >>>").count(), 1);
-    assert!(body.contains("# codegraph-root: "));
+    assert_eq!(body.matches("# >>> codegraphV sync hook >>>").count(), 1);
+    assert!(body.contains("# codegraphV-root: "));
 }
 
 #[test]

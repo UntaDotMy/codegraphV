@@ -157,7 +157,7 @@ pub fn start() -> Result<()> {
     let app = by_id("app");
     app.set_text_content(None);
     let header = add(&app, "header", "", "");
-    link(&header, "CodeGraph", "#home").set_class_name("brand");
+    link(&header, "CodeGraphV", "#home").set_class_name("brand");
     let project = add(&header, "span", "project", "");
     attr(&project, "id", "project-name");
     let search_input = add(&header, "input", "search", "");

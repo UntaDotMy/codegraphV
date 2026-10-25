@@ -7,9 +7,9 @@ use codegraph_types::{
 use serde::{Deserialize, Serialize};
 use std::{cell::OnceCell, fs, io, path::Path};
 
-const BEGIN: &str = "# >>> codegraph sync hook >>>";
-const END: &str = "# <<< codegraph sync hook <<<";
-const ROOT_PREFIX: &str = "# codegraph-root: ";
+const BEGIN: &str = "# >>> codegraphV sync hook >>>";
+const END: &str = "# <<< codegraphV sync hook <<<";
+const ROOT_PREFIX: &str = "# codegraphV-root: ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -76,12 +76,12 @@ fn marker_block(root: &str) -> String {
     let quoted = format!("'{}'", root.replace('\'', "'\\''"));
     [
         BEGIN.to_string(),
-        "# Keeps the CodeGraph index fresh while the live file watcher is off".into(),
+        "# Keeps the CodeGraphV index fresh while the live file watcher is off".into(),
         "# (e.g. WSL2 /mnt drives). Runs in the background so it never blocks git.".into(),
-        "# Managed by codegraph; remove with `codegraph uninit` or delete this block.".into(),
+        "# Managed by codegraphV; remove with `codegraphV uninit` or delete this block.".into(),
         format!("{ROOT_PREFIX}{root}"),
-        "if command -v codegraph >/dev/null 2>&1; then".into(),
-        format!("  ( codegraph sync {quoted} >/dev/null 2>&1 & ) >/dev/null 2>&1"),
+        "if command -v codegraphV >/dev/null 2>&1; then".into(),
+        format!("  ( codegraphV sync {quoted} >/dev/null 2>&1 & ) >/dev/null 2>&1"),
         "fi".into(),
         END.into(),
     ]

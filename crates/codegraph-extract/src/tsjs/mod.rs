@@ -527,7 +527,7 @@ impl<'t> Walker<'t> {
         if self.variant.is_cf() {
             return;
         }
-        if std::env::var("CODEGRAPH_VALUE_REFS").as_deref() == Ok("0") {
+        if std::env::var("CODEGRAPHV_VALUE_REFS").as_deref() == Ok("0") {
             return;
         }
         if targets.is_empty() || scopes.is_empty() || util::is_generated_file(self.file_path) {

@@ -732,7 +732,7 @@ impl Driver {
             return false;
         }
         let configured = self.options.max_dir_watches.unwrap_or_else(|| {
-            std::env::var("CODEGRAPH_MAX_DIR_WATCHES")
+            std::env::var("CODEGRAPHV_MAX_DIR_WATCHES")
                 .ok()
                 .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
                 .and_then(|s| s.parse::<usize>().ok())

@@ -13,7 +13,7 @@ fn indexed(dir: &std::path::Path, name: &str) -> String {
 }
 
 fn status(handler: &mut ToolHandler, root: &str) {
-    let result = handler.call("codegraph_status", &json!({"projectPath": root}));
+    let result = handler.call("codegraphV_status", &json!({"projectPath": root}));
     assert!(!result.is_error);
 }
 

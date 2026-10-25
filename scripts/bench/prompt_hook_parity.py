@@ -22,6 +22,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bench  # noqa: E402
+sys.path.insert(0, str(HERE.parent))
+from check_names import rename as in_codegraphv_names  # noqa: E402
 
 FILES = {
     'src/auth.ts': 'export function parseToken(raw: string): string {\n  return raw.trim();\n}\n\n'
@@ -84,11 +86,11 @@ def hook(cmd: list, cwd: Path, prompt: str, env: dict) -> str:
     return r.stdout
 
 
-HIGH = re.compile(r'^(<codegraph_context note="Structural context[^\n]*\n)(.*?)((?:\nOther indexed projects[\s\S]*)?\n</codegraph_context>\n)$', re.S)
+HIGH = re.compile(r'^(<codegraphV_context note="Structural context[^\n]*\n)(.*?)((?:\nOther indexed projects[\s\S]*)?\n</codegraphV_context>\n)$', re.S)
 
 
 def compare(ts: str, rust: str, ts_root: Path, rust_root: Path) -> tuple[bool, str]:
-    ts = ts.replace(str(ts_root), '<ROOT>')
+    ts = in_codegraphv_names(ts.replace(str(ts_root), '<ROOT>'))  # the original's text, in codegraphV's names
     rust = rust.replace(str(rust_root), '<ROOT>')
     m_ts, m_rust = HIGH.match(ts), HIGH.match(rust)
     if m_ts and m_rust:
@@ -103,8 +105,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--show', action='store_true')
     a = ap.parse_args()
-    env = dict(os.environ, CODEGRAPH_TELEMETRY='0', CODEGRAPH_NO_UPDATE_CHECK='1', CODEGRAPH_DAEMON='0')
+    env = dict(os.environ, CODEGRAPH_TELEMETRY='0', CODEGRAPH_NO_UPDATE_CHECK='1', CODEGRAPH_DAEMON='0',
+               CODEGRAPHV_NO_UPDATE_CHECK='1', CODEGRAPHV_DAEMON='0')
     env.pop('CODEGRAPH_NO_PROMPT_HOOK', None)
+    env.pop('CODEGRAPHV_NO_PROMPT_HOOK', None)
     work = Path(tempfile.mkdtemp(prefix='cg-hook-'))
     try:
         ts_cmd, rust_cmd = bench.ts_cmd(), [str(bench.rust_bin())]

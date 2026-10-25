@@ -69,7 +69,7 @@ pub fn crosses_code_boundary(a: Language, b: Language) -> bool {
 /// Most same-named candidates a matcher will consider before declining.
 /// Overridable with `CODEGRAPH_AMBIGUOUS_NAME_CEILING`.
 pub fn ambiguous_name_ceiling() -> usize {
-    std::env::var("CODEGRAPH_AMBIGUOUS_NAME_CEILING")
+    std::env::var("CODEGRAPHV_AMBIGUOUS_NAME_CEILING")
         .ok()
         .and_then(|v| v.trim().parse::<i64>().ok())
         .filter(|n| *n > 0)

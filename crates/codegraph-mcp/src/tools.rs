@@ -47,15 +47,15 @@ impl ToolResult {
 pub fn tool_definitions(require_project: bool) -> Vec<Value> {
     let mut definitions: Vec<Value> =
         serde_json::from_str(TOOLS_JSON).expect("bundled tool definitions");
-    let raw = std::env::var("CODEGRAPH_MCP_TOOLS").unwrap_or_default();
+    let raw = std::env::var("CODEGRAPHV_MCP_TOOLS").unwrap_or_default();
     let selected: Vec<_> = raw
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.strip_prefix("codegraph_").unwrap_or(s))
+        .map(|s| s.strip_prefix("codegraphV_").unwrap_or(s))
         .collect();
     definitions.retain(|t| {
-        let name = t["name"].as_str().unwrap().trim_start_matches("codegraph_");
+        let name = t["name"].as_str().unwrap().trim_start_matches("codegraphV_");
         if raw.trim().is_empty() {
             name == "explore"
         } else {
@@ -96,7 +96,7 @@ pub struct ToolHandler {
 /// overrides the 10-minute default; `0` never releases.
 pub fn project_idle_timeout() -> Option<Duration> {
     const DEFAULT_MS: u64 = 600_000;
-    let ms = match std::env::var("CODEGRAPH_PROJECT_IDLE_TIMEOUT_MS") {
+    let ms = match std::env::var("CODEGRAPHV_PROJECT_IDLE_TIMEOUT_MS") {
         Ok(raw) if !raw.is_empty() => match raw.trim().parse::<f64>() {
             Ok(n) if n.is_finite() && n >= 0.0 => n.floor() as u64,
             _ => DEFAULT_MS,
@@ -206,10 +206,10 @@ impl ToolHandler {
         }
         let resolution = resolve_server_root(&input, true);
         let Some(root) = resolution.root else {
-            return ToolResult::text(format!("No CodeGraph index is available for {input}. Pass projectPath to an indexed project (one containing .codegraph/). Indexing is the user's decision; do not initialize a project automatically."));
+            return ToolResult::text(format!("No CodeGraphV index is available for {input}. Pass projectPath to an indexed project (one containing .codegraphV/). Indexing is the user's decision; do not initialize a project automatically."));
         };
         if !is_initialized(&root) {
-            return ToolResult::text(format!("Project is not indexed: {root}. Ask the user to run `codegraph init` if they want to index it."));
+            return ToolResult::text(format!("Project is not indexed: {root}. Ask the user to run `codegraphV init` if they want to index it."));
         }
         let root = codegraph_types::paths::real_path(Path::new(&root))
             .map(|p| p.to_string_lossy().into_owned())
@@ -221,7 +221,7 @@ impl ToolHandler {
                     catch_up(&mut cg, &root);
                     if self.projects.len()>=8{if let Some((old_root,old))=self.projects.shift_remove_index(0){self.used_at.remove(&old_root);old.close();}}
                     self.projects.insert(root.clone(),cg);
-                },Err(error)=>return ToolResult::error(format!("Could not open CodeGraph: {error}. Retry once; if it persists, report the failure."))
+                },Err(error)=>return ToolResult::error(format!("Could not open CodeGraphV: {error}. Retry once; if it persists, report the failure."))
             }
         }
         let (_, mut cg) = self.projects.shift_remove_entry(&root).unwrap();
@@ -230,7 +230,7 @@ impl ToolHandler {
         let result = match result {
             Ok(result) => result,
             Err(error) => ToolResult::error(format!(
-                "CodeGraph failed: {error}. Retry once; if it persists, report the failure."
+                "CodeGraphV failed: {error}. Retry once; if it persists, report the failure."
             )),
         };
         let pending = cg.get_pending_files();
@@ -272,14 +272,14 @@ impl ToolHandler {
     ) -> Result<ToolResult, Box<dyn std::error::Error>> {
         use crate::render;
         let text = match name {
-            "codegraph_search" => render::search(cg, args)?,
-            "codegraph_callers" => render::relations(cg, args, true)?,
-            "codegraph_callees" => render::relations(cg, args, false)?,
-            "codegraph_impact" => render::impact(cg, args)?,
-            "codegraph_node" => return render::node(cg, args),
-            "codegraph_explore" => return render::explore(cg, args, &mut self.shown),
-            "codegraph_files" => render::files(cg, args)?,
-            "codegraph_status" => serde_json::to_string_pretty(&render::status(cg)?)?,
+            "codegraphV_search" => render::search(cg, args)?,
+            "codegraphV_callers" => render::relations(cg, args, true)?,
+            "codegraphV_callees" => render::relations(cg, args, false)?,
+            "codegraphV_impact" => render::impact(cg, args)?,
+            "codegraphV_node" => return render::node(cg, args),
+            "codegraphV_explore" => return render::explore(cg, args, &mut self.shown),
+            "codegraphV_files" => render::files(cg, args)?,
+            "codegraphV_status" => serde_json::to_string_pretty(&render::status(cg)?)?,
             _ => return Ok(ToolResult::text(format!("Unknown tool: {name}"))),
         };
         Ok(ToolResult::text(text))
@@ -325,7 +325,7 @@ pub fn required<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolResult> 
 /// The wait is time-boxed — CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS, default 3000, 0 = always wait —
 /// so a huge reconcile never reads as a hang; it then finishes in the background.
 fn catch_up(cg: &mut CodeGraph, root: &str) {
-    let timeout_ms = std::env::var("CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS")
+    let timeout_ms = std::env::var("CODEGRAPHV_CATCHUP_GATE_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|n| n.is_finite() && *n >= 0.0)
@@ -334,8 +334,8 @@ fn catch_up(cg: &mut CodeGraph, root: &str) {
     match cg.catch_up(wait) {
         Ok(true) => {}
         Ok(false) => eprintln!(
-            "[CodeGraph MCP] Catch-up reconcile still running after {timeout_ms}ms; serving this tool call now and finishing the reconcile in the background. Set CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS=0 to always wait for it."
+            "[CodeGraphV MCP] Catch-up reconcile still running after {timeout_ms}ms; serving this tool call now and finishing the reconcile in the background. Set CODEGRAPHV_CATCHUP_GATE_TIMEOUT_MS=0 to always wait for it."
         ),
-        Err(error) => eprintln!("[CodeGraph MCP] Catch-up sync failed for {root}: {error}"),
+        Err(error) => eprintln!("[CodeGraphV MCP] Catch-up sync failed for {root}: {error}"),
     }
 }

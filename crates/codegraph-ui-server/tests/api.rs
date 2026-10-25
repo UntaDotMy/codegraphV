@@ -124,7 +124,7 @@ fn link_dir(target: &std::path::Path, link: &std::path::Path) {
 fn a_trail_save_never_follows_a_linked_ui_folder_out_of_the_project() {
     let (dir, cg) = fixture();
     let outside = tempfile::tempdir().unwrap();
-    let ui = dir.path().join(".codegraph").join("ui");
+    let ui = dir.path().join(".codegraphV").join("ui");
     let _ = std::fs::remove_dir_all(&ui);
     link_dir(outside.path(), &ui);
     let finish = cg.get_nodes_by_name("finish").unwrap().remove(0);
@@ -139,7 +139,7 @@ fn a_trail_save_never_follows_a_linked_ui_folder_out_of_the_project() {
 fn an_unversioned_trail_reads_as_version_one_and_an_unknown_version_is_skipped() {
     let (dir, cg) = fixture();
     let finish = cg.get_nodes_by_name("finish").unwrap().remove(0);
-    let trails_dir = dir.path().join(".codegraph").join("ui").join("trails");
+    let trails_dir = dir.path().join(".codegraphV").join("ui").join("trails");
     std::fs::create_dir_all(&trails_dir).unwrap();
     let hop = json!({"dir":"start","id":finish.id,"name":"finish","qualifiedName":finish.qualified_name,"kind":"function","file":"app.ts","line":1});
     std::fs::write(trails_dir.join("old.json"), json!({"id":"old","name":"Old","hops":[hop.clone()]}).to_string()).unwrap();

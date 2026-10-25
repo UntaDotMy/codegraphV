@@ -2,7 +2,7 @@
 
     python scripts/bench/lang_probe.py [--parity]
 
-Writes the samples into a temporary directory, runs `target/release/codegraph init .` there and
+Writes the samples into a temporary directory, runs `target/release/codegraphV init .` there and
 requires every file to be stored under its expected language with at least one node besides the
 file node. --parity then runs lang_parity.py on the same samples (TS vs Rust graph diff).
 Exits 0 when every language passes (and, with --parity, the graphs are identical).
@@ -78,7 +78,7 @@ def main() -> int:
         if run.returncode != 0:
             print(run.stdout, run.stderr)
             return 2
-        db = sqlite3.connect(work / '.codegraph' / 'codegraph.db')
+        db = sqlite3.connect(work / '.codegraphV' / 'codegraph.db')
         languages = dict(db.execute('select path, language from files'))
         symbols = dict(db.execute("select file_path, count(*) from nodes where kind != 'file' group by file_path"))
         db.close()
@@ -92,7 +92,7 @@ def main() -> int:
         if failed:
             return 1
         if a.parity:
-            shutil.rmtree(work / '.codegraph')
+            shutil.rmtree(work / '.codegraphV')
             return subprocess.run([sys.executable, str(HERE / 'lang_parity.py'), str(work)]).returncode
         return 0
     finally:

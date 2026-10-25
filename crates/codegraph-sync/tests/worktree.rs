@@ -58,7 +58,7 @@ fn linked_worktrees_are_distinguished_and_share_common_directory() {
         Some(m.worktree_root.clone())
     );
     assert!(worktree_mismatch_warning(&m).contains(&m.worktree_root));
-    assert!(worktree_mismatch_notice(&m).contains("codegraph init -i"));
+    assert!(worktree_mismatch_notice(&m).contains("codegraphV init -i"));
     assert!(
         detect_worktree_index_mismatch(linked.to_str().unwrap(), linked.to_str().unwrap())
             .is_none()

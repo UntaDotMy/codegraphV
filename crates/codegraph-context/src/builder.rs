@@ -240,14 +240,14 @@ fn low_confidence_note(entries: &[Node]) -> String {
         String::new()
     } else {
         format!(
-            "\n- `codegraph_files` a likely area: {}",
+            "\n- `codegraphV_files` a likely area: {}",
             dirs.iter()
                 .map(|d| format!("`{d}`"))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
     };
-    format!("\n\n{LOW_CONFIDENCE_MARKER}\n\nThis query matched mostly on common words, so the entry points above may be off-target — treat them as a starting point, not a complete answer. For a reliable result:\n- `codegraph_explore` with the **exact symbol names** you are after (class / function / method names), or\n- `codegraph_search <name>` for one specific symbol{dir_line}\n\nDo not assume the list above is comprehensive.")
+    format!("\n\n{LOW_CONFIDENCE_MARKER}\n\nThis query matched mostly on common words, so the entry points above may be off-target — treat them as a starting point, not a complete answer. For a reliable result:\n- `codegraphV_explore` with the **exact symbol names** you are after (class / function / method names), or\n- `codegraphV_search <name>` for one specific symbol{dir_line}\n\nDo not assume the list above is comprehensive.")
 }
 
 pub fn build_call_paths_section(graph: &Subgraph) -> String {
@@ -357,7 +357,7 @@ pub fn build_call_paths_section(graph: &Subgraph) -> String {
         lines.push(line);
     }
     lines.push(String::new());
-    lines.push(if has_synth { "_Hops marked `[…]` are dynamic dispatch bridged by codegraph (with the registration site); the rest are direct calls. codegraph_node any symbol for its body._" }
-        else { "_codegraph_node any symbol above for its source + its own callers/callees._" }.into());
+    lines.push(if has_synth { "_Hops marked `[…]` are dynamic dispatch bridged by codegraphV (with the registration site); the rest are direct calls. codegraphV_node any symbol for its body._" }
+        else { "_codegraphV_node any symbol above for its source + its own callers/callees._" }.into());
     format!("\n{}\n", lines.join("\n"))
 }

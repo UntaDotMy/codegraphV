@@ -1409,7 +1409,7 @@ impl<'t> Walker<'t> {
         let scopes = std::mem::take(&mut self.value_scopes);
         let targets = std::mem::take(&mut self.fs_values);
         let _counts = std::mem::take(&mut self.fs_value_counts);
-        if std::env::var("CODEGRAPH_VALUE_REFS").as_deref() == Ok("0") {
+        if std::env::var("CODEGRAPHV_VALUE_REFS").as_deref() == Ok("0") {
             return;
         }
         if targets.is_empty() || scopes.is_empty() || util::is_generated_file(self.file_path) {

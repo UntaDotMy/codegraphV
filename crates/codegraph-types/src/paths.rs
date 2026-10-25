@@ -6,11 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The default per-project data directory name.
-pub const DEFAULT_CODEGRAPH_DIR: &str = ".codegraph";
+pub const DEFAULT_CODEGRAPH_DIR: &str = ".codegraphV";
 
 /// The data directory name WSL gives a fresh project on a Windows drive, so it
-/// never shares one index with CodeGraph on Windows (issue #995).
-pub const WSL_CODEGRAPH_DIR: &str = ".codegraph-wsl";
+/// never shares one index with codegraphV on Windows (issue #995).
+pub const WSL_CODEGRAPH_DIR: &str = ".codegraphV-wsl";
+
+/// The original (TypeScript) codegraph's per-project folder: never indexed or written by
+/// codegraphV; `codegraphV migrate` moves it to `.codegraphV`.
+pub const ORIGINAL_CODEGRAPH_DIR: &str = ".codegraph";
 
 /// Index paths are always `/`-separated.
 pub fn normalize_path(file_path: &str) -> String {
@@ -25,7 +29,7 @@ static WARNED_BAD_DIR_NAME: AtomicBool = AtomicBool::new(false);
 /// ignored (with one stderr warning) rather than risk writing the index outside
 /// the project or into its root. Read live, so it is testable.
 pub fn codegraph_dir_name() -> String {
-    let raw = std::env::var("CODEGRAPH_DIR").unwrap_or_default();
+    let raw = std::env::var("CODEGRAPHV_DIR").unwrap_or_default();
     let raw = crate::jscompat::js_trim(&raw);
     if raw.is_empty() {
         return DEFAULT_CODEGRAPH_DIR.to_string();
@@ -35,7 +39,7 @@ pub fn codegraph_dir_name() -> String {
         if !WARNED_BAD_DIR_NAME.swap(true, Ordering::Relaxed) {
             // stderr only — stdout is the MCP protocol channel.
             eprintln!(
-                "[codegraph] Ignoring invalid CODEGRAPH_DIR=\"{raw}\" — it must be a plain directory name (no path separators, no \"..\", not absolute). Using \"{DEFAULT_CODEGRAPH_DIR}\"."
+                "[codegraphV] Ignoring invalid CODEGRAPHV_DIR=\"{raw}\" — it must be a plain directory name (no path separators, no \"..\", not absolute). Using \"{DEFAULT_CODEGRAPH_DIR}\"."
             );
         }
         return DEFAULT_CODEGRAPH_DIR.to_string();
@@ -43,11 +47,12 @@ pub fn codegraph_dir_name() -> String {
     raw.to_string()
 }
 
-/// Is `name` (a single path segment) a CodeGraph data directory? The default
-/// `.codegraph`, the active `CODEGRAPH_DIR` override, and any `.codegraph-*`
-/// sibling — indexing and watching skip all of them (issue #636).
+/// Is `name` (a single path segment) a data directory? codegraphV's (`.codegraphV`, the active
+/// `CODEGRAPHV_DIR` override, any `.codegraphV-*` sibling) and the original codegraph's
+/// (`.codegraph`, `.codegraph-*`) — indexing and watching skip all of them (issue #636).
 pub fn is_codegraph_data_dir(name: &str) -> bool {
-    name == DEFAULT_CODEGRAPH_DIR || name == codegraph_dir_name() || name.starts_with(&format!("{DEFAULT_CODEGRAPH_DIR}-"))
+    [DEFAULT_CODEGRAPH_DIR, ORIGINAL_CODEGRAPH_DIR].iter().any(|dir| name == *dir || name.starts_with(&format!("{dir}-")))
+        || name == codegraph_dir_name()
 }
 
 /// `path.resolve(p)`: absolute, with `.` and `..` folded away, no symlink
@@ -220,11 +225,15 @@ mod tests {
 
     #[test]
     fn data_dir_names() {
+        assert!(is_codegraph_data_dir(".codegraphV"));
+        assert!(is_codegraph_data_dir(".codegraphV-wsl"));
+        // The original codegraph's folders are skipped too.
         assert!(is_codegraph_data_dir(".codegraph"));
         assert!(is_codegraph_data_dir(".codegraph-wsl"));
         assert!(is_codegraph_data_dir(".codegraph-win"));
         assert!(!is_codegraph_data_dir(".codegraphx"));
-        assert!(!is_codegraph_data_dir("codegraph"));
+        assert!(!is_codegraph_data_dir(".codegraphVx"));
+        assert!(!is_codegraph_data_dir("codegraphV"));
     }
 
     #[test]

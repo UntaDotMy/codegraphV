@@ -11,14 +11,14 @@ use std::{
 };
 
 fn binary(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_codegraph"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codegraphV"));
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("CODEGRAPH_DAEMON", "0")
-        .env_remove("CODEGRAPH_NO_UPDATE_CHECK")
+        .env("CODEGRAPHV_DAEMON", "0")
+        .env_remove("CODEGRAPHV_NO_UPDATE_CHECK")
         .env_remove("DO_NOT_TRACK")
-        .env_remove("CODEGRAPH_MCP_TOOLS");
+        .env_remove("CODEGRAPHV_MCP_TOOLS");
     command
 }
 
@@ -26,7 +26,7 @@ fn binary(home: &Path) -> Command {
 fn handshake(home: &Path, project: &Path, opt_out: bool) -> (String, String) {
     let mut command = binary(home);
     if opt_out {
-        command.env("CODEGRAPH_NO_UPDATE_CHECK", "1");
+        command.env("CODEGRAPHV_NO_UPDATE_CHECK", "1");
     }
     let mut child = command
         .args(["serve", "--mcp", "--no-watch", "--path"])
@@ -39,7 +39,7 @@ fn handshake(home: &Path, project: &Path, opt_out: bool) -> (String, String) {
     let requests = concat!(
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
         "\n",
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"codegraph_status","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"codegraphV_status","arguments":{}}}"#,
         "\n"
     );
     child.stdin.take().unwrap().write_all(requests.as_bytes()).unwrap();
@@ -66,14 +66,14 @@ fn fresh_cache_with_newer_release_reaches_initialize_and_status() {
     assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64;
-    std::fs::create_dir_all(home.path().join(".codegraph")).unwrap();
+    std::fs::create_dir_all(home.path().join(".codegraphV")).unwrap();
     std::fs::write(
-        home.path().join(".codegraph/update-check-rust.json"),
+        home.path().join(".codegraphV/update-check-rust.json"),
         format!(r#"{{"lastAttemptAt":{now},"lastSuccessAt":{now},"latest":"v9.9.9"}}"#),
     )
     .unwrap();
     let notice = format!(
-        "CodeGraph v9.9.9 is available (this server is running v{}). Update with `codegraph upgrade`.",
+        "CodeGraphV v9.9.9 is available (this server is running v{}). Update with `codegraphV upgrade`.",
         env!("CARGO_PKG_VERSION")
     );
 

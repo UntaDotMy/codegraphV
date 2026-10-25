@@ -3,9 +3,9 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-pub const EXHAUSTION_REASON: &str = "OS watch/file limit exhausted; auto-sync disabled. Run `codegraph sync` (or install git sync hooks) to refresh the graph after changes.";
-pub const INOTIFY_LIMIT_REASON: &str = "Linux inotify watch limit reached (fs.inotify.max_user_watches); live watching now covers only part of the project, so edits in unwatched directories will not auto-sync. Raise the limit (e.g. `sudo sysctl fs.inotify.max_user_watches=1048576`, persisted in /etc/sysctl.d) and restart, or run `codegraph sync` (or install git sync hooks) to refresh.";
-const LOCK_REASON: &str = "CodeGraph file lock held by another process past the retry budget; auto-sync disabled. Run `codegraph sync` once the other writer finishes (or install git sync hooks) to refresh the graph.";
+pub const EXHAUSTION_REASON: &str = "OS watch/file limit exhausted; auto-sync disabled. Run `codegraphV sync` (or install git sync hooks) to refresh the graph after changes.";
+pub const INOTIFY_LIMIT_REASON: &str = "Linux inotify watch limit reached (fs.inotify.max_user_watches); live watching now covers only part of the project, so edits in unwatched directories will not auto-sync. Raise the limit (e.g. `sudo sysctl fs.inotify.max_user_watches=1048576`, persisted in /etc/sysctl.d) and restart, or run `codegraphV sync` (or install git sync hooks) to refresh.";
+const LOCK_REASON: &str = "CodeGraphV file lock held by another process past the retry budget; auto-sync disabled. Run `codegraphV sync` once the other writer finishes (or install git sync hooks) to refresh the graph.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -226,7 +226,7 @@ impl WatchState {
                         self.failure_retries += 1;
                         effects.error = Some(message.clone());
                         if self.failure_retries > 5 {
-                            effects.degraded=self.degrade(format!("CodeGraph auto-sync failed {} times in a row; auto-sync disabled. Run `codegraph sync` (or install git sync hooks) to refresh the graph after changes. Last error: {message}",self.failure_retries),false);
+                            effects.degraded=self.degrade(format!("CodeGraphV auto-sync failed {} times in a row; auto-sync disabled. Run `codegraphV sync` (or install git sync hooks) to refresh the graph after changes. Last error: {message}",self.failure_retries),false);
                         }
                     }
                 }

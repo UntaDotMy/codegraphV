@@ -4,8 +4,8 @@ use std::{
     process::{Command, Stdio},
 };
 fn binary() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_codegraph"));
-    command.env_remove("CODEGRAPH_MCP_TOOLS");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codegraphV"));
+    command.env_remove("CODEGRAPHV_MCP_TOOLS");
     command
 }
 fn run(root: &std::path::Path, args: &[&str]) -> String {
@@ -67,7 +67,7 @@ fn executable_indexes_queries_syncs_and_serves_jsonrpc_without_node() {
         for request in [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"codegraph_explore","arguments":{"query":"start finish"}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"codegraphV_explore","arguments":{"query":"start finish"}}}),
         ] {
             writeln!(stdin, "{request}").unwrap();
         }
@@ -89,7 +89,7 @@ fn executable_indexes_queries_syncs_and_serves_jsonrpc_without_node() {
         .unwrap()
         .contains("start"));
     run(dir.path(), &["uninit", "--force"]);
-    assert!(!dir.path().join(".codegraph").exists());
+    assert!(!dir.path().join(".codegraphV").exists());
     assert!(dir.path().join("app.ts").exists());
 }
 #[test]
@@ -100,6 +100,6 @@ fn print_config_never_writes_configuration() {
         &["install", "--print-config", "cursor", "--location", "local"],
     );
     let config: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(config["mcpServers"]["codegraph"]["args"][1], "--mcp");
+    assert_eq!(config["mcpServers"]["codegraphV"]["args"][1], "--mcp");
     assert!(!dir.path().join(".cursor").exists());
 }

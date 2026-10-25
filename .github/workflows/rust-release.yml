@@ -1,4 +1,4 @@
-# Release of the Rust rewrite: prebuilt `codegraph` binaries on a GitHub Release.
+# Release of the Rust rewrite: prebuilt `codegraphV` binaries on a GitHub Release.
 #
 # A push to rust-rewrite tests the workspace on each OS and builds every binary. A tag `v0.*`
 # (or a manual run naming one) does the same, then publishes the archives with SHA256SUMS.
@@ -60,13 +60,13 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          exe=codegraph; [ "${{ runner.os }}" = "Windows" ] && exe=codegraph.exe
+          exe=codegraphV; [ "${{ runner.os }}" = "Windows" ] && exe=codegraphV.exe
           bin="target/${{ matrix.target }}/release/$exe"
           if [[ "$TAG" == v* && "${{ matrix.target }}" != "x86_64-apple-darwin" ]]; then
             version="$("$bin" --version)"
-            [ "$version" = "codegraph ${TAG#v}" ] || { echo "binary says '$version', tag is $TAG"; exit 1; }
+            [ "$version" = "codegraphV ${TAG#v}" ] || { echo "binary says '$version', tag is $TAG"; exit 1; }
           fi
-          dir="codegraph-${TAG}-${{ matrix.name }}"
+          dir="codegraphV-${TAG}-${{ matrix.name }}"
           mkdir "$dir"
           cp "$bin" LICENSE README.md "$dir/"
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -78,8 +78,8 @@ jobs:
         with:
           name: ${{ matrix.name }}
           path: |
-            codegraph-*.zip
-            codegraph-*.tar.gz
+            codegraphV-*.zip
+            codegraphV-*.tar.gz
           if-no-files-found: error
 
   release:
@@ -95,11 +95,11 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: cd dist && sha256sum codegraph-* > SHA256SUMS && cat SHA256SUMS
+        run: cd dist && sha256sum codegraphV-* > SHA256SUMS && cat SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="release-notes/${TAG}.md"
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "codegraph $TAG (Rust rewrite)" --notes-file "$notes" --verify-tag
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "codegraphV $TAG (Rust rewrite of codegraph)" --notes-file "$notes" --verify-tag

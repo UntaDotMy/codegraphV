@@ -22,7 +22,7 @@ pub struct Options {
 }
 pub fn viewer_directory() -> Result<PathBuf> {
     let mut paths = vec![];
-    if let Some(path) = std::env::var_os("CODEGRAPH_VIEWER_PATH") {
+    if let Some(path) = std::env::var_os("CODEGRAPHV_VIEWER_PATH") {
         paths.push(PathBuf::from(path));
     }
     let exe = std::env::current_exe()?;
@@ -34,7 +34,7 @@ pub fn viewer_directory() -> Result<PathBuf> {
         .into_iter()
         .find(|p| p.join("index.html").is_file())
         .ok_or_else(|| {
-            "Viewer assets are missing; build the viewer or set CODEGRAPH_VIEWER_PATH.".into()
+            "Viewer assets are missing; build the viewer or set CODEGRAPHV_VIEWER_PATH.".into()
         })
 }
 fn header(name: &str, value: &str) -> Header {
@@ -271,7 +271,7 @@ fn decode_path(path: &str) -> std::result::Result<String, Error> {
 pub fn get(cg: &CodeGraph, path: &str, query: &Query, read_only: bool) -> api::Result<Value> {
     match path {
         "/api" | "/api/" => Ok(
-            json!({"name":"codegraph ui","readOnly":read_only,"endpoints":["stats","search","node/<id>","nodes","source","file/<path>","trails"]}),
+            json!({"name":"codegraphV ui","readOnly":read_only,"endpoints":["stats","search","node/<id>","nodes","source","file/<path>","trails"]}),
         ),
         "/api/stats" => api::stats(cg),
         "/api/search" => api::search(cg, query),

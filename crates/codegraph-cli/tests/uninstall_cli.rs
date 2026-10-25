@@ -9,9 +9,9 @@ use std::{
 
 fn exe_name() -> &'static str {
     if cfg!(windows) {
-        "codegraph.exe"
+        "codegraphV.exe"
     } else {
-        "codegraph"
+        "codegraphV"
     }
 }
 
@@ -20,7 +20,7 @@ fn installed_copy(root: &Path) -> PathBuf {
     let dir = root.join("install");
     std::fs::create_dir_all(&dir).unwrap();
     let copy = dir.join(exe_name());
-    std::fs::copy(env!("CARGO_BIN_EXE_codegraph"), &copy).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_codegraphV"), &copy).unwrap();
     copy
 }
 
@@ -32,8 +32,8 @@ fn uninstall(exe: &Path, home: &Path, extra: &[&str]) -> std::process::Output {
         .env("USERPROFILE", home)
         // The default install location must never be the machine's real one in a test.
         .env("LOCALAPPDATA", home)
-        .env("CODEGRAPH_INSTALL_DIR", exe.parent().unwrap())
-        .env("CODEGRAPH_NO_UPDATE_CHECK", "1")
+        .env("CODEGRAPHV_INSTALL_DIR", exe.parent().unwrap())
+        .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap()
 }
@@ -67,7 +67,7 @@ fn uninstall_removes_the_installed_binary_unless_keep_cli() {
     let out = uninstall(&kept, &home, &[]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Removed the codegraph CLI"), "{stdout}");
+    assert!(stdout.contains("Removed the codegraphV CLI"), "{stdout}");
     // Windows can't delete a running exe: it is moved aside and deleted once the process exits.
     assert!(gone_within(&kept, Duration::from_secs(15)), "binary still at {}", kept.display());
     let leftovers: Vec<_> = std::fs::read_dir(kept.parent().unwrap()).unwrap().flatten().collect();
@@ -83,16 +83,16 @@ fn uninstall_removes_the_installed_binary_unless_keep_cli() {
 #[test]
 fn a_cargo_built_binary_is_reported_never_deleted() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+    let out = Command::new(env!("CARGO_BIN_EXE_codegraphV"))
         .args(["uninstall", "--yes", "--target", "claude"])
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env("LOCALAPPDATA", home.path())
-        .env_remove("CODEGRAPH_INSTALL_DIR")
-        .env("CODEGRAPH_NO_UPDATE_CHECK", "1")
+        .env_remove("CODEGRAPHV_INSTALL_DIR")
+        .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert!(Path::new(env!("CARGO_BIN_EXE_codegraph")).exists());
+    assert!(Path::new(env!("CARGO_BIN_EXE_codegraphV")).exists());
     assert!(String::from_utf8_lossy(&out.stdout).contains("source checkout"), "{}", String::from_utf8_lossy(&out.stdout));
 }

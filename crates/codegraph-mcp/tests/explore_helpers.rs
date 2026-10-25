@@ -196,8 +196,9 @@ fn explore_helpers_match_typescript() {
         let v: Value = serde_json::from_str(line).unwrap();
         let name = v["fn"].as_str().unwrap();
         let actual = run(name, v["args"].as_array().unwrap());
-        if !same(&actual, &v["expected"]) {
-            failures.push(format!("{name}\n  args:     {}\n  expected: {}\n  actual:   {}", v["args"], v["expected"], actual));
+        let expected = serde_json::from_str::<Value>(&codegraph_types::branding::from_original(&v["expected"].to_string())).unwrap(); // the TS output, in codegraphV's names
+        if !same(&actual, &expected) {
+            failures.push(format!("{name}\n  args:     {}\n  expected: {}\n  actual:   {}", v["args"], expected, actual));
         }
     }
     assert!(failures.is_empty(), "{}/{total} vectors differ; first:\n{}", failures.len(), failures[..failures.len().min(4)].join("\n"));

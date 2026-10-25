@@ -52,7 +52,7 @@ impl CodeGraph {
         self.unwatch();
         if self.store().is_read_only() {
             return Err(CodeGraphError::other(
-                "Cannot auto-sync a read-only CodeGraph instance",
+                "Cannot auto-sync a read-only CodeGraphV instance",
             ));
         }
         let root = self.project_root().to_string();
@@ -85,7 +85,7 @@ impl CodeGraph {
         });
         let guard = if cfg!(windows) {
             let guard_root = root.clone();
-            let path = codegraph_db::database_path(Path::new(&root));
+            let path = crate::directory::database_path(Path::new(&root));
             Some(Box::new(move || {
                 let mut store: Option<Store> = None;
                 Box::new(move |rel: &str| {

@@ -29,15 +29,15 @@ pub struct DefaultLogger;
 
 impl Logger for DefaultLogger {
     fn debug(&self, message: &str, context: LogContext<'_>) {
-        if std::env::var_os("CODEGRAPH_DEBUG").is_some_and(|v| !v.is_empty()) {
-            eprintln!("[CodeGraph] {message}{}", render_context(context));
+        if std::env::var_os("CODEGRAPHV_DEBUG").is_some_and(|v| !v.is_empty()) {
+            eprintln!("[CodeGraphV] {message}{}", render_context(context));
         }
     }
     fn warn(&self, message: &str, context: LogContext<'_>) {
-        eprintln!("[CodeGraph] {message}{}", render_context(context));
+        eprintln!("[CodeGraphV] {message}{}", render_context(context));
     }
     fn error(&self, message: &str, context: LogContext<'_>) {
-        eprintln!("[CodeGraph] {message}{}", render_context(context));
+        eprintln!("[CodeGraphV] {message}{}", render_context(context));
     }
 }
 

@@ -72,7 +72,7 @@ pub const MAX_SOURCE_FILE_SIZE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_CACHE_LIMIT: usize = 5_000;
 
 fn cache_limit() -> usize {
-    std::env::var("CODEGRAPH_RESOLVER_CACHE_SIZE")
+    std::env::var("CODEGRAPHV_RESOLVER_CACHE_SIZE")
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .filter(|n| *n > 0)

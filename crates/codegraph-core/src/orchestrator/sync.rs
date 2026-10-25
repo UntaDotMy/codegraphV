@@ -106,7 +106,7 @@ impl ExtractionOrchestrator {
         // git. We enumerate the current source files and reconcile each against the DB. A cheap
         // (size, mtime) stat pre-filter skips unchanged files without reading or hashing them, so
         // the expensive read+hash+parse only runs for files that actually changed.
-        let timings = std::env::var_os("CODEGRAPH_SYNTH_TIMINGS").is_some();
+        let timings = std::env::var_os("CODEGRAPHV_SYNTH_TIMINGS").is_some();
         let t_scan = Instant::now();
         let current_files: Vec<String>;
         let tracked_files: Vec<FileRecord>;

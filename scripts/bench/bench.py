@@ -55,8 +55,11 @@ except ImportError:  # pragma: no cover - reported at runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-ENV = {**os.environ, 'DO_NOT_TRACK': '1', 'CODEGRAPH_NO_UPDATE_CHECK': '1', 'CODEGRAPH_TELEMETRY': '0'}
-SKIP_DIRS = {'.codegraph', '.git', 'node_modules', 'target', 'dist'}
+ENV = {**os.environ, 'DO_NOT_TRACK': '1', 'CODEGRAPH_NO_UPDATE_CHECK': '1', 'CODEGRAPH_TELEMETRY': '0',
+       'CODEGRAPHV_NO_UPDATE_CHECK': '1'}
+# The TS engine indexes into .codegraph/, the Rust one (codegraphV) into .codegraphV/.
+INDEX_DIRS = {'ts': '.codegraph', 'rust': '.codegraphV'}
+SKIP_DIRS = {'.codegraph', '.codegraphV', '.git', 'node_modules', 'target', 'dist'}
 GREP_HEAD_LIMIT = 250
 READ_LINE_LIMIT = 2000
 READ_FILES_PER_IDENT = 2
@@ -340,7 +343,7 @@ else:
 def rust_bin() -> Path:
     # CODEGRAPH_RUST_BIN points the parity tools at another build (a debug binary for small fixtures).
     override = os.environ.get('CODEGRAPH_RUST_BIN')
-    exe = Path(override) if override else ROOT / 'target' / 'release' / ('codegraph.exe' if os.name == 'nt' else 'codegraph')
+    exe = Path(override) if override else ROOT / 'target' / 'release' / ('codegraphV.exe' if os.name == 'nt' else 'codegraphV')
     if not exe.exists():
         sys.exit(f'missing {exe}: run `cargo build --release -p codegraph-cli` first')
     return exe
@@ -375,7 +378,7 @@ def run_rg_arm(repo: Path, q: str) -> tuple[Run, Coverage]:
     texts, wall, cpu, peak, procs = [], 0.0, 0.0, 0.0, 0
     cov, opened = Coverage(), set()
     for ident in query_identifiers(q):
-        r = measure(['rg', '-n', '-w', '--no-heading', '--color', 'never', '-g', '!.codegraph', '--', ident, '.'], repo)
+        r = measure(['rg', '-n', '-w', '--no-heading', '--color', 'never', '-g', '!.codegraph', '-g', '!.codegraphV', '--', ident, '.'], repo)
         lines = r.stdout.splitlines()[:GREP_HEAD_LIMIT]
         texts.append('\n'.join(lines))
         wall, cpu, peak, procs = wall + r.wall_ms, cpu + r.cpu_ms, max(peak, r.peak_rss_mb), procs + r.procs
@@ -433,8 +436,8 @@ def prepare_copy(spec: dict, dest: Path):
     shutil.copytree(src, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*SKIP_DIRS))
 
 
-def index_counts(repo: Path) -> dict:
-    db = repo / '.codegraph' / 'codegraph.db'
+def index_counts(repo: Path, engine: str) -> dict:
+    db = repo / INDEX_DIRS[engine] / 'codegraph.db'
     if not db.exists():
         return {}
     con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
@@ -534,15 +537,15 @@ def main(argv=None):
         copies = {eng: work / name / eng for eng in ENGINES if eng in arms}
         index = {}
         for eng, repo in copies.items():
-            if a.reuse_index and (repo / '.codegraph').exists():
+            if a.reuse_index and (repo / INDEX_DIRS[eng]).exists():
                 index[eng] = {'reused': True, 'wall_ms': 0, 'cpu_ms': 0, 'peak_rss_mb': 0, 'peak_commit_mb': 0,
-                              'counts': index_counts(repo)}
+                              'counts': index_counts(repo, eng)}
                 continue
             prepare_copy(spec, repo)
             r = measure(ENGINES[eng]['index'](), repo)
             if r.code != 0:
                 sys.exit(f'{eng} index failed on {name} (exit {r.code})')
-            index[eng] = {**median_run([r]), 'counts': index_counts(repo)}
+            index[eng] = {**median_run([r]), 'counts': index_counts(repo, eng)}
             print(f'  index {eng}: {r.wall_ms:.0f} ms wall, {r.cpu_ms:.0f} ms cpu, {r.peak_rss_mb:.0f} MB', flush=True)
         gt_repo = next(iter(copies.values()), None)
         if gt_repo is None:

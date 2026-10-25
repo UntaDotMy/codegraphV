@@ -212,7 +212,7 @@ pub fn resolve_file(cg: &CodeGraph, file: &str) -> Result<(FileRecord, String)> 
         .ok_or_else(|| Error::refused("Requested path leaves the indexed project"))?;
     let record = cg
         .get_file(file)?
-        .ok_or_else(|| Error::missing(format!("{file} is not in this CodeGraph index")))?;
+        .ok_or_else(|| Error::missing(format!("{file} is not in this CodeGraphV index")))?;
     Ok((record, absolute))
 }
 pub fn drift(cg: &CodeGraph, file: &str) -> bool {

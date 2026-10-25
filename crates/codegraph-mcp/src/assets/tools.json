@@ -1,7 +1,7 @@
 [
   {
-    "name": "codegraph_search",
-    "description": "Quick symbol search by name. Returns locations only (no code). Use codegraph_explore instead to get the actual source / understand an area in one call.",
+    "name": "codegraphV_search",
+    "description": "Quick symbol search by name. Returns locations only (no code). Use codegraphV_explore instead to get the actual source / understand an area in one call.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -30,7 +30,7 @@
         },
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       },
       "required": [
@@ -45,8 +45,8 @@
     }
   },
   {
-    "name": "codegraph_callers",
-    "description": "List functions that call <symbol>. For the full flow, use codegraph_explore.",
+    "name": "codegraphV_callers",
+    "description": "List functions that call <symbol>. For the full flow, use codegraphV_explore.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -65,7 +65,7 @@
         },
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       },
       "required": [
@@ -80,8 +80,8 @@
     }
   },
   {
-    "name": "codegraph_callees",
-    "description": "List functions that <symbol> calls. For the full flow, use codegraph_explore.",
+    "name": "codegraphV_callees",
+    "description": "List functions that <symbol> calls. For the full flow, use codegraphV_explore.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -100,7 +100,7 @@
         },
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       },
       "required": [
@@ -115,7 +115,7 @@
     }
   },
   {
-    "name": "codegraph_impact",
+    "name": "codegraphV_impact",
     "description": "List symbols affected by changing <symbol>. Use before a refactor.",
     "inputSchema": {
       "type": "object",
@@ -135,7 +135,7 @@
         },
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       },
       "required": [
@@ -150,8 +150,8 @@
     }
   },
   {
-    "name": "codegraph_node",
-    "description": "Two modes. (1) READ A FILE — use INSTEAD of the Read tool: pass `file` (a path or basename) with no `symbol` and it returns that file's current on-disk source with line numbers, exactly the shape Read gives you (`<n>\\t<line>`, safe to Edit from), narrowable with `offset`/`limit` just like Read — PLUS a one-line note of which files depend on it. Same bytes as Read, faster (served from the index), with the blast radius attached. Use it whenever you would Read a source file. (2) ONE SYMBOL you can name — its location, signature, verbatim source (includeCode=true) and caller/callee trail in one call, so before changing it you see what calls it and what your edit would break. For an AMBIGUOUS name it returns EVERY matching definition's body in one call (so you never Read a file to find the right overload); pass `file`/`line` to pin one. Use codegraph_explore for several related symbols or the full flow.",
+    "name": "codegraphV_node",
+    "description": "Two modes. (1) READ A FILE — use INSTEAD of the Read tool: pass `file` (a path or basename) with no `symbol` and it returns that file's current on-disk source with line numbers, exactly the shape Read gives you (`<n>\\t<line>`, safe to Edit from), narrowable with `offset`/`limit` just like Read — PLUS a one-line note of which files depend on it. Same bytes as Read, faster (served from the index), with the blast radius attached. Use it whenever you would Read a source file. (2) ONE SYMBOL you can name — its location, signature, verbatim source (includeCode=true) and caller/callee trail in one call, so before changing it you see what calls it and what your edit would break. For an AMBIGUOUS name it returns EVERY matching definition's body in one call (so you never Read a file to find the right overload); pass `file`/`line` to pin one. Use codegraphV_explore for several related symbols or the full flow.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -187,7 +187,7 @@
         },
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       },
       "required": []
@@ -200,7 +200,7 @@
     }
   },
   {
-    "name": "codegraph_explore",
+    "name": "codegraphV_explore",
     "description": "PRIMARY TOOL — call FIRST for almost any question OR before an edit: how does X work, architecture, a bug, where/what is X, surveying an area, or the symbols you are about to change. Returns the verbatim source of the relevant symbols grouped by file in ONE capped call (Read-equivalent — treat the shown source as already Read; do NOT re-open those files), plus the call path among them. Query can be a natural-language question OR a bag of symbol/file names. Usually the ONLY call you need — more accurate context, in far fewer tokens and round-trips than a search/Read/Grep loop.",
     "inputSchema": {
       "type": "object",
@@ -215,7 +215,7 @@
         },
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       },
       "required": [
@@ -233,14 +233,14 @@
     }
   },
   {
-    "name": "codegraph_status",
+    "name": "codegraphV_status",
     "description": "Index health check: files, nodes, edges, last indexed time, and added/modified/removed counts. Skip unless debugging.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       }
     },
@@ -252,7 +252,7 @@
     }
   },
   {
-    "name": "codegraph_files",
+    "name": "codegraphV_files",
     "description": "Indexed file tree with language + symbol counts. Faster than Glob for project layout.",
     "inputSchema": {
       "type": "object",
@@ -286,7 +286,7 @@
         },
         "projectPath": {
           "type": "string",
-          "description": "Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
+          "description": "Absolute path to the project to query (or any directory inside it) — codegraphV uses the nearest .codegraphV/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project)."
         }
       }
     },

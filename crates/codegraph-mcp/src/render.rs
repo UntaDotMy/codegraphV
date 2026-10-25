@@ -230,7 +230,7 @@ pub fn node(cg: &CodeGraph, args: &Value) -> Result<ToolResult> {
     }
     if nodes.is_empty() {
         return Ok(ToolResult::text(format!(
-            "No symbol found: {symbol}. Try codegraph_explore with nearby symbol names."
+            "No symbol found: {symbol}. Try codegraphV_explore with nearby symbol names."
         )));
     }
     let mut out = String::new();
@@ -431,7 +431,7 @@ pub fn file_view(cg: &CodeGraph, file: &str, args: &Value) -> Result<ToolResult>
     out.push_str("```\n");
     if next <= lines.len() {
         out.push_str(&format!(
-            "Continue with codegraph_node(file: {:?}, offset: {next}).",
+            "Continue with codegraphV_node(file: {:?}, offset: {next}).",
             f.path
         ));
     }
@@ -765,11 +765,11 @@ pub fn explore(
         }
         out.push('\n');
         if more {
-            out.push_str(&format!("More source in `{file}`: call codegraph_explore again with the same symbols, or codegraph_node with file and offset.\n\n"));
+            out.push_str(&format!("More source in `{file}`: call codegraphV_explore again with the same symbols, or codegraphV_node with file and offset.\n\n"));
         }
     }
     if !omitted.is_empty() {
-        out.push_str(&format!("Additional relevant files: {}. Continue with another codegraph_explore using their symbols or paths.\n",omitted.join(", ")));
+        out.push_str(&format!("Additional relevant files: {}. Continue with another codegraphV_explore using their symbols or paths.\n",omitted.join(", ")));
     }
     out.push_str(&format!(
         "\nTreat returned source as already Read. Explore budget for this project: {} call(s).",
@@ -832,7 +832,7 @@ pub fn status(cg: &CodeGraph) -> Result<Value> {
     data["initialized"] = json!(true);
     data["version"] = json!(env!("CARGO_PKG_VERSION"));
     data["projectPath"] = json!(cg.project_root());
-    data["indexPath"] = json!(std::path::Path::new(cg.project_root()).join(".codegraph"));
+    data["indexPath"] = json!(codegraph_core::directory::get_code_graph_dir(cg.project_root()));
     data["backend"] = json!(cg.store().backend());
     data["journalMode"] = json!(cg.store().journal_mode()?);
     // A newer release exists: status is where users and agents look when something seems off.

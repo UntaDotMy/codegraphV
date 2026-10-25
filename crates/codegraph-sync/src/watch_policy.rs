@@ -89,10 +89,10 @@ pub fn watch_disabled_reason(project_root: &str, probe: &WatchProbe) -> Option<S
             None => std::env::var(key).ok(),
         }
     };
-    if env("CODEGRAPH_NO_WATCH").as_deref() == Some("1") {
-        return Some("CODEGRAPH_NO_WATCH=1 is set".to_string());
+    if env("CODEGRAPHV_NO_WATCH").as_deref() == Some("1") {
+        return Some("CODEGRAPHV_NO_WATCH=1 is set".to_string());
     }
-    if env("CODEGRAPH_FORCE_WATCH").as_deref() == Some("1") {
+    if env("CODEGRAPHV_FORCE_WATCH").as_deref() == Some("1") {
         return None;
     }
     let is_wsl = probe.is_wsl.unwrap_or_else(detect_wsl);
@@ -127,9 +127,9 @@ mod tests {
     fn reasons() {
         let probe = WatchProbe { env: Some(HashMap::new()), is_wsl: Some(true) };
         assert!(watch_disabled_reason("/mnt/c/p", &probe).is_some());
-        let forced = WatchProbe { env: Some(HashMap::from([("CODEGRAPH_FORCE_WATCH".to_string(), "1".to_string())])), is_wsl: Some(true) };
+        let forced = WatchProbe { env: Some(HashMap::from([("CODEGRAPHV_FORCE_WATCH".to_string(), "1".to_string())])), is_wsl: Some(true) };
         assert!(watch_disabled_reason("/mnt/c/p", &forced).is_none());
-        let off = WatchProbe { env: Some(HashMap::from([("CODEGRAPH_NO_WATCH".to_string(), "1".to_string())])), is_wsl: Some(false) };
-        assert_eq!(watch_disabled_reason("/home/p", &off).as_deref(), Some("CODEGRAPH_NO_WATCH=1 is set"));
+        let off = WatchProbe { env: Some(HashMap::from([("CODEGRAPHV_NO_WATCH".to_string(), "1".to_string())])), is_wsl: Some(false) };
+        assert_eq!(watch_disabled_reason("/home/p", &off).as_deref(), Some("CODEGRAPHV_NO_WATCH=1 is set"));
     }
 }

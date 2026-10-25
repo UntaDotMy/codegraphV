@@ -38,7 +38,7 @@ def main() -> int:
         run = bench.measure([str(bench.rust_bin()), 'init', '.'], dest)
         print(f'{name}: index exit {run.code}, wall {run.wall_ms:.0f}ms, cpu {run.cpu_ms:.0f}ms')
         diff = subprocess.run([sys.executable, str(HERE / 'compare_index.py'), str(baseline / f'{name}.db'),
-                               str(dest / '.codegraph' / 'codegraph.db')], capture_output=True, text=True)
+                               str(dest / bench.INDEX_DIRS['rust'] / 'codegraph.db')], capture_output=True, text=True)
         print(diff.stdout.strip())
         failed += run.code != 0 or diff.returncode != 0
         shutil.rmtree(dest, ignore_errors=True)

@@ -22,7 +22,7 @@ fn protocol_handshake_roots_and_recoverable_misses() {
         &mut session,
         3,
         "tools/call",
-        json!({"name":"codegraph_explore","arguments":{"query":"start finish"}}),
+        json!({"name":"codegraphV_explore","arguments":{"query":"start finish"}}),
     );
     assert_ne!(missed["result"]["isError"], true);
     assert!(missed["result"]["content"][0]["text"]
@@ -86,7 +86,7 @@ fn source_node_flow_and_read_windows_are_native() {
     cg.close();
     let mut handler = ToolHandler::new(Some(dir.path().to_string_lossy().into_owned()), false);
     let node = handler.call(
-        "codegraph_node",
+        "codegraphV_node",
         &json!({"symbol":"finish","includeCode":true}),
     );
     assert!(!node.is_error);
@@ -97,7 +97,7 @@ fn source_node_flow_and_read_windows_are_native() {
     );
     assert!(node.message().contains("return 42"));
     assert!(node.message().contains("return value"));
-    let explore = handler.call("codegraph_explore", &json!({"query":"start finish"}));
+    let explore = handler.call("codegraphV_explore", &json!({"query":"start finish"}));
     assert!(!explore.is_error);
     assert!(
         explore.message().contains("Flow among named symbols"),
@@ -105,10 +105,10 @@ fn source_node_flow_and_read_windows_are_native() {
         explore.message()
     );
     assert!(explore.message().contains("already Read"));
-    let file = handler.call("codegraph_node", &json!({"file":"main.ts:2-2"}));
+    let file = handler.call("codegraphV_node", &json!({"file":"main.ts:2-2"}));
     assert!(file.message().contains("2\texport function start"));
     assert!(!file.message().contains("1\texport function finish"));
-    let missing = handler.call("codegraph_node", &json!({"symbol":"missing"}));
+    let missing = handler.call("codegraphV_node", &json!({"symbol":"missing"}));
     assert!(!missing.is_error);
     assert!(missing.message().contains("No symbol found"));
 }
@@ -130,7 +130,7 @@ fn missing_project_is_guidance() {
     let mut handler = ToolHandler::new(Some("does-not-exist/codegraph-project".into()), false);
     assert!(
         !handler
-            .call("codegraph_explore", &json!({"query":"hello"}))
+            .call("codegraphV_explore", &json!({"query":"hello"}))
             .is_error
     );
 }

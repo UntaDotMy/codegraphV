@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 
 pub fn exe_name() -> &'static str {
     if cfg!(windows) {
-        "codegraph.exe"
+        "codegraphV.exe"
     } else {
-        "codegraph"
+        "codegraphV"
     }
 }
 
@@ -43,7 +43,7 @@ pub fn plan(exe: &Path, env: &dyn Fn(&str) -> Option<String>, home: &Path) -> Pl
         None if exe.file_name().is_some_and(|n| n == exe_name()) => candidates.push(exe.to_path_buf()),
         None => {}
     }
-    if let Some(dir) = env("CODEGRAPH_INSTALL_DIR").filter(|d| !d.trim().is_empty()) {
+    if let Some(dir) = env("CODEGRAPHV_INSTALL_DIR").filter(|d| !d.trim().is_empty()) {
         candidates.push(Path::new(&dir).join(exe_name()));
     }
     candidates.push(default_install_dir(env, home).join(exe_name()));
@@ -62,7 +62,7 @@ pub fn plan(exe: &Path, env: &dyn Fn(&str) -> Option<String>, home: &Path) -> Pl
 pub fn default_install_dir(env: &dyn Fn(&str) -> Option<String>, home: &Path) -> PathBuf {
     if cfg!(windows) {
         let local = env("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData").join("Local"));
-        local.join("codegraph").join("bin")
+        local.join("codegraphV").join("bin")
     } else {
         home.join(".local").join("bin")
     }
@@ -95,7 +95,7 @@ fn ps_quote(s: &str) -> String {
 
 /// Drop `dir` from the user PATH install-rust.ps1 added it to. Windows only; the shell
 /// installer never edits rc files, so there is nothing to undo elsewhere.
-fn remove_from_user_path(dir: &Path) -> bool {
+pub fn remove_from_user_path(dir: &Path) -> bool {
     #[cfg(windows)]
     {
         let Some(current) = powershell("[Environment]::GetEnvironmentVariable('Path','User')") else { return false };
@@ -193,7 +193,7 @@ pub fn execute(plan: &Plan, exe: &Path, env: &dyn Fn(&str) -> Option<String>, ho
             std::fs::remove_file(binary).is_ok()
         };
         if removed {
-            println!("Removed the codegraph CLI: {}", binary.display());
+            println!("Removed the codegraphV CLI: {}", binary.display());
             if remove_from_user_path(&dir) {
                 println!("Removed {} from your user PATH.", dir.display());
             }
@@ -204,7 +204,7 @@ pub fn execute(plan: &Plan, exe: &Path, env: &dyn Fn(&str) -> Option<String>, ho
             }
         } else {
             println!(
-                "Could not remove {} (is a codegraph process still running it?). Close your agent sessions and delete it.",
+                "Could not remove {} (is a codegraphV process still running it?). Close your agent sessions and delete it.",
                 binary.display()
             );
             leftovers.push(binary.clone());
@@ -212,7 +212,7 @@ pub fn execute(plan: &Plan, exe: &Path, env: &dyn Fn(&str) -> Option<String>, ho
     }
     if let Some(root) = &plan.source_root {
         println!(
-            "This codegraph runs from a source checkout at {}; it was not removed.",
+            "This codegraphV runs from a source checkout at {}; it was not removed.",
             root.display()
         );
     }
@@ -226,10 +226,10 @@ mod tests {
     #[test]
     fn user_path_entry_is_dropped_case_insensitively() {
         assert_eq!(
-            path_without(r"C:\a;C:\Users\X\AppData\Local\codegraph\bin\;D:\b", r"c:\users\x\appdata\local\codegraph\bin").as_deref(),
+            path_without(r"C:\a;C:\Users\X\AppData\Local\codegraphV\bin\;D:\b", r"c:\users\x\appdata\local\codegraphV\bin").as_deref(),
             Some(r"C:\a;D:\b")
         );
-        assert_eq!(path_without(r"C:\a;D:\b", r"C:\codegraph\bin"), None);
+        assert_eq!(path_without(r"C:\a;D:\b", r"C:\codegraphV\bin"), None);
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
         std::fs::write(&copy, "bin").unwrap();
         let home = root.path().join("home");
         let vars = |name: &str| match name {
-            "CODEGRAPH_INSTALL_DIR" => Some(install.to_string_lossy().into_owned()),
+            "CODEGRAPHV_INSTALL_DIR" => Some(install.to_string_lossy().into_owned()),
             "LOCALAPPDATA" => Some(home.to_string_lossy().into_owned()),
             _ => None,
         };

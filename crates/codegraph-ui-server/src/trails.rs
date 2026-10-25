@@ -3,7 +3,10 @@ use crate::api::{Error, Result};
 use codegraph_core::CodeGraph;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-const DIRECTORY: &str = ".codegraph/ui/trails";
+/// `<data dir>/ui/trails`, relative to the project.
+fn relative_directory() -> String {
+    format!("{}/ui/trails", codegraph_types::paths::codegraph_dir_name())
+}
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
@@ -15,7 +18,7 @@ fn valid_id(id: &str) -> bool {
 fn directory(cg: &CodeGraph) -> Result<PathBuf> {
     codegraph_core::utils::validate_path_within_root(
         cg.project_root(),
-        DIRECTORY,
+        &relative_directory(),
         Default::default(),
     )
     .map(PathBuf::from)
@@ -147,7 +150,7 @@ pub fn list(cg: &CodeGraph, read_only: bool) -> Result<Value> {
             let name = entry.file_name().to_string_lossy().into_owned();
             let inside = codegraph_core::utils::validate_path_within_root(
                 cg.project_root(),
-                &format!("{DIRECTORY}/{name}"),
+                &format!("{}/{name}", relative_directory()),
                 Default::default(),
             );
             if path.is_symlink() || inside.is_none() {
@@ -177,7 +180,7 @@ pub fn list(cg: &CodeGraph, read_only: bool) -> Result<Value> {
     }
     trails.sort_by(|a, b| b["updatedAt"].as_str().cmp(&a["updatedAt"].as_str()));
     Ok(
-        json!({"trails":trails,"readOnly":read_only,"readOnlyReason":if read_only{Some("Trail writes are disabled by --read-only")}else{None},"directory":DIRECTORY,"skipped":skipped,"bounded":bounded}),
+        json!({"trails":trails,"readOnly":read_only,"readOnlyReason":if read_only{Some("Trail writes are disabled by --read-only")}else{None},"directory":relative_directory(),"skipped":skipped,"bounded":bounded}),
     )
 }
 pub fn save(cg: &CodeGraph, body: &Value, read_only: bool) -> Result<Value> {

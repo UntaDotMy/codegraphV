@@ -352,12 +352,12 @@ pub fn js_cmp(diff: f64) -> std::cmp::Ordering {
 
 /// `CODEGRAPH_EXPLORE_LINENUMS` (default on).
 pub fn explore_line_numbers_enabled() -> bool {
-    std::env::var("CODEGRAPH_EXPLORE_LINENUMS").map_or(true, |v| v != "0")
+    std::env::var("CODEGRAPHV_EXPLORE_LINENUMS").map_or(true, |v| v != "0")
 }
 
 /// `CODEGRAPH_ADAPTIVE_EXPLORE` (default on).
 pub fn adaptive_explore_enabled() -> bool {
-    std::env::var("CODEGRAPH_ADAPTIVE_EXPLORE").map_or(true, |v| v != "0" && v != "false")
+    std::env::var("CODEGRAPHV_ADAPTIVE_EXPLORE").map_or(true, |v| v != "0" && v != "false")
 }
 
 /// Prefix each line with its 1-based number and a tab (`cat -n`).
@@ -466,7 +466,7 @@ pub fn format_gap_marker(file_path: &str, elided: &[ElidedSymbolRef]) -> String 
 
 /// The note a body cut short carries where it is cut.
 pub fn elided_body_note(file_path: &str, name: &str, from: i64, to: i64) -> String {
-    format!("\n… lines {from}-{to} of `{name}` elided — codegraph_explore `{file_path}:{from}-{to}` returns them")
+    format!("\n… lines {from}-{to} of `{name}` elided — codegraphV_explore `{file_path}:{from}-{to}` returns them")
 }
 
 /// One rendered slice of a file.
@@ -572,16 +572,16 @@ impl NotePair {
 }
 
 pub const NOTE_LOST: NotePair = NotePair {
-    complete: "> (Trailing pointer list omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another codegraph_explore with the specific names rather than reading those files.)",
-    trimmed: "> (Trailing pointer list omitted for size. The source above is verbatim — treat it as already Read. For symbols its gap markers name, and anything else not covered, run another codegraph_explore with those names rather than reading.)",
+    complete: "> (Trailing pointer list omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another codegraphV_explore with the specific names rather than reading those files.)",
+    trimmed: "> (Trailing pointer list omitted for size. The source above is verbatim — treat it as already Read. For symbols its gap markers name, and anything else not covered, run another codegraphV_explore with those names rather than reading.)",
 };
 pub const NOTE_CUT: NotePair = NotePair {
-    complete: "\n\n> (Trailing notes omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another codegraph_explore with the specific names rather than reading those files.)",
-    trimmed: "\n\n> (Trailing notes omitted for size. The source above is verbatim — treat it as already Read. For symbols its gap markers name, and anything else not covered, run another codegraph_explore with those names rather than reading.)",
+    complete: "\n\n> (Trailing notes omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another codegraphV_explore with the specific names rather than reading those files.)",
+    trimmed: "\n\n> (Trailing notes omitted for size. The source above is verbatim — treat it as already Read. For symbols its gap markers name, and anything else not covered, run another codegraphV_explore with those names rather than reading.)",
 };
 pub const NOTE_TRUNCATED: NotePair = NotePair {
-    complete: "\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For any area not covered, run another codegraph_explore with the specific names — do NOT Read these files.)",
-    trimmed: "\n\n... (output truncated to budget; the source above is verbatim — treat it as already Read. For names its gap markers list, or any area not covered, run another codegraph_explore — do NOT Read these files.)",
+    complete: "\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For any area not covered, run another codegraphV_explore with the specific names — do NOT Read these files.)",
+    trimmed: "\n\n... (output truncated to budget; the source above is verbatim — treat it as already Read. For names its gap markers list, or any area not covered, run another codegraphV_explore — do NOT Read these files.)",
 };
 
 /// One symbol a file section set out to deliver.
@@ -689,7 +689,7 @@ pub fn explore_completeness_notes(files_included: usize, trimmed: &[PartialFile]
         n => format!("{n} files"),
     };
     if trimmed.is_empty() {
-        return vec![format!("> **Complete source for {files} is included above — do NOT re-read them.** If your question also needs files/symbols listed under \"Not shown above\" (or any area this call didn't cover), make ANOTHER codegraph_explore targeting those names — it returns the same source with line numbers and is cheaper and more complete than reading.")];
+        return vec![format!("> **Complete source for {files} is included above — do NOT re-read them.** If your question also needs files/symbols listed under \"Not shown above\" (or any area this call didn't cover), make ANOTHER codegraphV_explore targeting those names — it returns the same source with line numbers and is cheaper and more complete than reading.")];
     }
     let mut all_paths: Vec<String> = known_paths.to_vec();
     all_paths.extend(trimmed.iter().map(|t| t.file_path.clone()));
@@ -721,7 +721,7 @@ pub fn explore_completeness_notes(files_included: usize, trimmed: &[PartialFile]
     }
     let head = format!("> **Verbatim source for {files} is included above — treat it as already Read.**");
     let what = "gap markers and file headers name what was elided";
-    let tail = "For those, or anything under \"Not shown above\", make ANOTHER codegraph_explore with those exact names instead of reading the files — it returns their source with line numbers.";
+    let tail = "For those, or anything under \"Not shown above\", make ANOTHER codegraphV_explore with those exact names instead of reading the files — it returns their source with line numbers.";
     let with_files = format!("{head} Trimmed for size: {trimmed_list}; {what}");
     let mut candidates = Vec::new();
     if !names.is_empty() {

@@ -154,7 +154,7 @@ fn windows_read_noise_is_ignored_while_a_real_edit_stays_pending() {
 #[test]
 #[ignore = "invoked only by the separate-process read test"]
 fn read_child_process() {
-    let path = std::env::var_os("CODEGRAPH_WATCH_READ_PATH").expect("child read path");
+    let path = std::env::var_os("CODEGRAPHV_WATCH_READ_PATH").expect("child read path");
     assert!(!fs::read(path).unwrap().is_empty());
 }
 
@@ -178,7 +178,7 @@ fn native_windows_watcher_does_not_sync_for_separate_process_reads() {
     fs::read(d.path().join("src/a.ts")).unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "read_child_process"])
-        .env("CODEGRAPH_WATCH_READ_PATH", d.path().join("src/a.ts"))
+        .env("CODEGRAPHV_WATCH_READ_PATH", d.path().join("src/a.ts"))
         .creation_flags(0x08000000)
         .output()
         .unwrap();

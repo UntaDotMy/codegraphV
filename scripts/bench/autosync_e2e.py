@@ -2,10 +2,10 @@
 
     python scripts/bench/autosync_e2e.py [--mode daemon|direct|both]
 
-For each mode it makes a small TypeScript project, indexes it with `codegraph init`, starts
-`codegraph serve --mcp` (daemon mode is the default launch; direct sets CODEGRAPH_DAEMON=0) and,
+For each mode it makes a small TypeScript project, indexes it with `codegraphV init`, starts
+`codegraphV serve --mcp` (daemon mode is the default launch; direct sets CODEGRAPHV_DAEMON=0) and,
 talking JSON-RPC over stdio like an agent, checks that each change becomes visible to
-codegraph_search without any manual sync:
+codegraphV_search without any manual sync:
 
   offline   a function added before the server starts is found on the first query
   add       a function appended to an existing file is found
@@ -74,7 +74,7 @@ class Server:
         raise TimeoutError(f'no response to {method}')
 
     def search(self, name: str) -> str:
-        msg = self.request('tools/call', {'name': 'codegraph_search', 'arguments': {'query': name}})
+        msg = self.request('tools/call', {'name': 'codegraphV_search', 'arguments': {'query': name}})
         return ''.join(c.get('text', '') for c in msg.get('result', {}).get('content', []))
 
     def found(self, name: str) -> bool:
@@ -106,7 +106,7 @@ def run_mode(exe: Path, mode: str, timeout: float) -> bool:
     project = Path(tempfile.mkdtemp(prefix='cg-autosync-'))
     env = dict(os.environ)
     if mode == 'direct':
-        env['CODEGRAPH_DAEMON'] = '0'
+        env['CODEGRAPHV_DAEMON'] = '0'
     server = None
     ok = True
 

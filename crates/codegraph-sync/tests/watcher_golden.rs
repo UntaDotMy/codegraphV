@@ -45,7 +45,8 @@ fn scheduler_matches_reference_snapshots_without_node_or_os_timers() {
         let mut request = None;
         for c in s.cases {
             let actual = compact(model::step(&mut state, &mut request, &c.query));
-            assert_eq!(actual, c.expected, "{}: {}", s.name, c.query);
+            let expected = serde_json::from_str::<Value>(&codegraph_types::branding::from_original(&c.expected.to_string())).unwrap(); // the TS output, in codegraphV's names
+            assert_eq!(actual, expected, "{}: {}", s.name, c.query);
         }
     }
 }

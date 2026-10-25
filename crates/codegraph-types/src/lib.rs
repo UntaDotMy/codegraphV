@@ -3,6 +3,7 @@
 //! This is the Rust port of `src/types.ts` plus the node-ID scheme. Everything
 //! else — the store, extractors, resolver, MCP server — speaks these types.
 
+pub mod branding;
 mod ids;
 pub mod jscompat;
 pub mod jssort;

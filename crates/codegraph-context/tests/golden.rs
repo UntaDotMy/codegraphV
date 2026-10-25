@@ -46,7 +46,8 @@ fn context_matches_the_current_reference_engine() {
         }
         for c in &s.cases {
             let actual = support::run(&store, dir.path().to_str().unwrap(), &c.query);
-            assert_eq!(actual, c.expected, "{}: {}", s.name, c.query);
+            let expected = serde_json::from_str::<Value>(&codegraph_types::branding::from_original(&c.expected.to_string())).unwrap(); // the TS output, in codegraphV's names
+            assert_eq!(actual, expected, "{}: {}", s.name, c.query);
         }
         store.close().unwrap();
     }

@@ -43,7 +43,7 @@ fn lifecycle_pending_filters_scope_refresh_and_exact_sync_paths() {
     for p in [
         ".git/index",
         "node_modules/pkg/x.ts",
-        ".codegraph/codegraph.db",
+        ".codegraphV/codegraph.db",
         "../escape.ts",
     ] {
         w.ingest_event(p);
