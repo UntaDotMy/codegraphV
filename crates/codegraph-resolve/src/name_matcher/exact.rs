@@ -66,6 +66,29 @@ fn is_plain_name(s: &str) -> bool {
     re!(r"^[A-Za-z_$][\w$]*$").is_match(s)
 }
 
+/// The calling file's declarations of an out-of-repo imported name that sit inside a function or
+/// method — only those can shadow the import. A top-level one is the import's own binding
+/// (`request = require('supertest')`), not a shadow of it.
+fn inner_scope_shadows(nodes: &[NodeRef], r: &UnresolvedRef, ctx: &Ctx) -> Vec<NodeRef> {
+    let local: Vec<NodeRef> = nodes.iter().filter(|n| n.file_path == r.file_path).cloned().collect();
+    if local.is_empty() {
+        return local;
+    }
+    let in_file = ctx.get_nodes_in_file(&r.file_path);
+    let scopes: Vec<&NodeRef> = in_file.iter().filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method)).collect();
+    local
+        .into_iter()
+        .filter(|n| {
+            scopes.iter().any(|s| {
+                s.id != n.id
+                    && s.start_line <= n.start_line
+                    && s.end_line >= n.end_line
+                    && (s.start_line < n.start_line || s.end_line > n.end_line)
+            })
+        })
+        .collect()
+}
+
 pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let bare_js = is_bare_js_call(r, ctx);
     let bare_no_members = is_bare_go_call(r, ctx) || is_bare_r_call(r, ctx);
@@ -74,6 +97,10 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
     if !bare_js && is_js_family(r.language) && !is_calls(r) && is_plain_name(&r.reference_name) && is_out_of_repo_binding(&r.reference_name, r, ctx) {
         return None;
     }
+    // `import { useQuery } from '@tanstack/react-query'`: the call means the package's, and no
+    // other file's same-named symbol. A declaration of the name in this file's inner scope still
+    // shadows the import.
+    let mut out_of_repo_call = false;
     if bare_js {
         if let Some(store) = match_js_store_binding_call(r, ctx) {
             return Some(store);
@@ -81,9 +108,7 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         if let Some(returned) = match_destructured_call_result(r, ctx) {
             return Some(returned);
         }
-        if is_out_of_repo_binding(&r.reference_name, r, ctx) {
-            return None;
-        }
+        out_of_repo_call = is_out_of_repo_binding(&r.reference_name, r, ctx);
     }
     let value_ref = is_value_ref(r);
     let import_ref = is_kind(r, EdgeKind::Imports);
@@ -104,6 +129,7 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         locally_bound.get().unwrap()
     };
     let same_name = ctx.get_nodes_by_name(&r.reference_name);
+    let same_name: crate::types::NodeList = if out_of_repo_call { std::rc::Rc::new(inner_scope_shadows(&same_name, r, ctx)) } else { same_name };
     let c_macro_call = is_calls(r)
         && is_c_family(r.language)
         && same_name.iter().any(|n| n.kind == NodeKind::Constant && is_cpp_define_signature(n.signature.as_deref().unwrap_or("")));
