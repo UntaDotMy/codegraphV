@@ -69,6 +69,8 @@ release/
 tmux-web/
 
 assets/__pycache__/
+scripts/bench/__pycache__/
+scripts/__pycache__/
 
 assets/generate-waitlist.py
 
@@ -87,3 +89,13 @@ target-linux/
 # once committed three of these, 7.9 MB, into a feature branch).
 *.bundle
 *.gitbundle
+
+# Rust workspace build output (the rust-rewrite port; codegraph-kernel keeps its own target/)
+/target/
+
+# Engineering tickets (~/.claude/engineering/tickets.py): the SQLite DB, its WAL
+# files, logs and backups are local state; `tickets.py export` writes a text dump
+# (.engineering/tickets.sql) that can be committed to share tickets.
+.engineering/tickets.sqlite3*
+.engineering/logs/
+.engineering/backups/

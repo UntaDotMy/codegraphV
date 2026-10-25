@@ -1,0 +1,308 @@
+{
+  "fixture": {
+    "nodes": 6000,
+    "edges": 6663,
+    "files": 30
+  },
+  "platform": "win32-x64",
+  "cpu": "AMD Ryzen 5 2600 Six-Core Processor            ",
+  "nodeVersion": "v24.5.0",
+  "config": {
+    "warmup": 40,
+    "samples": 7,
+    "repetitions": 25,
+    "queries": [
+      {
+        "op": "search",
+        "query": "getUser17"
+      },
+      {
+        "op": "search",
+        "query": "kind:method getUser"
+      },
+      {
+        "op": "search",
+        "query": "getUsre17"
+      },
+      {
+        "op": "bfs",
+        "id": "n123"
+      },
+      {
+        "op": "callers",
+        "id": "n250"
+      },
+      {
+        "op": "impact",
+        "id": "n250"
+      },
+      {
+        "op": "path",
+        "id": "n0",
+        "to": "n20"
+      },
+      {
+        "op": "flow",
+        "query": "entryStart checkpoint finalTarget"
+      },
+      {
+        "op": "dominant"
+      }
+    ]
+  },
+  "rows": [
+    {
+      "op": "search",
+      "query": "getUser17",
+      "resultCount": 20,
+      "rustMedianMs": 2.0396520000000002,
+      "rustP95Ms": 2.10444,
+      "typescriptMedianMs": 2.2670880000000033,
+      "typescriptP95Ms": 2.3391599999999744,
+      "typescriptOverRust": 1.1115072571203337,
+      "rustSamplesMs": [
+        2.0317279999999998,
+        2.10444,
+        2.08568,
+        2.0396520000000002,
+        2.0000839999999998,
+        1.986216,
+        2.043088
+      ],
+      "typescriptSamplesMs": [
+        2.317504000000008,
+        2.307739999999976,
+        2.3391599999999744,
+        2.2670880000000033,
+        2.178955999999998,
+        2.2262840000000144,
+        2.2209319999999932
+      ]
+    },
+    {
+      "op": "search",
+      "query": "kind:method getUser",
+      "resultCount": 20,
+      "rustMedianMs": 13.589063999999999,
+      "rustP95Ms": 13.803944,
+      "typescriptMedianMs": 16.301356000000013,
+      "typescriptP95Ms": 16.499032000000007,
+      "typescriptOverRust": 1.1995937321363719,
+      "rustSamplesMs": [
+        13.741656,
+        13.803944,
+        13.586684,
+        13.616588000000002,
+        13.584184,
+        13.589063999999999,
+        13.453755999999998
+      ],
+      "typescriptSamplesMs": [
+        15.789288000000015,
+        16.499032000000007,
+        16.347552000000032,
+        15.795060000000012,
+        16.408679999999986,
+        16.000828000000038,
+        16.301356000000013
+      ]
+    },
+    {
+      "op": "search",
+      "query": "getUsre17",
+      "resultCount": 20,
+      "rustMedianMs": 2.794976,
+      "rustP95Ms": 2.824488,
+      "typescriptMedianMs": 3.1960519999999817,
+      "typescriptP95Ms": 3.2780519999999522,
+      "typescriptOverRust": 1.143498906609567,
+      "rustSamplesMs": [
+        2.821324,
+        2.811388,
+        2.824488,
+        2.7941759999999998,
+        2.792848,
+        2.788248,
+        2.794976
+      ],
+      "typescriptSamplesMs": [
+        3.2007240000000454,
+        3.194475999999995,
+        3.2780519999999522,
+        3.1960519999999817,
+        3.143312000000005,
+        3.1691159999999945,
+        3.2587679999999817
+      ]
+    },
+    {
+      "op": "bfs",
+      "id": "n123",
+      "resultCount": 4,
+      "rustMedianMs": 0.087188,
+      "rustP95Ms": 0.091968,
+      "typescriptMedianMs": 0.12082000000002154,
+      "typescriptP95Ms": 0.12455600000001141,
+      "typescriptOverRust": 1.3857411570402065,
+      "rustSamplesMs": [
+        0.087188,
+        0.086996,
+        0.091968,
+        0.086952,
+        0.08848,
+        0.087204,
+        0.08561999999999999
+      ],
+      "typescriptSamplesMs": [
+        0.12082000000002154,
+        0.12455600000001141,
+        0.12385199999996985,
+        0.1207719999999972,
+        0.11289599999996426,
+        0.12168399999995018,
+        0.11488400000002003
+      ]
+    },
+    {
+      "op": "callers",
+      "id": "n250",
+      "resultCount": 3,
+      "rustMedianMs": 0.10846,
+      "rustP95Ms": 0.113612,
+      "typescriptMedianMs": 0.15083200000000943,
+      "typescriptP95Ms": 0.15564800000000104,
+      "typescriptOverRust": 1.3906693711968414,
+      "rustSamplesMs": [
+        0.113612,
+        0.10846,
+        0.10797599999999999,
+        0.107776,
+        0.10751999999999999,
+        0.10992800000000001,
+        0.110944
+      ],
+      "typescriptSamplesMs": [
+        0.15083200000000943,
+        0.15564800000000104,
+        0.15239599999993517,
+        0.15055599999999686,
+        0.14615599999997358,
+        0.1546600000000035,
+        0.1484719999999652
+      ]
+    },
+    {
+      "op": "impact",
+      "id": "n250",
+      "resultCount": 4,
+      "rustMedianMs": 0.08331200000000001,
+      "rustP95Ms": 0.087972,
+      "typescriptMedianMs": 0.1123080000000482,
+      "typescriptP95Ms": 0.11648800000002665,
+      "typescriptOverRust": 1.3480410985217999,
+      "rustSamplesMs": [
+        0.08370000000000001,
+        0.08331200000000001,
+        0.08324,
+        0.08317599999999999,
+        0.087972,
+        0.086032,
+        0.08309199999999999
+      ],
+      "typescriptSamplesMs": [
+        0.1132680000000255,
+        0.11648800000002665,
+        0.1141479999999865,
+        0.11180399999997462,
+        0.1123080000000482,
+        0.11224800000003597,
+        0.105795999999973
+      ]
+    },
+    {
+      "op": "path",
+      "id": "n0",
+      "to": "n20",
+      "resultCount": 21,
+      "rustMedianMs": 1.3712640000000003,
+      "rustP95Ms": 1.5237,
+      "typescriptMedianMs": 1.8694199999999546,
+      "typescriptP95Ms": 1.8987200000000302,
+      "typescriptOverRust": 1.3632823438812323,
+      "rustSamplesMs": [
+        1.348192,
+        1.3712640000000003,
+        1.5237,
+        1.372624,
+        1.3757679999999999,
+        1.35666,
+        1.3598679999999999
+      ],
+      "typescriptSamplesMs": [
+        1.8965800000000308,
+        1.8694199999999546,
+        1.8987200000000302,
+        1.8758280000000378,
+        1.8648279999999795,
+        1.854748000000036,
+        1.8671079999999347
+      ]
+    },
+    {
+      "op": "flow",
+      "query": "entryStart checkpoint finalTarget",
+      "resultCount": 5,
+      "rustMedianMs": 0.5837319999999999,
+      "rustP95Ms": 0.591656,
+      "typescriptMedianMs": 0.7245119999999587,
+      "typescriptP95Ms": 0.7485320000000502,
+      "typescriptOverRust": 1.2411723188037642,
+      "rustSamplesMs": [
+        0.583012,
+        0.5799639999999999,
+        0.5870960000000001,
+        0.5837319999999999,
+        0.582352,
+        0.591656,
+        0.586064
+      ],
+      "typescriptSamplesMs": [
+        0.7485320000000502,
+        0.720616000000009,
+        0.7440720000000147,
+        0.716788000000015,
+        0.7078360000000248,
+        0.7396119999999792,
+        0.7245119999999587
+      ]
+    },
+    {
+      "op": "dominant",
+      "resultCount": 1,
+      "rustMedianMs": 0.029992,
+      "rustP95Ms": 0.038224,
+      "typescriptMedianMs": 0.02815600000001723,
+      "typescriptP95Ms": 0.02841200000002573,
+      "typescriptOverRust": 0.9387836756474136,
+      "rustSamplesMs": [
+        0.029992,
+        0.029852,
+        0.02996,
+        0.029924,
+        0.038224,
+        0.031132,
+        0.030848
+      ],
+      "typescriptSamplesMs": [
+        0.027871999999988475,
+        0.02841200000002573,
+        0.028312000000005354,
+        0.027736000000004424,
+        0.02781199999997625,
+        0.02815600000001723,
+        0.02833999999995285
+      ]
+    }
+  ],
+  "scope": "Warm queries on one synthetic SQLite graph; release Rust versus the built Node engine. Excludes process startup, extraction, indexing, MCP transport and browser rendering. Counts are checked here; full answers are checked by verify.mjs."
+}

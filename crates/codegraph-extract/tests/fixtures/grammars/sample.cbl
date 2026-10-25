@@ -1,0 +1,11 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. HELLO.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-NAME PIC X(10).
+       PROCEDURE DIVISION.
+           PERFORM GREET.
+           CALL 'OTHER' USING WS-NAME.
+           STOP RUN.
+       GREET.
+           DISPLAY 'HI'.

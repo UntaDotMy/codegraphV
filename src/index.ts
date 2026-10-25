@@ -30,7 +30,7 @@ import {
 } from './types';
 import { DatabaseConnection, getDatabasePath, removeDatabaseFiles } from './db';
 import { WalCheckpointValve, resolveWalValveMb } from './db/wal-valve';
-import { QueryBuilder } from './db/queries';
+import { QueryBuilder, type DeprioritizedPathMatcher } from './db/queries';
 import { importPathKeys, moduleReferenceKeys } from './db/reference-tail';
 import {
   isInitialized,
@@ -68,6 +68,7 @@ import { loadDeprioritizePatterns } from './project-config';
 import { CodeGraphPackageVersion } from './mcp/version';
 import { extractSegmentSearchWords, segmentLookupVariants, splitIdentifierSegments } from './search/identifier-segments';
 import { createYielder } from './resolution/cooperative-yield';
+import { ESM_IMPORT_LANGUAGES } from './resolution/import-resolver';
 import { minRefsForPool } from './resolution/resolver-pool';
 
 // Re-export types for consumers
@@ -150,6 +151,8 @@ export interface IndexOptions {
  */
 /** project_metadata key for the Python package-root digest (see sync). */
 const PYTHON_ROOTS_METADATA_KEY = 'python_root_fingerprint';
+/** Metadata key: the digest of the workspace packages and path dependencies the index was resolved by. */
+const WORKSPACE_METADATA_KEY = 'js_workspace_fingerprint';
 
 export class CodeGraph {
   private db: DatabaseConnection;
@@ -215,24 +218,47 @@ export class CodeGraph {
     // on the pattern array's identity, which the cache keeps stable.
     let cachedPatterns: string[] | undefined;
     let cachedMatcher: ReturnType<typeof ignore> | undefined;
-    this.queries.setDeprioritizedPathMatcher((filePath: string): boolean => {
+    // The compiled matcher for the patterns `codegraph.json` holds right now,
+    // or null when there are none.
+    const currentMatcher = (): ReturnType<typeof ignore> | null => {
+      const patterns = loadDeprioritizePatterns(this.projectRoot);
+      if (patterns.length === 0) return null;
+      if (patterns !== cachedPatterns) {
+        cachedPatterns = patterns;
+        cachedMatcher = ignore().add(patterns);
+      }
+      return cachedMatcher!;
+    };
+    const matches = (matcher: ReturnType<typeof ignore> | null, filePath: string): boolean => {
+      if (!matcher) return false;
+      const rel = path.isAbsolute(filePath)
+        ? path.relative(this.projectRoot, filePath)
+        : filePath;
+      if (!rel || rel.startsWith('..')) return false;
+      return matcher.ignores(rel.split(path.sep).join('/'));
+    };
+    const deprioritized: DeprioritizedPathMatcher = (filePath: string): boolean => {
       try {
-        const patterns = loadDeprioritizePatterns(this.projectRoot);
-        if (patterns.length === 0) return false;
-        if (patterns !== cachedPatterns) {
-          cachedPatterns = patterns;
-          cachedMatcher = ignore().add(patterns);
-        }
-        const rel = path.isAbsolute(filePath)
-          ? path.relative(this.projectRoot, filePath)
-          : filePath;
-        if (!rel || rel.startsWith('..')) return false;
-        return cachedMatcher!.ignores(rel.split(path.sep).join('/'));
+        return matches(currentMatcher(), filePath);
       } catch {
         // Ranking must never take the search down with it.
         return false;
       }
-    });
+    };
+    // One `stat` for a whole loop of candidates instead of one per candidate
+    // (#2620): a search reads the config once, then asks the frozen matcher.
+    deprioritized.snapshot = () => {
+      let matcher: ReturnType<typeof ignore> | null = null;
+      try { matcher = currentMatcher(); } catch { matcher = null; }
+      return (filePath: string): boolean => {
+        try {
+          return matches(matcher, filePath);
+        } catch {
+          return false;
+        }
+      };
+    };
+    this.queries.setDeprioritizedPathMatcher(deprioritized);
 
     this.orchestrator = new ExtractionOrchestrator(this.projectRoot, this.queries);
     this.resolver = createResolver(this.projectRoot, this.queries);
@@ -393,9 +419,19 @@ export class CodeGraph {
       throw new Error(`Invalid CodeGraph directory: ${validation.errors.join(', ')}`);
     }
 
-    // Open database
+    // Open database. The secondary indexes an interrupted bulk load dropped are
+    // rebuilt off this thread, and finished before the instance is returned
+    // (#1887): rebuilt in line on a large index, they blocked the thread longer
+    // than the liveness watchdog allows, and every restart was killed the same
+    // way.
     const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.open(dbPath, { readOnly: options.readOnly });
+    const db = DatabaseConnection.open(dbPath, { readOnly: options.readOnly, deferIndexRecovery: true });
+    try {
+      await db.recoverIndexesOffThread();
+    } catch (err) {
+      db.close();
+      throw err;
+    }
     const queries = new QueryBuilder(db.getDb());
 
     const instance = new CodeGraph(db, queries, resolvedRoot);
@@ -462,9 +498,14 @@ export class CodeGraph {
   }
 
   /**
-   * Open synchronously (without sync)
+   * Open synchronously (without sync).
+   *
+   * `deferIndexRecovery` leaves the secondary indexes an interrupted bulk load
+   * dropped for {@link recoverIndexes} to rebuild off this thread, instead of
+   * rebuilding them here (#1887): for a caller on a watched event loop, which
+   * then awaits {@link recoverIndexes} before it relies on the project.
    */
-  static openSync(projectRoot: string, options: Pick<OpenOptions, 'readOnly'> = {}): CodeGraph {
+  static openSync(projectRoot: string, options: Pick<OpenOptions, 'readOnly'> & { deferIndexRecovery?: boolean } = {}): CodeGraph {
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if initialized
@@ -480,10 +521,26 @@ export class CodeGraph {
 
     // Open database
     const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.open(dbPath, { readOnly: options.readOnly });
+    const db = DatabaseConnection.open(dbPath, { readOnly: options.readOnly, deferIndexRecovery: options.deferIndexRecovery });
     const queries = new QueryBuilder(db.getDb());
 
     return new CodeGraph(db, queries, resolvedRoot);
+  }
+
+  /**
+   * Rebuild, on a worker thread, the secondary indexes an interrupted bulk
+   * load dropped and `openSync({ deferIndexRecovery: true })` left (#1887).
+   * Resolves at once when nothing is left, which is every open but the first
+   * after such an interruption; rejects when the rebuild fails, and the next
+   * call tries again. Reads stay correct meanwhile, only slower.
+   */
+  recoverIndexes(): Promise<void> {
+    return this.db.recoverIndexesOffThread();
+  }
+
+  /** Whether {@link recoverIndexes} still has indexes to rebuild. */
+  hasPendingIndexRecovery(): boolean {
+    return this.db.hasDeferredIndexRecovery();
   }
 
   /**
@@ -741,6 +798,7 @@ export class CodeGraph {
         // real full index — a sync touches a subset, so it must NOT advance the
         // extraction stamp (the bulk would still be stale). See extraction-version.ts.
         if (result.success) this.stampPythonRootFingerprint();
+        if (result.success) this.stampWorkspaceFingerprint();
 
         if (result.success && result.filesIndexed > 0) {
           try {
@@ -826,7 +884,14 @@ export class CodeGraph {
         return { success: false, filesIndexed: 0, filesSkipped: 0, filesErrored: 0, nodesCreated: 0, edgesCreated: 0, errors: [{ message: 'Could not acquire file lock - another process may be indexing', severity: 'error' as const }], durationMs: 0 };
       }
       try {
-        return this.orchestrator.indexFiles(filePaths);
+        // The files' nodes are new to the resolver: a resolution after this
+        // reloads its caches, the set of node names included, as indexAll and
+        // sync do before they resolve, instead of reading the graph as it was
+        // before (#2829). Awaited, so the write lock is held until the files
+        // are stored, as indexAll and sync hold it: returned unawaited, the
+        // promise left the `try` at once and the `finally` let the lock go as
+        // soon as indexing started, so another process could write meanwhile.
+        return await this.orchestrator.indexFiles(filePaths).finally(() => this.resolver.clearCaches());
       } finally {
         this.fileLock.release();
       }
@@ -848,6 +913,13 @@ export class CodeGraph {
   private stampPythonRootFingerprint(fingerprint = this.resolver.getPythonRootFingerprint()): void {
     try {
       this.queries.setMetadata(PYTHON_ROOTS_METADATA_KEY, fingerprint);
+    } catch { /* metadata is advisory */ }
+  }
+
+  /** Record the workspace-package digest a later sync compares against (see sync). */
+  private stampWorkspaceFingerprint(fingerprint = this.resolver.getWorkspaceFingerprint()): void {
+    try {
+      this.queries.setMetadata(WORKSPACE_METADATA_KEY, fingerprint);
     } catch { /* metadata is advisory */ }
   }
 
@@ -1016,6 +1088,35 @@ export class CodeGraph {
           }
         }
 
+        // Workspace packages and path dependencies (#2456, #2502). A
+        // package.json edit — a member's name, its `main` or `exports`, a
+        // `file:` dependency — moves what an import of the package resolves to
+        // in files it never touched, and no indexed file changes with it. A
+        // full reconcile (`codegraph sync`, a git hook, the watcher's catch-up)
+        // reads the manifests again; when what they declare moved, every
+        // JavaScript-family reference is re-opened, as a moved Python root set
+        // re-opens Python's below, and the orphan sweep resolves them by the
+        // new map exactly as a fresh index would. Package.json edits that leave
+        // the map alone (a version bump, a new registry dependency) cost one
+        // read. The watcher's scoped syncs follow source files only and skip
+        // the read: a monorepo's manifests take a walk of the tree to find.
+        // An index stamped by an older engine has no digest: record one.
+        if (fullReconcile) {
+          const tWorkspace = Date.now();
+          const before = this.queries.getMetadata(WORKSPACE_METADATA_KEY);
+          const now = this.resolver.refreshWorkspacePackages();
+          if (before !== null && before !== now) {
+            let reopened = 0;
+            for (const language of ESM_IMPORT_LANGUAGES) reopened += this.orchestrator.resurrectResolutionEdgesForLanguage(language);
+            refreshSynthesis = true;
+            this.queries.setMetadata('synthesis_pending', '1');
+            if (process.env.CODEGRAPH_SYNTH_TIMINGS) {
+              console.error(`[phase-timing] sync-workspace-packages: ${Date.now() - tWorkspace}ms (${reopened} refs re-opened)`);
+            }
+          }
+          if (before !== now) this.stampWorkspaceFingerprint(now);
+        }
+
         // Resolve references if files were updated
         const filesChanged = result.filesAdded > 0 || result.filesModified > 0;
         // The last edge before the failed-ref retry below: the rebind's
@@ -1139,7 +1240,9 @@ export class CodeGraph {
             // `index.ts` re-exporting what it imports: what the files importing
             // it bound by name in its absence, or failed, goes back to pending
             // for the sweep below, which binds it through the module as a fresh
-            // index does. (The removal half runs before removed files are deleted.)
+            // index does. So does what an import of a workspace package bound
+            // through another of its files while the entry its manifest names
+            // was missing. (The removal half runs before removed files are deleted.)
             const importReader = createImportReader(this.projectRoot);
             const added = (result.addedFilePaths ?? []).flatMap((filePath) => {
               const file = this.queries.getFileByPath(filePath);
@@ -1149,7 +1252,8 @@ export class CodeGraph {
               const tAdded = Date.now();
               const reopened = reopenReferencesThroughAddedFiles(
                 this.queries, importReader, added, edgesBeforeResolution,
-                (specifier, fromFile, language) => this.resolver.resolveModuleFile(specifier, fromFile, language)
+                (specifier, fromFile, language) => this.resolver.resolveModuleFile(specifier, fromFile, language),
+                (file) => this.resolver.workspacePackageDirOf(file)
               );
               if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] sync-added-module-importers: ${Date.now() - tAdded}ms (${reopened} refs re-opened)`);
             }
@@ -2120,6 +2224,14 @@ export class CodeGraph {
   }
 
   /**
+   * Which of `names` the index has never seen, by name, path, signature or
+   * docstring — the names explore reports as not in the index (#2462).
+   */
+  getUnseenNames(names: readonly string[]): string[] {
+    return this.queries.getUnseenNames(names);
+  }
+
+  /**
    * The COBOL copybooks a query names (`CVACT01Y`, `MYCOPYBOOK`): each
    * member's indexed copybook file(s) and every `COPY` / `EXEC SQL INCLUDE`
    * statement that includes it. Empty for a query that names none.
@@ -2317,7 +2429,7 @@ export class CodeGraph {
    * via the `references` edge that framework resolvers emit. Returns
    * null when fewer than 3 valid (non-test) routes exist.
    */
-  getRoutingManifest(limit?: number): {
+  getRoutingManifest(limit?: number, perRoute?: boolean): {
     entries: Array<{
       url: string;
       handler: string;
@@ -2332,7 +2444,7 @@ export class CodeGraph {
     topHandlerFileCount: number;
     totalRoutes: number;
   } | null {
-    return this.queries.getRoutingManifest(limit);
+    return this.queries.getRoutingManifest(limit, perRoute);
   }
 
   // ===========================================================================

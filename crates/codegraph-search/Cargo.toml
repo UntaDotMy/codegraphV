@@ -1,0 +1,17 @@
+[package]
+name = "codegraph-search"
+description = "Pure search/ranking helpers: query parsing, term extraction, path scoring, identifier segments, generated-file detection (port of src/search/* and extraction/generated-detection.ts)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+codegraph-types.workspace = true
+codegraph-jsre.workspace = true
+serde.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+unicode-general-category.workspace = true
+unicode-normalization.workspace = true
