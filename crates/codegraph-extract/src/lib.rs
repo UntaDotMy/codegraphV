@@ -144,6 +144,9 @@ pub fn extract_source(file_path: &str, source: &str, language: Language) -> Resu
     }
     let pre = pre_parse(file_path, source, language);
     let mut result = extract_file(file_path, &pre, language)?;
+    if matches!(language, Language::TypeScript | Language::Tsx) && pre != source && preparse::blanks_export_type_star(source) {
+        restore_re_export_signatures(&mut result, source);
+    }
     result.unresolved_references.extend(commonjs::commonjs_require_refs(file_path, source, language));
     // C++ methods the file's own macros define, read from the original source
     // after the walker so every file mints them (ccpp/macro_methods.rs).
@@ -151,6 +154,24 @@ pub fn extract_source(file_path: &str, source: &str, language: Language) -> Resu
         ccpp::append_cpp_macro_methods(&mut result, file_path, source, &pre);
     }
     Ok(result)
+}
+
+/// Each re-export import node's signature, read from `source` (the file as written) by the node's
+/// span: a file whose `export type *` the preParse blanked keeps its statements as the file writes
+/// them, `type` included (`restoreReExportSignatures`, #2474).
+fn restore_re_export_signatures(result: &mut ExtractionResult, source: &str) {
+    let mut line_starts: Option<Vec<usize>> = None;
+    for node in result.nodes.iter_mut() {
+        if node.kind != NodeKind::Import || !node.signature.as_deref().is_some_and(|s| s.starts_with("export")) {
+            continue;
+        }
+        let starts = line_starts.get_or_insert_with(|| std::iter::once(0).chain(source.match_indices('\n').map(|(i, _)| i + 1)).collect());
+        let line = |n: u32| (n as usize).checked_sub(1).and_then(|i| starts.get(i).copied());
+        let (Some(ls), Some(le)) = (line(node.start_line), line(node.end_line)) else { continue };
+        let start = ls + codegraph_types::jscompat::utf16_byte_index(&source[ls..], node.start_column as usize);
+        let end = le + codegraph_types::jscompat::utf16_byte_index(&source[le..], node.end_column as usize);
+        node.signature = Some(codegraph_types::jscompat::js_trim(source.get(start..end.max(start)).unwrap_or("")).to_string());
+    }
 }
 
 pub use preparse::{enable_stage_timing as enable_preparse_stage_timing, mask_cpp_raw_strings_source, pre_parse, stage_timings as preparse_stage_timings};

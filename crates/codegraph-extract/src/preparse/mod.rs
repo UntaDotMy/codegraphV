@@ -25,6 +25,12 @@ use crate::languages::has_flow_pragma;
 use codegraph_types::Language;
 use shadow::with_shadow;
 
+/// Whether the TypeScript preParse blanks an `export type *` in `source`: such a file's re-exports
+/// keep their statements as written (`blanksExportTypeStar`, #2474).
+pub fn blanks_export_type_star(source: &str) -> bool {
+    small::has_export_type_star(source) && small::blank_export_type_star(source) != source
+}
+
 /// The language's `preParse` hook applied to `source`; the source itself for a
 /// language with none.
 pub fn pre_parse(file_path: &str, source: &str, language: Language) -> String {
