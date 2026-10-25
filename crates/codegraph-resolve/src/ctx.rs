@@ -188,6 +188,10 @@ pub struct Ctx {
     nodes_by_kind_cache: RefCell<HashMap<NodeKind, NodeList>>,
     file_exists_memo: RefCell<HashMap<String, bool>>,
     known_names: RefCell<Option<Rc<HashSet<String>>>>,
+    /// The receiver chains of the Rust calls being resolved by their method's name
+    /// (`rustChainedCallByName`), each under the address of the by-name reference: as the TS
+    /// WeakMap, a copy of the reference doesn't carry it.
+    rust_chains: RefCell<Vec<(usize, Rc<Vec<String>>)>>,
     known_lower_names: RefCell<Option<Rc<HashSet<String>>>>,
     known_files: RefCell<Option<Rc<HashSet<String>>>>,
     caches_warmed: Cell<bool>,
@@ -247,6 +251,7 @@ impl Ctx {
             nodes_by_kind_cache: RefCell::new(HashMap::new()),
             file_exists_memo: RefCell::new(HashMap::new()),
             known_names: RefCell::new(None),
+            rust_chains: RefCell::new(Vec::new()),
             known_lower_names: RefCell::new(None),
             known_files: RefCell::new(None),
             caches_warmed: Cell::new(false),
@@ -491,6 +496,20 @@ impl Ctx {
         if self.supertype_node_memo.borrow().len() > 50_000 {
             self.supertype_node_memo.borrow_mut().clear();
         }
+    }
+
+    /// Run `f` with `chain` the receiver chain of the Rust call `r` (see `rust_chain_of`).
+    pub fn with_rust_chain<T>(&self, r: &crate::types::UnresolvedRef, chain: Rc<Vec<String>>, f: impl FnOnce() -> T) -> T {
+        self.rust_chains.borrow_mut().push((r as *const crate::types::UnresolvedRef as usize, chain));
+        let out = f();
+        self.rust_chains.borrow_mut().pop();
+        out
+    }
+
+    /// The receiver chain, root first, of the Rust call `r` resolution reads by its method's name.
+    pub fn rust_chain_of(&self, r: &crate::types::UnresolvedRef) -> Option<Rc<Vec<String>>> {
+        let at = r as *const crate::types::UnresolvedRef as usize;
+        self.rust_chains.borrow().iter().rev().find(|(a, _)| *a == at).map(|(_, c)| c.clone())
     }
 
     pub fn known_names(&self) -> Option<Rc<HashSet<String>>> {

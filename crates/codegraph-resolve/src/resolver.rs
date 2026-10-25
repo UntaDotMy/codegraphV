@@ -596,6 +596,17 @@ impl ReferenceResolver {
 
     fn resolve_one_in(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
         let ctx = &*self.ctx;
+        // A Rust call kept with its receiver chain (`self.services.store.put`, `self.store().put`,
+        // #2836) resolves as the call by its method's name did before the extractor kept the
+        // chain; the receiver's type is read through the whole chain where the call is written
+        // (match_rust_written_receiver_call). The edge keeps the call as written.
+        if let Some((by_name, chain)) = rust_chained_call_by_name(r) {
+            let resolved = ctx.with_rust_chain(&by_name, chain, || self.resolve_one_in(&by_name));
+            return resolved.map(|mut res| {
+                res.original = r.clone();
+                res
+            });
+        }
         if is_visible_cpp_macro(r, ctx) {
             return None;
         }

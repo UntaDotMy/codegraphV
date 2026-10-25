@@ -1339,7 +1339,13 @@ pub fn match_rust_written_receiver_call(r: &UnresolvedRef, ctx: &Ctx) -> Tri<Res
     if start >= scopes.line_starts.get(r.line as usize).copied().unwrap_or(scopes.code.len()) {
         return Tri::Undefined;
     }
-    let Some(receiver) = rust_written_call_receiver(&scopes, start, &r.reference_name) else { return Tri::Undefined };
+    // A call the extractor kept with its receiver chain comes here by its method's name with that
+    // chain (rust_chained_call_by_name): its receiver is the chain where the call writes it.
+    let receiver = match ctx.rust_chain_of(r) {
+        Some(chain) => rust_chained_receiver(&scopes, start, &chain, &r.reference_name),
+        None => rust_written_call_receiver(&scopes, start, &r.reference_name),
+    };
+    let Some(receiver) = receiver else { return Tri::Undefined };
     let Some(written) = rust_value_type(&receiver, start, &scopes, r, ctx, 0) else { return Tri::Undefined };
     let read = rust_read_type(&written, r, ctx);
     // A type no declaration the index holds names says nothing of what the call reaches, unless a
@@ -1588,4 +1594,61 @@ fn rust_written_call_receiver(scopes: &RustScopes, start: usize, name: &str) -> 
         p = args;
     }
     Some(js_trim(code_slice_str(code, start, dot)).to_string())
+}
+
+/// What a Rust call kept with its receiver chain is resolved as — `self.services.store.put`,
+/// `self.store().put`, `vis.map.get`, `self.0.len` (#2836): the call by its method's name, as the
+/// extractor recorded it before it kept the chain, and the chain, root first, to read the
+/// receiver's type through. None for any other reference, and for the one-field
+/// `self.<field>.<method>`, which has a reading of its own.
+pub fn rust_chained_call_by_name(r: &UnresolvedRef) -> Option<(UnresolvedRef, Rc<Vec<String>>)> {
+    if r.language != Language::Rust || !r.is_kind(codegraph_types::EdgeKind::Calls) {
+        return None;
+    }
+    let m = re!(r"^(self|[A-Za-z_]\w*)((?:\.(?:[A-Za-z_]\w*(?:\(\))?|\d+))+)\.([A-Za-z_]\w*)$").captures(&r.reference_name)?;
+    let root = m.text(1).unwrap_or("");
+    let links: Vec<&str> = m.text(2).unwrap_or("")[1..].split('.').collect();
+    if root == "self" && links.len() == 1 && re!(r"^[A-Za-z_]\w*$").is_match(links[0]) {
+        return None;
+    }
+    let mut by_name = r.clone();
+    by_name.reference_name = m.text(3).unwrap_or("").to_string();
+    let chain: Vec<String> = std::iter::once(root).chain(links).map(String::from).collect();
+    Some((by_name, Rc::new(chain)))
+}
+
+/// The receiver of the Rust call `name(…)` whose expression starts at `start`, where its
+/// reference keeps the receiver's chain (`chain`, root first): that chain as the file's blanked
+/// text writes it, a call's arguments and turbofish included, over lines too. None where the text
+/// doesn't read as the chain and then the call.
+fn rust_chained_receiver(scopes: &RustScopes, start: usize, chain: &[String], name: &str) -> Option<String> {
+    let code = &scopes.code;
+    let word_char = |i: usize| code_byte(code, i).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_');
+    let word = |at: usize, id: &str| code_slice_str(code, at, code.len()).starts_with(id) && !word_char(at + id.len());
+    if (start > 0 && word_char(start - 1)) || !word(start, &chain[0]) {
+        return None;
+    }
+    let mut p = start + chain[0].len();
+    let mut end = p;
+    // Each link — `.services`, `.store` and its `(…)` — and then the call itself.
+    let last = format!("{name}()");
+    for link in chain[1..].iter().map(String::as_str).chain(std::iter::once(last.as_str())) {
+        end = p;
+        let call = link.ends_with("()");
+        let id = if call { &link[..link.len() - 2] } else { link };
+        let dot = rust_space_end(code, p);
+        if code_byte(code, dot) != Some(b'.') || code_byte(code, dot + 1) == Some(b'.') {
+            return None;
+        }
+        let at = rust_space_end(code, dot + 1);
+        if !word(at, id) {
+            return None;
+        }
+        let args = rust_call_args_end(scopes, at + id.len());
+        if call != args.is_some() {
+            return None;
+        }
+        p = if call { args? } else { at + id.len() };
+    }
+    Some(code_slice_str(code, start, end).to_string())
 }
