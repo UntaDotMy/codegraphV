@@ -89,7 +89,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result
         "java" => java::extract(file_path, source),
         "python" => python::extract(file_path, source),
         "go" => go::extract(file_path, source),
-        "c" | "cpp" => ccpp::extract(file_path, source, lang),
+        "c" | "cpp" | "objc" => ccpp::extract(file_path, source, lang),
         "rust" => rustlang::extract(file_path, source),
         "csharp" => csharp::extract(file_path, source),
         "ruby" => ruby::extract(file_path, source),

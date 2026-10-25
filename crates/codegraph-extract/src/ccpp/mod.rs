@@ -76,7 +76,8 @@
 
 use crate::buffers::{
     build_meta, edge_kind_index, node_kind_index, Arena, BoolFlags, EdgeRow, EmitOut, NodeRow,
-    RefRow, StrRef, Tables, FLAG_IS_ABSTRACT, FLAG_IS_EXPORTED, FUNCTION_REF_CODE, NONE, NONE_STR,
+    RefRow, StrRef, Tables, FLAG_IS_ABSTRACT, FLAG_IS_EXPORTED, FLAG_IS_STATIC, FUNCTION_REF_CODE, NONE,
+    NONE_STR,
 };
 use crate::docstring::preceding_docstring;
 use crate::ids;
@@ -88,6 +89,7 @@ use crate::ts::Node;
 
 mod brace_scopes;
 mod macro_methods;
+mod objc;
 pub(crate) use macro_methods::append_cpp_macro_methods;
 use brace_scopes::{BraceScopes, NestedIntervals};
 
@@ -296,6 +298,8 @@ fn arrow_dot_no_ws(s: &str) -> String {
 pub enum Variant {
     C,
     Cpp,
+    /// Objective-C (languages/objc.ts): the C paths plus the objc hooks in objc.rs.
+    Objc,
 }
 
 #[derive(Clone)]
@@ -316,6 +320,7 @@ struct Extra {
     visibility: Option<u8>,
     is_exported: Option<bool>,
     is_abstract: Option<bool>,
+    is_static: Option<bool>,
     return_type: Option<String>,
     qualified_name: Option<String>,
     /// (endLine, endColumn) in place of the node's own (brace scopes).
@@ -392,9 +397,10 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
     let variant = match language {
         "c" => Variant::C,
         "cpp" => Variant::Cpp,
+        "objc" => Variant::Objc,
         other => return Err(format!("ccpp walker got language '{other}'")),
     };
-    let grammar = crate::langs::grammar_for(language).ok_or("no c/cpp grammar")?;
+    let grammar = crate::langs::grammar_for(language).ok_or("no c/cpp/objc grammar")?;
     let t0 = std::time::Instant::now();
     let tree = crate::ts::parse(&grammar, language, source)?;
 
@@ -403,8 +409,9 @@ pub fn extract(file_path: &str, source: &str, language: &str) -> Result<EmitOut,
     } else {
         None
     };
-    let walk_declared_types =
-        variant == Variant::C || !tree.root_node().has_error() || brace_scopes.is_some();
+    let walk_declared_types = matches!(variant, Variant::C | Variant::Objc)
+        || !tree.root_node().has_error()
+        || brace_scopes.is_some();
     let mut w = Walker {
         src: source,
         file_path,
@@ -498,6 +505,11 @@ impl<'t> Walker<'t> {
             .unwrap_or(false)
     }
 
+    /// callTypes: call_expression, plus Objective-C's message_expression.
+    fn is_call_type(&self, kind: &str) -> bool {
+        kind == "call_expression" || (self.variant == Variant::Objc && kind == "message_expression")
+    }
+
     fn push_ref_at(&mut self, from_row: u32, name: &str, kind_code: u8, node: Node) {
         let name_ref = self.arena.put(name);
         self.tables.push_ref(&RefRow {
@@ -555,6 +567,9 @@ impl<'t> Walker<'t> {
         }
         if let Some(v) = extra.is_abstract {
             flags.set(FLAG_IS_ABSTRACT, v);
+        }
+        if let Some(v) = extra.is_static {
+            flags.set(FLAG_IS_STATIC, v);
         }
         let name_ref = self.arena.put(name);
         let qn_ref = self.arena.put(&qualified);
@@ -627,13 +642,21 @@ impl<'t> Walker<'t> {
     /// extractName: extractNameRaw + the universal recoverMangledName net
     /// (wired for BOTH c and cpp in languages/c-cpp.ts).
     fn extract_name(&self, node: Node) -> String {
+        if self.variant == Variant::Objc {
+            return self.extract_name_raw(node);
+        }
         recover_mangled_cpp_name(self.extract_name_raw(node))
     }
 
     /// extractNameRaw for the c/cpp extractor configs (nameField 'declarator';
     /// cpp resolveName = extractCppQualifiedMethodName).
     fn extract_name_raw(&self, node: Node) -> String {
-        if let Some(name) = self.recover_single_arg_macro_defined_name(node) {
+        // objc resolveName: the selector, else (below) the unnamed type's variable.
+        if self.variant == Variant::Objc {
+            if let Some(name) = self.objc_method_name(node) {
+                return name;
+            }
+        } else if let Some(name) = self.recover_single_arg_macro_defined_name(node) {
             return name;
         }
         if self.variant == Variant::Cpp {
@@ -960,6 +983,9 @@ impl<'t> Walker<'t> {
 
     /// extractCppReturnType: the `type` field, normalized.
     fn return_type_of(&self, node: Node) -> Option<String> {
+        if self.variant == Variant::Objc {
+            return self.objc_return_type(node);
+        }
         let type_node = node.child_by_field_name("type")?;
         normalize_cpp_return_type(self.text(type_node))
     }
@@ -1120,7 +1146,15 @@ impl<'t> Walker<'t> {
         // C/C++ function-like macros become `constant` nodes carrying the
         // directive as their signature — a value, never a callee (#1838).
         // Mirrors tree-sitter.ts visitNode.
-        if kind == "preproc_function_def" {
+        if self.variant == Variant::Objc && kind == "class_implementation" {
+            // The objc visitNode hook consumed the subtree; the dispatcher then
+            // scans all of it for function-as-value candidates (from the scope
+            // around it, so the methods' own are taken a second time).
+            self.extract_objc_implementation(node);
+            self.scan_fn_ref_subtree(node, 0);
+            return;
+        }
+        if kind == "preproc_function_def" && self.variant != Variant::Objc {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = self.text(name_node).to_string();
                 let signature = Some(self.text(node).trim().to_string());
@@ -1165,6 +1199,15 @@ impl<'t> Walker<'t> {
         } else if self.variant == Variant::Cpp && kind == "class_specifier" {
             self.extract_class(node);
             skip_children = true;
+        } else if self.variant == Variant::Objc && kind == "class_interface" {
+            self.extract_objc_class(node);
+            skip_children = true;
+        } else if self.variant == Variant::Objc && kind == "method_definition" {
+            self.extract_method(node);
+            skip_children = true;
+        } else if self.variant == Variant::Objc && kind == "protocol_declaration" {
+            self.extract_objc_protocol(node);
+            skip_children = true;
         } else if kind == "struct_specifier" {
             self.extract_aggregate(node, "struct");
             skip_children = true;
@@ -1178,7 +1221,16 @@ impl<'t> Walker<'t> {
             || (self.variant == Variant::Cpp && kind == "alias_declaration")
         {
             skip_children = self.extract_type_alias(node);
-        } else if kind == "declaration" && !self.inside_class_like() {
+        } else if self.variant == Variant::Objc && kind == "property_declaration" && self.inside_class_like() {
+            self.extract_objc_property(node);
+            self.scan_fn_ref_subtree(node, 0);
+            skip_children = true;
+        } else if kind == "declaration"
+            && (!self.inside_class_like()
+                // A declaration written in an `@implementation` is file-scope C.
+                || (self.variant == Variant::Objc
+                    && node.parent().is_some_and(|p| p.kind() == "implementation_definition")))
+        {
             // A class, struct, union or enum defined in the declaration's type
             // (`struct Foo { … } foo;`) is a definition like one written on its
             // own, and the variables keep their nodes beside it — so is, in
@@ -1218,7 +1270,7 @@ impl<'t> Walker<'t> {
             skip_children = true;
         } else if kind == "preproc_include" {
             self.extract_import(node);
-        } else if kind == "call_expression" {
+        } else if self.is_call_type(kind) {
             self.extract_call(node);
         } else if kind == "new_expression" {
             // INSTANTIATION_KINDS: cpp `new Foo(...)`. (No anonymous-class
@@ -1248,14 +1300,14 @@ impl<'t> Walker<'t> {
 
         let name = self.extract_name(node);
         if name == "<anonymous>" {
-            if let Some(body) = node.child_by_field_name("body") {
+            if let Some(body) = self.body_of(node) {
                 self.visit_function_body(body);
             }
             return;
         }
         // Misparse artifacts: drop the node, still walk the body (#946/#1061).
         if self.is_misparsed_function(&name, node) {
-            if let Some(body) = node.child_by_field_name("body") {
+            if let Some(body) = self.body_of(node) {
                 self.visit_function_body(body);
             }
             return;
@@ -1265,6 +1317,7 @@ impl<'t> Walker<'t> {
             docstring: preceding_docstring(node, self.src),
             signature: self.constructor_signature(node),
             visibility: if self.variant == Variant::Cpp { self.visibility_of(node) } else { None },
+            is_static: self.objc_is_static(node),
             return_type: self.return_type_of(node),
             ..Extra::default()
         };
@@ -1274,7 +1327,7 @@ impl<'t> Walker<'t> {
         // kinds never appear as direct children/preceding siblings in these
         // grammars — `attribute` only occurs under attribute_declaration.)
         self.stack.push(Scope { row, kind: "function", name, qualified: None });
-        if let Some(body) = node.child_by_field_name("body") {
+        if let Some(body) = self.body_of(node) {
             self.visit_function_body(body);
         }
         self.stack.pop();
@@ -1292,7 +1345,7 @@ impl<'t> Walker<'t> {
 
         let name = self.extract_name(node);
         if self.is_misparsed_function(&name, node) {
-            if let Some(body) = node.child_by_field_name("body") {
+            if let Some(body) = self.body_of(node) {
                 self.visit_function_body(body);
             }
             return;
@@ -1307,6 +1360,7 @@ impl<'t> Walker<'t> {
             } else {
                 None
             },
+            is_static: self.objc_is_static(node),
             return_type: self.return_type_of(node),
             qualified_name: receiver_type
                 .as_ref()
@@ -1344,7 +1398,7 @@ impl<'t> Walker<'t> {
         }
 
         self.stack.push(Scope { row, kind: "method", name, qualified: None });
-        if let Some(body) = node.child_by_field_name("body") {
+        if let Some(body) = self.body_of(node) {
             self.visit_function_body(body);
         }
         self.stack.pop();
@@ -1539,22 +1593,25 @@ impl<'t> Walker<'t> {
     /// tree-sitter.ts:2795); cpp takes the TS GENERIC fallback (direct
     /// identifier children).
     fn extract_variable(&mut self, node: Node<'t>) {
-        let is_const = self.variant == Variant::C && self.is_const_declaration(node);
+        let is_const = matches!(self.variant, Variant::C | Variant::Objc) && self.is_const_declaration(node);
         let kind: &'static str = if is_const { "constant" } else { "variable" };
         let docstring = preceding_docstring(node, self.src);
         // isExported?.() ?? false — EXPLICIT false (tri-state flag set).
         let is_exported = Some(false);
 
-        if self.variant == Variant::C {
+        if matches!(self.variant, Variant::C | Variant::Objc) {
             if has_function_ancestor(node) {
                 return;
             }
             for i in 0..node.named_child_count() {
                 let Some(child) = node.named_child(i) else { continue };
+                // Objective-C keeps a bare identifier declarator (C skips the
+                // macro-prototype misparse it is there).
                 if !matches!(
                     child.kind(),
                     "init_declarator" | "pointer_declarator" | "array_declarator"
-                ) {
+                ) && !(self.variant == Variant::Objc && child.kind() == "identifier")
+                {
                     continue;
                 }
                 let Some(name_node) = c_declarator_identifier(child) else { continue };
@@ -1682,6 +1739,11 @@ impl<'t> Walker<'t> {
             }
         }
 
+        if node.kind() == "message_expression" {
+            self.extract_message_call(node);
+            return;
+        }
+
         let mut callee_name = String::new();
         if let Some(func) = func {
             if func.kind() == "field_expression" {
@@ -1711,7 +1773,7 @@ impl<'t> Walker<'t> {
                                 callee_name = method_name.to_string();
                             }
                         }
-                        Some("call_expression") => {
+                        Some("call_expression") if self.variant != Variant::Objc => {
                             // Call-result receiver (#645/#608): re-encode as
                             // `<innerCallee>().<method>` — C/C++ re-encode any inner.
                             let inner_fn = receiver.unwrap().child_by_field_name("function");
@@ -1742,7 +1804,10 @@ impl<'t> Walker<'t> {
         }
 
         // Template-arg strip on callees (`fn<T, 256>(args)`, `ns::fn<T>()`).
-        if !callee_name.is_empty() && callee_name.contains('<') && !callee_name.contains("operator")
+        if !callee_name.is_empty()
+            && self.variant != Variant::Objc
+            && callee_name.contains('<')
+            && !callee_name.contains("operator")
         {
             callee_name = strip_cpp_template_args(&callee_name);
         }
@@ -2016,13 +2081,13 @@ impl<'t> Walker<'t> {
         stack_guard!();
         let kind = node.kind();
         // A function-like macro defined inside a body is still a macro (#1838).
-        if kind == "preproc_function_def" {
+        if kind == "preproc_function_def" && self.variant != Variant::Objc {
             self.visit_node(node);
             return;
         }
         self.maybe_capture_fn_refs(node);
 
-        if kind == "call_expression" {
+        if self.is_call_type(kind) {
             self.extract_call(node);
         } else if kind == "new_expression" {
             self.extract_instantiation(node);
@@ -2091,6 +2156,10 @@ impl<'t> Walker<'t> {
             self.extract_class(node);
             return;
         }
+        if self.variant == Variant::Objc && kind == "class_interface" {
+            self.extract_objc_class(node);
+            return;
+        }
         if kind == "struct_specifier" {
             self.extract_aggregate(node, "struct");
             return;
@@ -2101,6 +2170,10 @@ impl<'t> Walker<'t> {
         }
         if kind == "enum_specifier" {
             self.extract_enum(node);
+            return;
+        }
+        if self.variant == Variant::Objc && kind == "protocol_declaration" {
+            self.extract_objc_protocol(node);
             return;
         }
 
@@ -2120,6 +2193,10 @@ impl<'t> Walker<'t> {
     /// field_identifier inside a pointer/array/function declarator.
     fn extract_inheritance(&mut self, node: Node<'t>, class_row: u32) {
         stack_guard!();
+        if node.kind() == "class_interface" {
+            self.extract_objc_class_inheritance(node, class_row);
+            return;
+        }
         let extends_kind = edge_kind_index("extends").unwrap();
         for i in 0..node.named_child_count() {
             let Some(child) = node.named_child(i) else { continue };
@@ -2244,6 +2321,12 @@ impl<'t> Walker<'t> {
                     return;
                 }
                 self.normalize_fn_ref_value(inner, from, mode, explicit_ref, depth + 1);
+            }
+            "selector_expression" if self.variant == Variant::Objc => {
+                let Some((name, at)) = self.objc_selector_ref(v) else { return };
+                if !name.is_empty() && !is_stoplisted(&name) {
+                    self.push_fn_ref_cand(from, name, mode, explicit_ref, at);
+                }
             }
             _ => {}
         }

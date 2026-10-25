@@ -162,6 +162,19 @@ pub(crate) const C_LONE_MACROS: LoneMacroRules = LoneMacroRules {
     keeps_sole_statement: false,
 };
 
+/// Objective-C's (OBJC_LONE_MACROS): the code after the macro may also be a directive like the
+/// `@interface` below `NS_ASSUME_NONNULL_BEGIN`, and a macro that is a body's only statement stays.
+pub(crate) const OBJC_LONE_MACROS: LoneMacroRules = LoneMacroRules {
+    next_code: |c| c.is_ascii_alphabetic() || matches!(c, b'_' | b'#' | b'{' | b'}' | b'~' | b'@'),
+    keeps_sole_statement: true,
+};
+
+/// The objc extractor's preParse: Foundation enum macros rewritten as the enums they declare,
+/// then lone macro lines blanked (offsets kept).
+pub(crate) fn pre_parse_objc(source: &str) -> String {
+    blank_lone_macro_lines(&rewrite_foundation_enum_macros(source), &OBJC_LONE_MACROS)
+}
+
 fn line_content(l: &str) -> &str {
     trim(l.strip_suffix('\r').unwrap_or(l))
 }

@@ -53,6 +53,7 @@ pub fn pre_parse(file_path: &str, source: &str, language: Language) -> String {
             })
         }
         "c" => with_shadow(source, conly::pre_parse_c),
+        "objc" => with_shadow(source, cshared::pre_parse_objc),
         "cpp" => with_shadow(source, |s| cpp::pre_parse_cpp(s, Some(file_path))),
         // Not offset-preserving: a free-format file is shifted right (see cobol.rs).
         "cobol" => cobol::pre_parse_cobol(source),
