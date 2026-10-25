@@ -592,6 +592,12 @@ impl CodeGraph {
             return Ok(Self::failed_index_result("Could not acquire file lock - another process may be indexing"));
         }
         let out = self.orchestrator.index_files(file_paths);
+        // The files' nodes are new to the resolver: a resolution after this reloads its caches,
+        // the set of node names included, as index_all and sync do before they resolve (#2829).
+        // A resolver not built yet has none to drop.
+        if let Some(resolver) = self.resolver.get() {
+            resolver.clear_caches();
+        }
         self.file_lock.borrow_mut().release();
         out
     }

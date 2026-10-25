@@ -306,6 +306,17 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let object_or_class = caps.text(1).unwrap_or("").to_string();
     let method_name = caps.text(2).unwrap_or("").to_string();
     let dot = kind == MatchKind::Dot;
+    // A JS/TS call of a member no node in the index is named (`list.push()`, `fs.writeFileSync()`)
+    // is one only the object-literal reader can link (#2829): `const api = { alias: renamed }`
+    // makes `api.alias()` a call of `renamed`. Every other strategy looks the member up by its own
+    // name and finds nothing, so typing the receiver is wasted work. When the reader answers, the
+    // whole path below runs and decides, as before.
+    if is_calls(r) && is_js_family(r.language) && ctx.known_names().is_some_and(|names| !names.contains(&method_name)) {
+        let literal = dot && !object_or_class.contains('.') && matches!(resolve_object_path_member(&object_or_class, &method_name, r, ctx, None), Tri::Value(_));
+        if !literal {
+            return None;
+        }
+    }
     let python_attr_receiver = r.language == Language::Python && dot && object_or_class.contains('.');
     let inferable_receiver = matches!(kind, MatchKind::Dot | MatchKind::LuaColon | MatchKind::RDollar) && !python_attr_receiver;
     let go_std = r.language == Language::Go && dot && !object_or_class.contains('.') && is_std_method_name("go", &method_name);
