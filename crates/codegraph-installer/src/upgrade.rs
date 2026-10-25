@@ -248,8 +248,10 @@ pub fn default_state_dir() -> Option<PathBuf> {
     codegraph_types::paths::home_dir().map(|h| h.join(".codegraph"))
 }
 
+/// Not the TS `update-check.json`: that one names npm versions (v1.6.x), and a machine switched
+/// from the npm codegraph still has it.
 pub fn update_check_cache_path(dir: &Path) -> PathBuf {
-    dir.join("update-check.json")
+    dir.join("update-check-rust.json")
 }
 
 pub fn read_update_check_cache(dir: &Path) -> Option<UpdateCheckCache> {

@@ -1,4 +1,4 @@
-//! The update notice reaches the MCP surfaces (DEV-63): a fresh `~/.codegraph/update-check.json`
+//! The update notice reaches the MCP surfaces (DEV-63): a fresh `~/.codegraph/update-check-rust.json`
 //! naming a newer release puts one sentence in the initialize instructions and in
 //! codegraph_status; CODEGRAPH_NO_UPDATE_CHECK=1 removes it. The cache is fresh, so no test
 //! here touches the network.
@@ -68,7 +68,7 @@ fn fresh_cache_with_newer_release_reaches_initialize_and_status() {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64;
     std::fs::create_dir_all(home.path().join(".codegraph")).unwrap();
     std::fs::write(
-        home.path().join(".codegraph/update-check.json"),
+        home.path().join(".codegraph/update-check-rust.json"),
         format!(r#"{{"lastAttemptAt":{now},"lastSuccessAt":{now},"latest":"v9.9.9"}}"#),
     )
     .unwrap();
@@ -86,4 +86,28 @@ fn fresh_cache_with_newer_release_reaches_initialize_and_status() {
     assert!(!instructions.contains("is available"), "{instructions}");
     let status: Value = serde_json::from_str(&status).unwrap();
     assert!(status.get("updateAvailable").is_none());
+}
+
+/// BUG-71: the npm (TypeScript) codegraph keeps its own cache in `~/.codegraph/update-check.json`,
+/// naming npm versions (v1.6.x). A machine switched to the Rust build still has it; it must not
+/// turn into "v1.6.2 is available".
+#[test]
+fn the_typescript_versions_cache_is_not_read() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("app.ts"), "export function start() { return 1; }\n").unwrap();
+    let init = binary(home.path()).args(["init", "."]).current_dir(project.path()).output().unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64;
+    std::fs::create_dir_all(home.path().join(".codegraph")).unwrap();
+    let ts_cache = home.path().join(".codegraph/update-check.json");
+    let ts_text = format!(r#"{{"lastAttemptAt":{now},"lastSuccessAt":{now},"latest":"v1.6.2"}}"#);
+    std::fs::write(&ts_cache, &ts_text).unwrap();
+
+    let (instructions, status) = handshake(home.path(), project.path(), false);
+    assert!(!instructions.contains("v1.6.2"), "{instructions}");
+    let status: Value = serde_json::from_str(&status).unwrap();
+    assert!(!status["updateAvailable"].as_str().unwrap_or_default().contains("v1.6.2"), "{status}");
+    assert_eq!(std::fs::read_to_string(&ts_cache).unwrap(), ts_text, "the TS cache is left as it was");
 }
