@@ -3,14 +3,15 @@
 //! call resolves only through that class — port of `matchNewReceiverCall` (name-matcher.ts).
 
 use super::infer::ts_imported_type_file;
-use super::method::resolve_method_on_type;
+use super::csharp::is_csharp_type_visible;
+use super::method::{imported_fqn_of, resolve_method_on_type};
 use super::same_language_family;
 use super::util::lines_of;
 use crate::ctx::Ctx;
 use crate::js_builtins::JS_BUILT_INS;
 use crate::types::{NodeRef, ResolvedBy, ResolvedRef, UnresolvedRef};
 use codegraph_jsre::re;
-use codegraph_types::NodeKind;
+use codegraph_types::{Language, NodeKind};
 
 /// `new <Class>().<method>`: the class as written, and the method.
 fn new_receiver_shape(r: &UnresolvedRef) -> Option<(String, String)> {
@@ -55,6 +56,11 @@ pub fn new_receiver_class(r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
 pub fn match_new_receiver_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let cls = new_receiver_class(r, ctx)?;
     let (written, method) = new_receiver_shape(r)?;
+    // Java's and C#'s no-argument `new Foo().bar()` reach here from the conformance pass; their
+    // own rules pick among same-named classes.
+    if matches!(r.language, Language::Java | Language::CSharp) {
+        return match_java_csharp_new_receiver_call(&cls, &written, &method, r, ctx);
+    }
     // Several classes may share the name: the one the call's file imports under the written
     // name is the class constructed.
     let preferred = ts_imported_type_file(&written, r, ctx);
@@ -81,4 +87,50 @@ pub fn match_new_receiver_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedR
         .cloned()
         .collect();
     (on_proto.len() == 1).then(|| ResolvedRef::new(r, on_proto[0].id.clone(), 0.8, ResolvedBy::InstanceMethod))
+}
+
+/// `file.slice(0, file.lastIndexOf('/'))`: the directory part, or (with no `/`) all but the last
+/// character, as JS slices to `-1`.
+fn dir_of(file: &str) -> &str {
+    match file.rfind('/') {
+        Some(i) => &file[..i],
+        None => file.char_indices().last().map_or("", |(i, _)| &file[..i]),
+    }
+}
+
+/// A Java or C# `new Foo().bar()`. With one project class of the name, its method or an inherited
+/// one, as for any typed call. With several, the class the language picks, or none: Java's written
+/// package (`new a.b.Foo()`), the file's single-type import, else the caller's own package; C#'s
+/// one type the file's namespaces and usings can see. Then only that class's own method: an
+/// inherited one is looked up by name, across every class of the name.
+fn match_java_csharp_new_receiver_call(cls: &str, written: &str, method: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    let twins: Vec<NodeRef> = ctx
+        .get_nodes_by_name(cls)
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct) && same_language_family(n.language, r.language))
+        .cloned()
+        .collect();
+    if twins.len() <= 1 {
+        return resolve_method_on_type(cls, method, r, ctx, 0.9, ResolvedBy::InstanceMethod, None, 0);
+    }
+    let chosen: Option<NodeRef> = if r.language == Language::CSharp {
+        let visible: Vec<&NodeRef> = twins.iter().filter(|n| is_csharp_type_visible(n, r, ctx)).collect();
+        (visible.len() == 1).then(|| visible[0].clone())
+    } else {
+        let fqn = if written.contains('.') { Some(written.to_string()) } else { imported_fqn_of(cls, r, ctx) };
+        match fqn {
+            Some(fqn) => {
+                let tail = format!("/{}", fqn.replace('.', "/"));
+                twins.iter().find(|n| n.file_path.strip_suffix(".java").unwrap_or(&n.file_path).ends_with(&tail)).cloned()
+            }
+            None => {
+                let own: Vec<&NodeRef> = twins.iter().filter(|n| dir_of(&n.file_path) == dir_of(&r.file_path)).collect();
+                (own.len() == 1).then(|| own[0].clone())
+            }
+        }
+    };
+    let chosen = chosen?;
+    let qn = format!("{}::{method}", chosen.qualified_name);
+    let own = ctx.get_nodes_in_file(&chosen.file_path).iter().find(|n| n.kind == NodeKind::Method && n.name == method && n.qualified_name == qn).cloned()?;
+    Some(ResolvedRef::new(r, own.id.clone(), 0.9, ResolvedBy::InstanceMethod))
 }

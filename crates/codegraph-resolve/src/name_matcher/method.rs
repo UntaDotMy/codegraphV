@@ -155,7 +155,7 @@ pub(crate) fn is_undeclared_type_name(type_name: &str, r: &UnresolvedRef, ctx: &
     re!(r"^[A-Z]").is_match(type_name) && !ctx.get_nodes_by_name(type_name).iter().any(|n| is_method_owner_kind(n) && same_language_family(n.language, r.language))
 }
 
-fn imported_fqn_of(type_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
+pub(crate) fn imported_fqn_of(type_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
     ctx.get_import_mappings(&r.file_path, r.language).iter().find(|i| i.local_name == type_name).map(|i| i.source.clone())
 }
 
