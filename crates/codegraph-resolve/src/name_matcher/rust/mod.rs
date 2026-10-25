@@ -8,9 +8,9 @@ pub mod types;
 pub mod uses;
 
 pub use calls::{
-    is_rust_typed_ref, is_rust_visible_across_files, match_rust_as_mut_chain_call, match_rust_generic_path, match_rust_pinned_call,
+    is_rust_path_call_reachable, is_rust_typed_ref, is_rust_visible_across_files, match_rust_as_mut_chain_call, match_rust_generic_path, match_rust_pinned_call,
     match_rust_self_call, match_rust_self_field_call, match_rust_self_path, match_rust_typed_receiver_call,
-    match_rust_typed_self_field_call, rust_field_type_name,
+    match_rust_typed_self_field_call, match_rust_written_receiver_call, rust_field_type_name,
 };
 pub use impls::{
     is_rust_declared_type_kind, is_rust_foreign_impl_callable, is_rust_project_named, is_rust_trait_impl_method, rust_trait_impl_header,

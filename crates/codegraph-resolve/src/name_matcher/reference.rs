@@ -15,7 +15,7 @@ use super::object_literal::{match_collapsed_object_call, match_object_path_call}
 use super::python_attr::match_python_factory_chain;
 use super::pending::*;
 use super::python_scope::is_python_name_imported_from_outside;
-use super::rust::match_rust_as_mut_chain_call;
+use super::rust::{match_rust_as_mut_chain_call, match_rust_written_receiver_call};
 use super::same_language_family;
 use super::util::{find_best_match, compute_path_proximity, lines_of, memo_map, memoized};
 use crate::ctx::Ctx;
@@ -482,6 +482,12 @@ fn match_reference_inner(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         let lent = match_rust_as_mut_chain_call(r, ctx);
         if !lent.is_undefined() {
             return lent.value();
+        }
+        // So is one on a field chain or a struct literal — `vis.map.get("a")`, `Xyz { x: 1.0 }.to_val()` —
+        // a call on the type that receiver is written with.
+        let written = match_rust_written_receiver_call(r, ctx);
+        if !written.is_undefined() {
+            return written.value();
         }
     }
     // A Kotlin call on what an unqualified call returns, recorded by its bare name —

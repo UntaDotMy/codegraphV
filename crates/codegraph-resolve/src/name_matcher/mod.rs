@@ -150,10 +150,10 @@ pub use method::{match_method_call, resolve_method_on_type};
 pub use function_ref::match_function_ref;
 pub use reference::match_reference;
 pub use rust::{
-    is_rust_associated_item, is_rust_declared_type_kind, is_rust_foreign_impl_callable, is_rust_name_in_scope, is_rust_project_named,
+    is_rust_associated_item, is_rust_declared_type_kind, is_rust_foreign_impl_callable, is_rust_name_in_scope, is_rust_path_call_reachable, is_rust_project_named,
     is_rust_trait_impl_method, match_rust_as_mut_chain_call, match_rust_generic_path, match_rust_pinned_call, match_rust_self_call,
     match_rust_self_field_call, match_rust_self_path, match_rust_typed_receiver_call, match_rust_typed_self_field_call,
-    rust_field_type_name,
+    match_rust_written_receiver_call, rust_field_type_name,
 };
 pub use exact::{match_by_exact_name, match_by_file_path, match_by_qualified_name, match_fuzzy, prefer_call_site_file};
 pub use calls::{is_go_bare_name, is_python_self_call};

@@ -1131,6 +1131,10 @@ pub fn rust_field_value(
         rust_value_type(recv, at, scopes, r, ctx, depth + 1)
     }?;
     let RustTypeRead::Read(body) = rust_read_type(&written, r, ctx) else { return None };
+    // `self.pair.0` on a field declared `(Config, u8)`: the tuple's field at that place.
+    if matches!(&body.kind, RustReadKind::Outside(n) if n == "(") && re!(r"^\d+$").is_match(field) {
+        return rust_tuple_field(&written, field.parse().ok()?);
+    }
     let RustReadKind::Named { name, path, .. } = &body.kind else { return None };
     let lookup = rust_type_lookup(name, path, &body.written.file, ctx, Some(body.written.at));
     let structs: Vec<&NodeRef> =

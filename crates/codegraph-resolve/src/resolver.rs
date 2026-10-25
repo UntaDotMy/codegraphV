@@ -1880,11 +1880,15 @@ impl ReferenceResolver {
         if bare && !is_rust_name_in_scope(&target, r, ctx) {
             return None;
         }
-        if r.is_kind(EdgeKind::Calls) && !is_rust_foreign_impl_callable(&target, r, ctx) {
-            None
-        } else {
-            Some(result)
+        if !r.is_kind(EdgeKind::Calls) {
+            return Some(result);
         }
+        // A call through a path whose type is from outside the project reaches only the project's
+        // impls for that type, or of that trait.
+        if !bare && !is_rust_path_call_reachable(&target, r, ctx) {
+            return None;
+        }
+        is_rust_foreign_impl_callable(&target, r, ctx).then_some(result)
     }
 
     /// A TS `const Foo = …` value that shares its name with the `type Foo` / `interface Foo` an

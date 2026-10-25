@@ -1249,3 +1249,343 @@ pub fn match_rust_self_field_call(field: &str, method_name: &str, r: &Unresolved
     }
     None
 }
+
+// -- Written receivers: field chains and struct literals (#2614) -------------------------------
+
+/// Whether a Rust call through a type's path can mean `target` (isRustPathCallReachable): a type
+/// the path names from std or a dependency is that crate's own, and the project holds a function
+/// of it only as its own impl of a trait for it; a call through a trait's path reaches the
+/// project's impls of that trait.
+pub fn is_rust_path_call_reachable(target: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    if target.language != Language::Rust {
+        return true;
+    }
+    let segments: Vec<&str> = r.reference_name.split("::").collect();
+    if segments.len() < 2 || !segments.iter().all(|s| re!(r"^[A-Za-z_]\w*$").is_match(s)) {
+        return true;
+    }
+    let ty = segments[segments.len() - 2];
+    if !ty.starts_with(|c: char| c.is_ascii_uppercase()) || ty == "Self" {
+        return true;
+    }
+    let path: Vec<String> = segments[..segments.len() - 2].iter().map(|s| s.to_string()).collect();
+    let Some(outside) = rust_outside_path_type(ty, &path, r, ctx) else { return true };
+    let header = if target.kind == NodeKind::Method { rust_trait_impl_header(target, ctx) } else { None };
+    let Some(header) = header else { return false };
+    if header.trait_ == outside {
+        return true;
+    }
+    if header.self_ != outside {
+        return false;
+    }
+    // The type the impl is for, as its own file names it: the outside one, not a project namesake.
+    let self_text = strip(re!(r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?)+"), &header.self_text);
+    let head = rust_path_head(&self_text);
+    let (name, segs) = match &head {
+        Some(h) => (h.name.clone(), h.segments.clone()),
+        None => (header.self_.clone(), Vec::new()),
+    };
+    let lookup = rust_type_lookup(&name, &segs, &target.file_path, ctx, Some(rust_node_offset(target, ctx)));
+    lookup.outside || !lookup.nodes.iter().any(|n| RUST_OWNER_KINDS.contains(&n.kind))
+}
+
+/// The name of the type a Rust path `path::type` names from std or a dependency, where the file's
+/// `use`s or the path itself say so — `J` under `use serde_json::Value as J` is `Value` — or None.
+fn rust_outside_path_type(ty: &str, path: &[String], r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
+    let at = rust_scopes_of(&r.file_path, ctx).map(|s| s.line_starts.get((r.line as usize).wrapping_sub(1)).copied().unwrap_or(0) + r.column as usize);
+    let (root, real) = if path.is_empty() {
+        let bound = rust_use_path(ty, &r.file_path, at, ctx)?;
+        if bound.len() < 2 {
+            return None;
+        }
+        (bound[0].clone(), bound[bound.len() - 1].clone())
+    } else {
+        let root = rust_use_path(&path[0], &r.file_path, at, ctx).and_then(|b| b.first().cloned()).unwrap_or_else(|| path[0].clone());
+        (root, ty.to_string())
+    };
+    is_rust_outside_crate(&root, r, ctx).then_some(real)
+}
+
+/// Whether a Rust path's first segment names std, or a crate the manifests depend on that the
+/// project doesn't hold.
+fn is_rust_outside_crate(root: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    if RUST_STD_ROOTS.contains(&root) {
+        return true;
+    }
+    if root == "crate" || root == "self" || root == "super" || rust_project_crates(ctx).contains(root) {
+        return false;
+    }
+    if !rust_dependency_crates(ctx).contains(root) {
+        return false;
+    }
+    // A path dependency the project holds, a workspace member or not, is the project's.
+    let graph = rust_crate_graph(ctx);
+    if let Some(own) = rust_crate_dir_of(&r.file_path, &graph) {
+        if graph.crates.get(&own).is_some_and(|c| c.keys.contains_key(root)) {
+            return false;
+        }
+    }
+    !graph.crates.values().any(|c| c.name == root)
+}
+
+/// A Rust call on a field chain or a struct literal, which the extractor records by its bare name
+/// — `vis.map.get("a")`, `self.0.len()`, `Xyz { x: 1.0 }.to_val()` — is a call on the type that
+/// receiver is written with (matchRustWrittenReceiverCall). Undefined where the receiver is
+/// anything else or its type can't be read.
+pub fn match_rust_written_receiver_call(r: &UnresolvedRef, ctx: &Ctx) -> Tri<ResolvedRef> {
+    let Some(scopes) = rust_scopes_of(&r.file_path, ctx) else { return Tri::Undefined };
+    let Some(&line_start) = scopes.line_starts.get((r.line as usize).wrapping_sub(1)) else { return Tri::Undefined };
+    let start = line_start + r.column as usize;
+    if start >= scopes.line_starts.get(r.line as usize).copied().unwrap_or(scopes.code.len()) {
+        return Tri::Undefined;
+    }
+    let Some(receiver) = rust_written_call_receiver(&scopes, start, &r.reference_name) else { return Tri::Undefined };
+    let Some(written) = rust_value_type(&receiver, start, &scopes, r, ctx, 0) else { return Tri::Undefined };
+    let read = rust_read_type(&written, r, ctx);
+    // A type no declaration the index holds names says nothing of what the call reaches, unless a
+    // wrapper around it has the method itself (`Arc::clone`).
+    if let RustTypeRead::Read(body) = &read {
+        if let RustReadKind::Named { name, path, .. } = &body.kind {
+            if !body.wrappers.iter().any(|w| rust_wrapper_has_own(w, &r.reference_name)) {
+                let lookup = rust_type_lookup(name, path, &body.written.file, ctx, Some(body.written.at));
+                if lookup.undeclared && rust_methods_named(&lookup.name, &r.reference_name, ctx).is_empty() {
+                    return Tri::Undefined;
+                }
+            }
+        }
+    }
+    let mut result = match rust_typed_method_call(&read, &r.reference_name, r, ctx, 0) {
+        CallRes::Unread => return Tri::Undefined,
+        CallRes::Null => None,
+        CallRes::Hit(hit) => Some(hit),
+    };
+    if result.is_none() {
+        if let RustTypeRead::Read(body) = &read {
+            if matches!(body.kind, RustReadKind::Named { .. }) {
+                result = rust_derived_trait_method(body, &r.reference_name, r, ctx);
+            }
+        }
+    }
+    match result {
+        Some(hit) => {
+            mark_typed(r, ctx);
+            Tri::Value(hit)
+        }
+        None => Tri::Null,
+    }
+}
+
+/// The method a Rust project trait that a type derives provides, for a call on a value of the
+/// type: `#[derive(TypedPath)]` reaches `TypedPath::with_query_params` through the impl the derive
+/// writes. None unless exactly one derived trait in scope declares the method with a body.
+fn rust_derived_trait_method(body: &RustReadBody, method: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    let RustReadKind::Named { name, path, .. } = &body.kind else { return None };
+    let lookup = rust_type_lookup(name, path, &body.written.file, ctx, Some(body.written.at));
+    let types: Vec<&NodeRef> = if lookup.outside { Vec::new() } else { lookup.nodes.iter().filter(|n| RUST_OWNER_KINDS.contains(&n.kind)).collect() };
+    if types.len() != 1 {
+        return None;
+    }
+    let mut found: Vec<NodeRef> = Vec::new();
+    for derived in rust_derived_names(types[0], ctx) {
+        let traits: Vec<NodeRef> =
+            ctx.get_nodes_by_name(&derived).iter().filter(|n| n.kind == NodeKind::Trait && n.language == Language::Rust && n.name == derived).cloned().collect();
+        for m in rust_trait_methods(&traits, method, ctx, 0) {
+            let Some(trait_) = rust_trait_of(&m, ctx) else { continue };
+            if rust_has_body(&m, ctx) && is_rust_trait_in_scope(&trait_.name, r, &m, ctx) {
+                found.push(m);
+            }
+        }
+    }
+    let owners: HashSet<Option<String>> = found.iter().map(|m| rust_trait_of(m, ctx).map(|t| t.id.clone())).collect();
+    (owners.len() == 1).then(|| ResolvedRef::new(r, found[0].id.clone(), 0.85, ResolvedBy::InstanceMethod))
+}
+
+/// The names a Rust type's `#[derive(…)]` attributes write, each by its path's last segment.
+fn rust_derived_names(decl: &Node, ctx: &Ctx) -> Vec<String> {
+    let Some(scopes) = rust_scopes_of(&decl.file_path, ctx) else { return Vec::new() };
+    let start = rust_node_offset(decl, ctx);
+    let keyword = Re::cached(&format!(r"\b(?:struct|enum|union)\s+{}\b", escape_regex(&decl.name)), "");
+    let Some(k) = keyword.find(code_slice(&scopes, start, start + 2000)) else { return Vec::new() };
+    let at = start + k.start();
+    // The attributes right before the keyword.
+    let before = code_slice(&scopes, at.saturating_sub(2000), at);
+    let attrs = re!(r"((?:#\s*\[(?:[^\[\]]|\[[^\[\]]*\])*\]\s*)+)(?:pub(?:\s*\([^()]*\))?\s+)?$").captures(before).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
+    let mut names = Vec::new();
+    for m in re!(r"\bderive\s*\(([^()]*)\)").captures_iter(&attrs) {
+        for part in m.text(1).unwrap_or("").split(',') {
+            let name = js_trim(part).rsplit("::").next().map(js_trim).unwrap_or("");
+            if re!(r"^[A-Za-z_]\w*$").is_match(name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn code_byte(code: &str, i: usize) -> Option<u8> {
+    code.as_bytes().get(i).copied()
+}
+
+/// Past the whitespace at `i` in a Rust file's blanked text.
+fn rust_space_end(code: &str, mut i: usize) -> usize {
+    let b = code.as_bytes();
+    while i < b.len() && (b[i] == b' ' || (9..=13).contains(&b[i])) {
+        i += 1;
+    }
+    i
+}
+
+fn ident_at(code: &str, at: usize, limit: usize, digits: bool) -> Option<&str> {
+    let text = code_slice_str(code, at, limit.min(at + 128));
+    let m = if digits { re!(r"^(?:[A-Za-z_]\w*|\d+)").find(text) } else { re!(r"^[A-Za-z_]\w*").find(text) };
+    m.map(|m| m.as_str())
+}
+
+fn code_slice_str(code: &str, from: usize, to: usize) -> &str {
+    let to = to.min(code.len());
+    if from >= to {
+        ""
+    } else {
+        &code[from..to]
+    }
+}
+
+/// Past the arguments of a call at `p` — `(…)`, after a turbofish `::<…>` — or None.
+fn rust_call_args_end(scopes: &RustScopes, p: usize) -> Option<usize> {
+    let code = &scopes.code;
+    let mut q = rust_space_end(code, p);
+    if code_slice_str(code, q, q + 2) == "::" {
+        q = rust_space_end(code, q + 2);
+        if code_byte(code, q) != Some(b'<') {
+            return None;
+        }
+        let end = rust_angle_end(code_slice_str(code, q, q + 512), 0)?;
+        q = rust_space_end(code, q + end + 1);
+    }
+    if code_byte(code, q) != Some(b'(') {
+        return None;
+    }
+    scopes.close.get(&q).map(|e| e + 1)
+}
+
+struct FieldChain {
+    end: usize,
+    hops: usize,
+    typed: bool,
+}
+
+/// A field chain or a struct literal at `from`, up to `limit` (rustFieldChainAt).
+fn rust_field_chain_at(scopes: &RustScopes, from: usize, limit: usize) -> Option<FieldChain> {
+    let code = &scopes.code;
+    let mut p = from;
+    let mut typed = false;
+    if code_byte(code, p) == Some(b'(') {
+        let end = *scopes.close.get(&p)?;
+        if end >= limit {
+            return None;
+        }
+        let mut q = rust_space_end(code, p + 1);
+        if code_byte(code, q) == Some(b'&') {
+            q = rust_space_end(code, q + 1);
+            if re!(r"^mut\b").is_match(code_slice_str(code, q, q + 4)) {
+                q = rust_space_end(code, q + 3);
+            }
+        }
+        let inner = rust_field_chain_at(scopes, q, end)?;
+        if rust_space_end(code, inner.end) != end || (inner.hops == 0 && !inner.typed) {
+            return None;
+        }
+        p = end + 1;
+        typed = true;
+    } else {
+        let path = re!(r"^(?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*").find(code_slice_str(code, p, limit.min(p + 512)))?.as_str();
+        let segments: Vec<&str> = path.split("::").map(|s| s.trim()).collect();
+        let last = segments[segments.len() - 1];
+        let mut q = rust_space_end(code, p + path.len());
+        // `Wrapper::<u8> { … }`: the literal's type arguments.
+        if code_slice_str(code, q, q + 2) == "::" {
+            let lt = rust_space_end(code, q + 2);
+            let end = if code_byte(code, lt) == Some(b'<') { rust_angle_end(code_slice_str(code, lt, lt + 512), 0) } else { None }?;
+            q = rust_space_end(code, lt + end + 1);
+        }
+        if last.starts_with(|c: char| c.is_ascii_uppercase()) && code_byte(code, q) == Some(b'{') {
+            let end = *scopes.close.get(&q)?;
+            if end >= limit {
+                return None;
+            }
+            p = end + 1;
+            typed = true;
+        } else if segments.len() == 1 && last.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
+            // A local, a parameter or `self`.
+            p += path.len();
+        } else {
+            return None;
+        }
+    }
+    let mut hops = 0;
+    loop {
+        let mut q = rust_space_end(code, p);
+        if q >= limit || code_byte(code, q) != Some(b'.') || code_byte(code, q + 1) == Some(b'.') {
+            break;
+        }
+        q = rust_space_end(code, q + 1);
+        let Some(id) = ident_at(code, q, limit, true) else { break };
+        // `.await` and a method call end the chain.
+        if id == "await" || rust_call_args_end(scopes, q + id.len()).is_some() {
+            break;
+        }
+        p = q + id.len();
+        hops += 1;
+    }
+    Some(FieldChain { end: p, hops, typed })
+}
+
+/// The receiver of the Rust call `name(…)` whose expression starts at `start`, when it is a field
+/// chain or a struct literal (rustWrittenCallReceiver). None for any other receiver, and when a
+/// later link of the chain calls `name` again.
+fn rust_written_call_receiver(scopes: &RustScopes, start: usize, name: &str) -> Option<String> {
+    let code = &scopes.code;
+    if start > 0 && code_byte(code, start - 1).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return None;
+    }
+    let chain = rust_field_chain_at(scopes, start, code.len())?;
+    // `x.name(…)` and `self.name(…)` are recorded with their receiver.
+    if chain.hops == 0 && !chain.typed {
+        return None;
+    }
+    let dot = rust_space_end(code, chain.end);
+    if code_byte(code, dot) != Some(b'.') || code_byte(code, dot + 1) == Some(b'.') {
+        return None;
+    }
+    let at = rust_space_end(code, dot + 1);
+    if !code_slice_str(code, at, code.len()).starts_with(name) || code_byte(code, at + name.len()).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return None;
+    }
+    let mut p = rust_call_args_end(scopes, at + name.len())?;
+    // The links after the call: `?`, `[…]`, `.field`, `.method(…)`.
+    loop {
+        p = rust_space_end(code, p);
+        match code_byte(code, p) {
+            Some(b'?') => {
+                p += 1;
+                continue;
+            }
+            Some(b'[') => {
+                p = scopes.close.get(&p)? + 1;
+                continue;
+            }
+            Some(b'.') if code_byte(code, p + 1) != Some(b'.') => {}
+            _ => break,
+        }
+        p = rust_space_end(code, p + 1);
+        let Some(id) = ident_at(code, p, code.len(), true) else { break };
+        let id = id.to_string();
+        p += id.len();
+        let Some(args) = rust_call_args_end(scopes, p) else { continue };
+        if id == name {
+            return None;
+        }
+        p = args;
+    }
+    Some(js_trim(code_slice_str(code, start, dot)).to_string())
+}
