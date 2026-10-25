@@ -35,6 +35,8 @@ const MEMBER_TYPE_NON_TYPES: &[&str] = &[
     "return", "new", "case", "throw", "else", "in", "out", "ref", "params", "await", "yield", "is", "as", "using", "var", "val", "goto", "nameof",
     "typeof", "sizeof", "default", "when", "where", "get", "set", "init", "class", "interface", "enum", "struct", "record", "object", "namespace",
     "package", "import", "extends", "implements", "fun", "static", "final", "abstract", "sealed", "override", "virtual", "delegate", "event",
+    // Java's `sealed interface Shape permits Circle, Square` and `void run() throws Failure {`.
+    "permits", "throws",
 ];
 
 /// The type of a field `receiver` (`this.repo`, `repo`) of the class around the reference, read from the class head or body.

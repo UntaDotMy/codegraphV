@@ -13,6 +13,10 @@ use serde_json::{Map, Value};
 /// JSON object stored in an edge's `metadata` column.
 pub type Metadata = Map<String, Value>;
 
+/// The docstring a Java record's implicit component accessor carries. The resolver reaches one
+/// only through what types its receiver, never by a name-only guess.
+pub const IMPLICIT_RECORD_ACCESSOR_DOC: &str = "Implicit record component accessor";
+
 /// A node in the knowledge graph representing a code symbol.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

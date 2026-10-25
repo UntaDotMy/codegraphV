@@ -745,7 +745,7 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 if through_cpp_namespace() {
                     return None;
                 }
-                return Some(ResolvedRef::new(r, method.id.clone(), 0.8, ResolvedBy::InstanceMethod));
+                return Some(ResolvedRef::new(r, method.id.clone(), 0.8, ResolvedBy::InstanceMethod).guessed_by_name());
             }
         }
     }
@@ -835,7 +835,7 @@ fn match_by_method_name(
         if through_cpp_namespace() && !is_cpp_constructor_through(object_or_class, &target[0], ctx) {
             return None;
         }
-        return Some(ResolvedRef::new(r, target[0].id.clone(), 0.7, ResolvedBy::InstanceMethod));
+        return Some(ResolvedRef::new(r, target[0].id.clone(), 0.7, ResolvedBy::InstanceMethod).guessed_by_name());
     }
     if target.len() > 1 || (target.len() == 1 && (scoped_out || python_chain) && !narrowed) {
         let link = if python_chain { object_or_class.rsplit('.').next().unwrap_or("") } else { receiver_link(object_or_class) };
@@ -906,7 +906,7 @@ fn match_by_method_name(
                 if through_cpp_namespace() && !is_cpp_constructor_through(object_or_class, &best, ctx) {
                     return None;
                 }
-                return Some(ResolvedRef::new(r, best.id.clone(), 0.65, ResolvedBy::InstanceMethod));
+                return Some(ResolvedRef::new(r, best.id.clone(), 0.65, ResolvedBy::InstanceMethod).guessed_by_name());
             }
         }
     }

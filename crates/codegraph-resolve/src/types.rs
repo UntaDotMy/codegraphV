@@ -107,6 +107,8 @@ pub struct ResolvedRef {
     pub metadata: Option<Metadata>,
     /// The OTHER targets, when one reference names several.
     pub also_targets: Option<Vec<AlsoTarget>>,
+    /// Picked by a name-only strategy (the receiver's word, not its type). Not persisted.
+    pub by_name: bool,
 }
 
 impl ResolvedRef {
@@ -119,7 +121,14 @@ impl ResolvedRef {
             edge_kind: None,
             metadata: None,
             also_targets: None,
+            by_name: false,
         }
+    }
+
+    /// The same result, marked as picked by a name-only strategy.
+    pub fn guessed_by_name(mut self) -> Self {
+        self.by_name = true;
+        self
     }
 }
 

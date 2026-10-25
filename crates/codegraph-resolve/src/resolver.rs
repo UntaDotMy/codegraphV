@@ -25,6 +25,7 @@ use crate::import_resolver::{
 use crate::js_builtins::JS_BUILT_INS;
 use crate::name_matcher::*;
 use crate::name_matcher::new_receiver::{is_new_receiver_shape, match_new_receiver_call, new_receiver_class};
+use crate::name_matcher::java::is_guessed_record_accessor;
 use crate::shopify_themes::match_shopify_theme_file;
 use crate::swift_type_visibility::gate_swift_type_target;
 use crate::type_parameters::gate_type_parameter;
@@ -640,6 +641,11 @@ impl ReferenceResolver {
                     return None;
                 }
             }
+        }
+        if (resolved.by_name || matches!(resolved.resolved_by, ResolvedBy::ExactMatch | ResolvedBy::Fuzzy))
+            && is_guessed_record_accessor(&resolved, r, ctx)
+        {
+            return None;
         }
         if resolved.resolved_by == ResolvedBy::Import && is_import_shadowed_by_js_binding(&resolved, r, ctx) {
             return None;

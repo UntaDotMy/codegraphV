@@ -1484,7 +1484,7 @@ impl<'t> Walker<'t> {
                         visibility: Some(1),
                         is_static: Some(false),
                         signature: Some(format!("{type_text} {name}()")),
-                        docstring: Some("Implicit record component accessor".to_string()),
+                        docstring: Some(codegraph_types::IMPLICIT_RECORD_ACCESSOR_DOC.to_string()),
                         return_type,
                         ..Extra::default()
                     },

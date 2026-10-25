@@ -12,6 +12,22 @@ use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 
+/// Whether a resolution lands on a Java record's implicit accessor from outside the record. One is
+/// reached through what types its receiver (a typed receiver, `Record::x`, `Record.x`) or from
+/// inside the record; a name-only guess bound `result.content()` on a library type to any record
+/// with a `content` component. Applied by the resolver to name-only results.
+pub fn is_guessed_record_accessor(resolved: &crate::types::ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    let Some(target) = ctx.node_by_id(&resolved.target_node_id) else { return false };
+    if target.kind != NodeKind::Method || target.docstring.as_deref() != Some(codegraph_types::IMPLICIT_RECORD_ACCESSOR_DOC) {
+        return false;
+    }
+    let record = target.qualified_name.rfind("::").map_or("", |i| &target.qualified_name[..i]);
+    r.file_path != target.file_path
+        || !ctx.get_nodes_in_file(&target.file_path).iter().any(|n| {
+            n.kind == NodeKind::Class && n.qualified_name == record && n.start_line <= r.line && n.end_line.max(n.start_line) >= r.line
+        })
+}
+
 fn is_visible_type_kind(kind: NodeKind) -> bool {
     matches!(kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum)
 }
