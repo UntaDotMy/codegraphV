@@ -811,6 +811,18 @@ impl ReferenceResolver {
         if framework_early.is_some() {
             return framework_early;
         }
+        // A reference a framework answers alone ends with the frameworks' answer
+        // (FrameworkResolver::owns_reference): Nuxt's `navigateTo(x)` with a destination no route
+        // serves is no namesake's call.
+        if self.frameworks_for(r.language).iter().any(|f| f.owns_reference(r, ctx)) {
+            let mut best: Option<ResolvedRef> = None;
+            for c in candidates {
+                if best.as_ref().is_none_or(|b| c.confidence > b.confidence) {
+                    best = Some(c);
+                }
+            }
+            return best;
+        }
 
         if is_unresolved_js_member_call(r) {
             let root = &r.reference_name[..r.reference_name.find('.').unwrap_or(r.reference_name.len())];

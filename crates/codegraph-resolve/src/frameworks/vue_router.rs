@@ -628,7 +628,9 @@ impl FrameworkResolver for VueRouterResolver {
         let href = href?;
         // Every arm of a conditional destination is somewhere this call goes; the first is this
         // reference's resolution and the rest ride as `alsoTargets`.
-        let targets = destinations_for_href(&href, &routes.table);
+        // An arm that is no path of the app — an absolute URL, which Nuxt's
+        // `navigateTo(url, { external: true })` leaves the app for — opens none of its routes.
+        let targets: Vec<_> = destinations_for_href(&href, &routes.table).into_iter().filter(|t| t.href.path.starts_with('/')).collect();
         let target = targets.first()?;
         let mut resolved = ResolvedRef::new(r, target.node.id.clone(), 0.95, ResolvedBy::Framework);
         if targets.len() > 1 {

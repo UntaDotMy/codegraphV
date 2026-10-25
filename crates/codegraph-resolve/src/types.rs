@@ -194,6 +194,11 @@ pub trait FrameworkResolver {
     fn claims_reference(&self, _name: &str) -> bool {
         false
     }
+    /// A reference this framework answers alone: when no framework's `resolve()` links it, it
+    /// stays unresolved, and no import or name strategy guesses past it (Nuxt's `navigateTo`).
+    fn owns_reference(&self, _r: &UnresolvedRef, _ctx: &Ctx) -> bool {
+        false
+    }
     /// Extract framework-specific nodes and references from a file; `None` when
     /// the framework has no extraction hook.
     fn extract(&self, _file_path: &str, _content: &str) -> Option<FrameworkExtractionResult> {

@@ -20,12 +20,13 @@ const VUE_SCRIPT_LANGUAGES: [Language; 5] = [Language::Vue, Language::JavaScript
 const VUE_COMPILER_MACROS: [&str; 7] =
     ["defineProps", "defineEmits", "defineExpose", "defineOptions", "defineSlots", "defineModel", "withDefaults"];
 
-/// Nuxt auto-imported composables and utilities.
-const NUXT_AUTO_IMPORTS: [&str; 30] = [
+/// Nuxt auto-imported composables and utilities. `navigateTo` is not one of them here:
+/// `navigateTo('/x')` is a navigation, which Vue Router's resolver links to the page it opens, and
+/// Nuxt owns the call when it can't (`NuxtResolver::owns_reference`, #2634).
+const NUXT_AUTO_IMPORTS: [&str; 29] = [
     // Routing
     "useRoute",
     "useRouter",
-    "navigateTo",
     "abortNavigation",
     // Data fetching
     "useFetch",
@@ -168,6 +169,17 @@ impl FrameworkResolver for NuxtResolver {
     fn resolve(&self, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         // A page route names the component its file is.
         resolve_page_component(r, ctx)
+    }
+
+    /// Nuxt's auto-imported `navigateTo` (#2634). Vue Router's resolver links a call to the page
+    /// it opens; one it can't link still calls Nuxt's, never a project function that shares the
+    /// name. A file that declares or imports a `navigateTo` calls that one.
+    fn owns_reference(&self, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+        r.is_kind(EdgeKind::Calls)
+            && r.reference_name == "navigateTo"
+            && VUE_SCRIPT_LANGUAGES.contains(&r.language)
+            && !declares_own_function(r, ctx)
+            && !ctx.get_import_mappings(&r.file_path, r.language).iter().any(|m| m.local_name == r.reference_name)
     }
 
     fn extract(&self, file_path: &str, _content: &str) -> Option<FrameworkExtractionResult> {
