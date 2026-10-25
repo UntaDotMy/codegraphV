@@ -169,29 +169,43 @@ pub struct ValidateOptions {
 /// enumerated fails to index.
 ///
 /// Returns the resolved absolute path (realpath when it exists), or `None` if it escapes the root.
+/// A path that does not exist yet is judged by its nearest existing ancestor, and every path under
+/// a root that does not exist is `None`.
 pub fn validate_path_within_root(project_root: &str, file_path: &str, options: ValidateOptions) -> Option<String> {
     // 1. Lexical containment — cheap, catches `../` traversal.
     let resolved = lexical_path_within_root(project_root, file_path)?;
     let normalized_root = nodepath::resolve(&[project_root]);
 
-    // 2. Symlink-aware containment — resolve symlinks on both sides and re-check.
-    let real_root = real_path(Path::new(&normalized_root));
-    let real_resolved = real_path(Path::new(&resolved));
-    match (real_root, real_resolved) {
-        (Ok(root), Ok(resolved_real)) => {
+    // 2. Symlink-aware containment — resolve symlinks on both sides and re-check. Every path
+    //    under a root that does not exist is refused.
+    let real_root = real_path(Path::new(&normalized_root)).ok()?.to_string_lossy().into_owned();
+    match real_path(Path::new(&resolved)) {
+        Ok(resolved_real) => {
             let resolved_real = resolved_real.to_string_lossy().into_owned();
             if options.allow_symlink_escape {
                 return Some(resolved_real);
             }
-            is_within_dir(&resolved_real, &root.to_string_lossy()).then_some(resolved_real)
+            return is_within_dir(&resolved_real, &real_root).then_some(resolved_real);
         }
-        // ENOENT: the path doesn't exist yet (a file about to be written, or an index entry for a
-        // since-deleted file) — no symlink to follow, and the lexical check already passed, so
-        // allow the lexical path. Any other resolution failure (ELOOP, EACCES, …) is treated as
-        // unsafe → reject.
-        (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Some(resolved),
-        _ => None,
+        // Any resolution failure other than ENOENT (ELOOP, EACCES, …) is treated as unsafe.
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return None,
+        Err(_) => {}
     }
+    // A missing leaf (a file about to be written, an index entry for a since-deleted file) may
+    // still sit below an EXISTING link: judge it by its nearest existing ancestor, or
+    // `.codegraph/ui -> /outside` plus a missing `trails/` passes and mkdir follows the link out.
+    let mut ancestor = Path::new(&resolved).parent()?.to_path_buf();
+    while is_within_dir(&ancestor.to_string_lossy(), &normalized_root) {
+        match real_path(&ancestor) {
+            Ok(real) => {
+                let inside = options.allow_symlink_escape || is_within_dir(&real.to_string_lossy(), &real_root);
+                return inside.then_some(resolved);
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return None,
+            Err(_) => ancestor = ancestor.parent()?.to_path_buf(),
+        }
+    }
+    None
 }
 
 /// The user's home directory (`os.homedir()`).

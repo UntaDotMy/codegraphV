@@ -229,6 +229,67 @@ mod tests {
         assert!(validate_path_within_root(&root, "missing.txt", ValidateOptions::default()).is_some());
     }
 
+    /// A directory link `link` → `target`: a junction on Windows (no privilege needed), a
+    /// symlink elsewhere.
+    fn link_dir(target: &std::path::Path, link: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            let ok = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "mklink /J failed");
+        }
+        #[cfg(not(windows))]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    fn remove_link(link: &std::path::Path) {
+        let _ = std::fs::remove_dir(link).or_else(|_| std::fs::remove_file(link));
+    }
+
+    #[test]
+    fn missing_leaf_below_an_outward_link_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join(".codegraph")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = root.join(".codegraph").join("ui");
+        link_dir(&outside, &link);
+        let r = root.to_string_lossy().into_owned();
+        let refused = validate_path_within_root(&r, ".codegraph/ui/trails", ValidateOptions::default());
+        // The escape hatch for indexing still allows it.
+        let escaped = validate_path_within_root(&r, ".codegraph/ui/trails", ValidateOptions { allow_symlink_escape: true });
+        remove_link(&link);
+        assert!(refused.is_none());
+        assert!(escaped.is_some());
+    }
+
+    #[test]
+    fn missing_leaf_below_an_in_root_link_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        let link = root.join("alias");
+        link_dir(&root.join("real"), &link);
+        let r = root.to_string_lossy().into_owned();
+        let allowed = validate_path_within_root(&r, "alias/missing/leaf.json", ValidateOptions::default());
+        remove_link(&link);
+        assert!(allowed.is_some());
+    }
+
+    #[test]
+    fn every_path_under_a_missing_root_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("gone").to_string_lossy().into_owned();
+        assert!(validate_path_within_root(&root, "a.txt", ValidateOptions::default()).is_none());
+    }
+
     #[test]
     fn lock_roundtrip() {
         let dir = tempfile::tempdir().unwrap();

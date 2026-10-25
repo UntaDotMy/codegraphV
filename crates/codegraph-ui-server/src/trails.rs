@@ -142,7 +142,15 @@ pub fn list(cg: &CodeGraph, read_only: bool) -> Result<Value> {
                 bounded = true;
                 break;
             }
-            if path.is_symlink() {
+            // The same per-file check as a single read: checking only the directory lets
+            // `trails/x.json -> /outside/secret.json` escape it.
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let inside = codegraph_core::utils::validate_path_within_root(
+                cg.project_root(),
+                &format!("{DIRECTORY}/{name}"),
+                Default::default(),
+            );
+            if path.is_symlink() || inside.is_none() {
                 skipped += 1;
                 continue;
             }
@@ -156,7 +164,9 @@ pub fn list(cg: &CodeGraph, read_only: bool) -> Result<Value> {
             } else {
                 None
             };
-            match parsed.filter(|v| v["version"] == 1 && v["id"].as_str().is_some_and(valid_id)) {
+            // An unversioned hand-written trail predates the format marker and reads as v1; a
+            // declared unknown version is not guessed at.
+            match parsed.filter(|v| (v["version"].is_null() || v["version"] == 1) && v["id"].as_str().is_some_and(valid_id)) {
                 Some(v) => match resolve(cg, v) {
                     Ok(v) => trails.push(v),
                     Err(_) => skipped += 1,
@@ -207,6 +217,9 @@ pub fn save(cg: &CodeGraph, body: &Value, read_only: bool) -> Result<Value> {
     }
     let dir = directory(cg)?;
     std::fs::create_dir_all(&dir).map_err(io)?;
+    // The directory need not have existed at the first check: resolve it again now that it does,
+    // so a parent link cannot turn a new trail directory into an out-of-project write.
+    let dir = directory(cg)?;
     let mut slug = String::new();
     for c in name.to_ascii_lowercase().chars() {
         if c.is_ascii_alphanumeric() {
