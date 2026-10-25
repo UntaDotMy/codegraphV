@@ -62,6 +62,7 @@ mod tsjs;
 mod wasm_grammars;
 mod erlang;
 mod terraform;
+mod cobol;
 
 pub use decode::decode_tables;
 pub use langs::{grammar_for, LANGUAGES as NATIVE_LANGUAGES};
@@ -103,6 +104,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result
         "solidity" => solidity::extract(file_path, source),
         "erlang" => erlang::extract(file_path, source),
         "terraform" => terraform::extract(file_path, source),
+        "cobol" => cobol::extract(file_path, source),
         "typescript" | "tsx" | "javascript" | "jsx" => tsjs::extract(file_path, source, lang),
         other => Err(format!("no native walker for language {other}")),
     })?;

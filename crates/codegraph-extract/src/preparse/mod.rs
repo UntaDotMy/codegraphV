@@ -8,6 +8,7 @@
 //! UTF-16 units.
 
 mod cmask;
+mod cobol;
 
 /// `maskCppRawStrings(source).source`: the text with C++ raw-string literal bodies blanked (offsets kept).
 pub fn mask_cpp_raw_strings_source(source: &str) -> String {
@@ -52,6 +53,8 @@ pub fn pre_parse(file_path: &str, source: &str, language: Language) -> String {
         }
         "c" => with_shadow(source, conly::pre_parse_c),
         "cpp" => with_shadow(source, |s| cpp::pre_parse_cpp(s, Some(file_path))),
+        // Not offset-preserving: a free-format file is shifted right (see cobol.rs).
+        "cobol" => cobol::pre_parse_cobol(source),
         _ => source.to_string(),
     }
 }
