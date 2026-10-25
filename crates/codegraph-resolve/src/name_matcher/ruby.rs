@@ -91,4 +91,76 @@ impl RefShape for RubyShape {
     fn excludes(&self, n: &NodeRef, r: &UnresolvedRef, ctx: &Ctx) -> bool {
         n.kind == NodeKind::Method && !is_ruby_method_in_scope(n, r, ctx)
     }
+
+    fn rank_exact(&self, pool: &[NodeRef], r: &UnresolvedRef, ctx: &Ctx) -> Option<Vec<NodeRef>> {
+        Some(ruby_methods_of_caller_kind(pool, r, ctx))
+    }
+}
+
+/// Which of a Ruby class's two methods of one name a call reaches: a call on the class
+/// (`Widget.build`) its class method, `def self.build` or one in `class << self`; a call on an
+/// instance (`widget.build`) its instance method, `def build`. Both share one qualified name,
+/// `Widget::build`, and only `is_static` tells them apart (#2834).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RubyMethodKind {
+    Class,
+    Instance,
+}
+
+impl RubyMethodKind {
+    pub fn key(kind: Option<RubyMethodKind>) -> &'static str {
+        match kind {
+            None => "",
+            Some(RubyMethodKind::Class) => "class",
+            Some(RubyMethodKind::Instance) => "instance",
+        }
+    }
+}
+
+/// `methods` with the ones of `kind` first, in their own order: a pick of the first then takes one
+/// of the kind wherever there is one, and still the first otherwise. Methods of other languages
+/// are never static-split.
+pub fn ruby_methods_of_kind_first(methods: Vec<NodeRef>, kind: Option<RubyMethodKind>) -> Vec<NodeRef> {
+    let Some(kind) = kind else { return methods };
+    if methods.len() < 2 {
+        return methods;
+    }
+    let fits = |m: &NodeRef| m.language == Language::Ruby && (m.is_static == Some(true)) == (kind == RubyMethodKind::Class);
+    let first: Vec<NodeRef> = methods.iter().filter(|m| fits(m)).cloned().collect();
+    if first.is_empty() || first.len() == methods.len() {
+        return methods;
+    }
+    let mut out = first;
+    out.extend(methods.into_iter().filter(|m| !fits(m)));
+    out
+}
+
+/// Of a Ruby class's two methods of one name, `def build` and `def self.build` (both
+/// `Widget::build`), the one a bare call means: a bare call is a call on `self`, so in an instance
+/// method the instance method, and in a class method the class method. Only such pairs are split,
+/// and only when the call is written in a method.
+fn ruby_methods_of_caller_kind(candidates: &[NodeRef], r: &UnresolvedRef, ctx: &Ctx) -> Vec<NodeRef> {
+    if candidates.len() < 2 {
+        return candidates.to_vec();
+    }
+    let Some(caller) = ctx.node_by_id(&r.from_node_id) else { return candidates.to_vec() };
+    if caller.kind != NodeKind::Method || caller.language != Language::Ruby {
+        return candidates.to_vec();
+    }
+    let want_class = caller.is_static == Some(true);
+    let is_ruby_method = |n: &Node| n.kind == NodeKind::Method && n.language == Language::Ruby;
+    // Per qualified name, which kinds the candidates declare: 1 class, 2 instance.
+    let mut kinds: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
+    for n in candidates {
+        if is_ruby_method(n) {
+            *kinds.entry(n.qualified_name.as_str()).or_insert(0) |= if n.is_static == Some(true) { 1 } else { 2 };
+        }
+    }
+    let twin_of_other_kind =
+        |n: &Node| is_ruby_method(n) && kinds.get(n.qualified_name.as_str()) == Some(&3) && (n.is_static == Some(true)) != want_class;
+    if candidates.iter().any(|n| twin_of_other_kind(n)) {
+        candidates.iter().filter(|n| !twin_of_other_kind(n)).cloned().collect()
+    } else {
+        candidates.to_vec()
+    }
 }

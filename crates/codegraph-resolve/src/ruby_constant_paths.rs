@@ -8,7 +8,7 @@
 //! names a class a test declares. A bare constant is left to the name strategies.
 
 use crate::ctx::Ctx;
-use crate::name_matcher::ruby::ruby_ancestry;
+use crate::name_matcher::ruby::{ruby_ancestry, ruby_methods_of_kind_first, RubyMethodKind};
 use crate::types::{NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
 use codegraph_jsre::re;
 use codegraph_search::query_utils::is_test_path;
@@ -95,7 +95,8 @@ fn lexical_scope(r: &UnresolvedRef, ctx: &Ctx) -> String {
 }
 
 /// The method `name` of the class or module `owner`: its own, else the first of its ancestry
-/// that declares one. Production code never reaches one a test declares.
+/// that declares one. Of a class's `def self.m` and `def m`, which share one qualified name, the
+/// call on the class reaches the class method. Production code never reaches one a test declares.
 fn method_of(owner: &str, name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<(NodeRef, bool)> {
     let production = !is_test_path(&r.file_path);
     for qn in ruby_ancestry(owner, ctx).iter() {
@@ -106,7 +107,7 @@ fn method_of(owner: &str, name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<(N
             .cloned()
             .collect();
         if !methods.is_empty() {
-            return ordered(methods, r).into_iter().next().map(|m| (m, qn == owner));
+            return ruby_methods_of_kind_first(ordered(methods, r), Some(RubyMethodKind::Class)).into_iter().next().map(|m| (m, qn == owner));
         }
     }
     None

@@ -24,6 +24,7 @@ use super::rust::{
     match_rust_typed_self_field_call,
 };
 use super::ts_fields::{match_ts_this_field_call, ts_indexed_property_type, ts_known_type_call, ts_outside_type_declaration};
+use super::ruby::{ruby_methods_of_kind_first, RubyMethodKind};
 use super::util::*;
 use super::{ambiguous_name_ceiling, same_language_family};
 use crate::ctx::Ctx;
@@ -235,8 +236,18 @@ pub fn resolve_method_on_type(
         return None;
     }
     let visible = cpp_visible_first(matches, r, ctx);
-    let ordered = prefer_call_site_file(within_cpp_translation_unit(visible, r, ctx, false), &r.file_path);
+    // A Ruby receiver is typed only by `x = Widget.new`, so it is an instance: `x.build` reaches
+    // `def build`, not `def self.build`, wherever each is.
+    let ordered = ruby_methods_of_kind_first(
+        prefer_call_site_file(within_cpp_translation_unit(visible, r, ctx, false), &r.file_path),
+        ruby_kind(r, RubyMethodKind::Instance),
+    );
     Some(ResolvedRef::new(r, ordered[0].id.clone(), confidence, resolved_by))
+}
+
+/// `kind` for a Ruby reference, none for any other.
+fn ruby_kind(r: &UnresolvedRef, kind: RubyMethodKind) -> Option<RubyMethodKind> {
+    (r.language == Language::Ruby).then_some(kind)
 }
 
 // -- The receiver and its method ------------------------------------------------------------
@@ -644,12 +655,14 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 let own = method.qualified_name == format!("{}::{}", class_node.qualified_name, method_name);
                 return Some(ResolvedRef::new(r, method.id.clone(), if own { 0.85 } else { 0.8 }, ResolvedBy::QualifiedName));
             }
-            if let Some(method) = class_strategy_method(class_node, &method_name, ctx) {
+            // A Ruby call on a class is a call of its class method: `Widget.build` reaches
+            // `def self.build`, not `def build`, whichever comes first.
+            if let Some(method) = class_strategy_method(class_node, &method_name, ctx, ruby_kind(r, RubyMethodKind::Class)) {
                 return Some(ResolvedRef::new(r, method.id.clone(), 0.85, ResolvedBy::QualifiedName));
             }
         }
         let same_language: Vec<NodeRef> = class_candidates.iter().filter(|c| c.language == r.language).cloned().collect();
-        if let Some(inherited) = inherited_class_method(&same_language, &method_name, ctx) {
+        if let Some(inherited) = inherited_class_method(&same_language, &method_name, ctx, ruby_kind(r, RubyMethodKind::Class)) {
             return Some(ResolvedRef::new(r, inherited.id.clone(), 0.8, ResolvedBy::QualifiedName));
         }
     }
@@ -710,7 +723,9 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             if production_caller && is_test_path(&class_node.file_path) {
                 continue;
             }
-            if let Some(method) = class_strategy_method(class_node, &method_name, ctx) {
+            // A Ruby receiver named after a class may hold the class as well as an instance of it,
+            // so neither of a class's two methods of the name is preferred: the first declared is taken.
+            if let Some(method) = class_strategy_method(class_node, &method_name, ctx, None) {
                 if through_cpp_namespace() {
                     return None;
                 }

@@ -7,6 +7,7 @@ use super::objc::objc_supertypes_of;
 use super::dart::dart_supertypes_of;
 use super::scala::scala_supertypes_of;
 use super::swift::swift_decl_supers;
+use super::ruby::{ruby_methods_of_kind_first, RubyMethodKind};
 use super::util::*;
 use crate::ctx::Ctx;
 use crate::types::{NodeRef, Tri, UnresolvedRef};
@@ -298,15 +299,16 @@ pub fn class_head_supertypes(cls: &Node, ctx: &Ctx) -> Vec<String> {
 }
 
 /// The method `name` on the nearest ancestor (within five levels) of any of `classes`.
-pub fn inherited_class_method(classes: &[NodeRef], name: &str, ctx: &Ctx) -> Option<NodeRef> {
+/// `kind` picks between a Ruby class's `def self.m` and `def m` (`ruby_methods_of_kind_first`).
+pub fn inherited_class_method(classes: &[NodeRef], name: &str, ctx: &Ctx, kind: Option<RubyMethodKind>) -> Option<NodeRef> {
     if classes.is_empty() {
         return None;
     }
-    let key = format!("{}|{}", classes.iter().map(|c| c.id.as_str()).collect::<Vec<_>>().join(","), name);
-    memoized::<InheritedMethodMemo>(ctx, key, || find_inherited_class_method(classes, name, ctx))
+    let key = format!("{}|{}|{}", classes.iter().map(|c| c.id.as_str()).collect::<Vec<_>>().join(","), name, RubyMethodKind::key(kind));
+    memoized::<InheritedMethodMemo>(ctx, key, || find_inherited_class_method(classes, name, ctx, kind))
 }
 
-fn find_inherited_class_method(classes: &[NodeRef], name: &str, ctx: &Ctx) -> Option<NodeRef> {
+fn find_inherited_class_method(classes: &[NodeRef], name: &str, ctx: &Ctx, kind: Option<RubyMethodKind>) -> Option<NodeRef> {
     let mut seen: std::collections::HashSet<String> = classes.iter().map(|c| c.id.clone()).collect();
     let mut frontier: Vec<NodeRef> = classes.to_vec();
     let mut depth = 0;
@@ -320,15 +322,19 @@ fn find_inherited_class_method(classes: &[NodeRef], name: &str, ctx: &Ctx) -> Op
                     }
                     seen.insert(decl.id.clone());
                     let in_decl_file = ctx.get_nodes_in_file(&decl.file_path);
-                    let method = in_decl_file.iter().find(|n| {
-                        n.kind == NodeKind::Method && n.name == name && {
-                            let qn = n.qualified_name.as_str();
-                            let owner = &qn[..qn.rfind("::").unwrap_or(0)];
-                            re!(r"::|\.").split(owner).into_iter().last() == Some(decl.name.as_str())
-                        }
-                    });
-                    if let Some(m) = method {
-                        return Some(m.clone());
+                    let methods: Vec<NodeRef> = in_decl_file
+                        .iter()
+                        .filter(|n| {
+                            n.kind == NodeKind::Method && n.name == name && {
+                                let qn = n.qualified_name.as_str();
+                                let owner = &qn[..qn.rfind("::").unwrap_or(0)];
+                                re!(r"::|\.").split(owner).into_iter().last() == Some(decl.name.as_str())
+                            }
+                        })
+                        .cloned()
+                        .collect();
+                    if let Some(m) = ruby_methods_of_kind_first(methods, kind).into_iter().next() {
+                        return Some(m);
                     }
                     next.push(decl.clone());
                 }
@@ -448,8 +454,11 @@ pub fn type_parameter_bound_in(type_name: &str, decls: &[NodeRef], ctx: &Ctx) ->
 }
 
 /// The method `method_name` declared on `class_node` itself (by qualified name, then by owner name).
-pub fn find_own_method(nodes_in_file: &[NodeRef], class_node: &Node, method_name: &str) -> Option<NodeRef> {
-    let methods: Vec<&NodeRef> = nodes_in_file.iter().filter(|n| n.kind == NodeKind::Method && n.name == method_name).collect();
+/// `kind` picks between a Ruby class's `def self.m` and `def m`, which share one qualified name.
+pub fn find_own_method(nodes_in_file: &[NodeRef], class_node: &Node, method_name: &str, kind: Option<RubyMethodKind>) -> Option<NodeRef> {
+    let methods =
+        ruby_methods_of_kind_first(nodes_in_file.iter().filter(|n| n.kind == NodeKind::Method && n.name == method_name).cloned().collect(), kind);
+    let methods: Vec<&NodeRef> = methods.iter().collect();
     let exact = format!("{}::{}", class_node.qualified_name, method_name);
     let by_name = format!("{}::{}", class_node.name, method_name);
     methods
@@ -460,7 +469,7 @@ pub fn find_own_method(nodes_in_file: &[NodeRef], class_node: &Node, method_name
 }
 
 /// A class's method by name, own first, then inherited.
-pub fn class_strategy_method(class_node: &NodeRef, method_name: &str, ctx: &Ctx) -> Option<NodeRef> {
-    find_own_method(&ctx.get_nodes_in_file(&class_node.file_path), class_node, method_name)
-        .or_else(|| inherited_class_method(std::slice::from_ref(class_node), method_name, ctx))
+pub fn class_strategy_method(class_node: &NodeRef, method_name: &str, ctx: &Ctx, kind: Option<RubyMethodKind>) -> Option<NodeRef> {
+    find_own_method(&ctx.get_nodes_in_file(&class_node.file_path), class_node, method_name, kind)
+        .or_else(|| inherited_class_method(std::slice::from_ref(class_node), method_name, ctx, kind))
 }
