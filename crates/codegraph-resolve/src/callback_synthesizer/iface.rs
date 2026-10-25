@@ -17,6 +17,8 @@ use std::rc::Rc;
 
 /// Languages whose static `implements`/`extends` edges bridge an interface (or abstract base)
 /// method to the matching concrete-class method.
+/// A `.tsx` or `.jsx` class is a TypeScript or JavaScript class, and its base or interface is often
+/// in a `.ts` file, or the other way round (#2828).
 fn iface_override_lang(l: Language) -> bool {
     matches!(
         l,
@@ -24,7 +26,9 @@ fn iface_override_lang(l: Language) -> bool {
             | Language::Kotlin
             | Language::CSharp
             | Language::TypeScript
+            | Language::Tsx
             | Language::JavaScript
+            | Language::Jsx
             | Language::Swift
             | Language::Scala
             | Language::Go
