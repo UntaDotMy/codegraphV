@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+mod upgrade;
 mod wire;
 use codegraph_core::{directory, CodeGraph, IndexOptions, OpenOptions};
 use codegraph_mcp::{render, tools::ToolHandler};
@@ -252,6 +253,17 @@ enum Command {
         #[arg(long)]
         keep_cli: bool,
     },
+    /// Update codegraph to the latest release, or to the version given.
+    Upgrade {
+        /// Release to install, for example v0.0.2 (default: the latest)
+        version: Option<String>,
+        /// Show current and latest versions without changing anything
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even when already on that version
+        #[arg(long)]
+        force: bool,
+    },
     /// Print the installed version.
     Version,
 }
@@ -309,6 +321,12 @@ fn run() -> Result<()> {
     };
     match command {
         Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
+        Command::Upgrade { version, check, force } => {
+            let code = upgrade::run(version, check, force);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Command::Init {
             path,
             force,

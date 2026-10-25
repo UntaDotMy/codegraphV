@@ -13,6 +13,7 @@ codegraph-search.workspace = true
 codegraph-types.workspace = true
 codegraph-jsre.workspace = true
 codegraph-context = { path = "../codegraph-context" }
+codegraph-installer = { path = "../codegraph-installer" }
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true

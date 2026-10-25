@@ -157,6 +157,7 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
     }
     let mut lock = FileLock::new(Path::new(&root).join(".codegraph/native-daemon.lock"));
     lock.acquire()?;
+    codegraph_installer::upgrade::check_for_update_in_background(env!("CARGO_PKG_VERSION"));
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let mut random = [0u8; 32];

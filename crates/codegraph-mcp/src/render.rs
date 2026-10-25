@@ -835,6 +835,10 @@ pub fn status(cg: &CodeGraph) -> Result<Value> {
     data["indexPath"] = json!(std::path::Path::new(cg.project_root()).join(".codegraph"));
     data["backend"] = json!(cg.store().backend());
     data["journalMode"] = json!(cg.store().journal_mode()?);
+    // A newer release exists: status is where users and agents look when something seems off.
+    if let Some(notice) = codegraph_installer::upgrade::get_update_notice(env!("CARGO_PKG_VERSION")) {
+        data["updateAvailable"] = json!(notice);
+    }
     data["index"] = json!({"builtWithVersion":build.version,"builtWithExtractionVersion":build.extraction_version,"currentExtractionVersion":codegraph_core::codegraph::EXTRACTION_VERSION,"reindexRecommended":cg.is_index_stale(),"state":cg.get_index_state().map(|s|s.as_str()),"pendingRefs":cg.get_pending_reference_count()?,"filesNeedingReindex":health.needs_reindex,"filesWithParseErrors":health.parse_errors});
     Ok(data)
 }

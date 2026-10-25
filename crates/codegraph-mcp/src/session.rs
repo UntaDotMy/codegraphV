@@ -73,7 +73,7 @@ impl Session {
                         }
                     }
                 }
-                let result = json!({"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"codegraph","version":env!("CARGO_PKG_VERSION")},"instructions":if self.handler.default_root().is_some(){INSTRUCTIONS}else{NO_INDEX_INSTRUCTIONS}});
+                let result = json!({"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"codegraph","version":env!("CARGO_PKG_VERSION")},"instructions":codegraph_installer::upgrade::initialize_instructions(if self.handler.default_root().is_some(){INSTRUCTIONS}else{NO_INDEX_INSTRUCTIONS},codegraph_installer::upgrade::get_update_notice(env!("CARGO_PKG_VERSION")).as_deref())});
                 let mut messages = vec![response(id, result)];
                 if !self.explicit_path && params["capabilities"].get("roots").is_some() {
                     self.roots_requested = true;
@@ -158,6 +158,7 @@ pub fn serve<R: BufRead + Send + 'static, W: Write>(
     watch: bool,
 ) -> io::Result<()> {
     let mut session = Session::new(path, watch);
+    codegraph_installer::upgrade::check_for_update_in_background(env!("CARGO_PKG_VERSION"));
     let (sender, lines) = std::sync::mpsc::channel::<io::Result<String>>();
     std::thread::spawn(move || {
         for line in reader.lines() {

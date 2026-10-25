@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 mod edit;
+pub mod upgrade;
 mod markers;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const TARGETS: &[&str] = &[

@@ -394,6 +394,7 @@ dependencies = [
  "codegraph-context",
  "codegraph-core",
  "codegraph-graph",
+ "codegraph-installer",
  "codegraph-jsre",
  "codegraph-search",
  "codegraph-types",
