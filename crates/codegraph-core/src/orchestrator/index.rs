@@ -11,7 +11,7 @@ use super::git_state::{is_mpeg_ts_bytes, read_source_or_stamp};
 use super::{ExtractionOrchestrator, FileStat, FrameworkGate, IndexPhase, IndexProgress, IndexResult, ProgressFn, UnsupportedExtension, WINDOW_PER_WORKER};
 use crate::errors::{CodeGraphError, Result};
 use crate::extract::{extract_from_source, has_grammar_load_failure};
-use crate::file_limits::{oversize_stamp, read_bounded_source, MAX_SOURCE_FILE_SIZE_BYTES};
+use crate::file_limits::{max_source_file_bytes, oversize_stamp, read_bounded_source};
 use crate::utils::{validate_path_within_root, ValidateOptions};
 use codegraph_extract::languages::{detect_language, is_file_level_only_language, is_language_supported};
 use codegraph_extract::scan::config::load_extension_overrides;
@@ -147,7 +147,7 @@ struct Tally {
 fn size_exceeded(file_path: &str, size: u64) -> ExtractionResult {
     ExtractionResult {
         errors: vec![ExtractionError {
-            message: format!("File exceeds max size ({size} > {MAX_SOURCE_FILE_SIZE_BYTES})"),
+            message: format!("File exceeds max size ({size} > {})", max_source_file_bytes()),
             file_path: Some(file_path.to_string()),
             line: None,
             column: None,
@@ -493,7 +493,7 @@ impl ExtractionOrchestrator {
                 emit(IndexProgress::new(IndexPhase::Parsing, tally.processed, total));
             }
             Prepared::Oversize { content, stat, language } => {
-                // Honour MAX_SOURCE_FILE_SIZE_BYTES. Without this, vendored generated headers,
+                // Honour the source-size limit (`max_source_file_bytes`). Without this, vendored generated headers,
                 // minified bundles, and other multi-MB files get indexed, wasting the parser on
                 // inputs with no useful symbols.
                 let result = size_exceeded(file_path, stat.size);
@@ -619,7 +619,7 @@ impl ExtractionOrchestrator {
         let language = detect_language(relative_path, Some(content), Some(&load_extension_overrides(root)), Some(root));
 
         // Check file size
-        if stats.size > MAX_SOURCE_FILE_SIZE_BYTES {
+        if stats.size > max_source_file_bytes() {
             let result = size_exceeded(relative_path, stats.size);
             self.store_extraction_result(relative_path, content, language, stats, result.clone())?;
             return Ok(result);

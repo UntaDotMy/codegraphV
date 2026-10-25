@@ -5,6 +5,7 @@
 //! catches committed changes from `git pull`/`checkout`/`merge`/`rebase` that `git status` cannot
 //! see.
 
+use crate::file_limits::{max_source_file_bytes, oversize_stamp};
 use super::git_state::read_source_or_stamp;
 use super::{hash_content, ExtractionOrchestrator, FileStat, IndexPhase, IndexProgress, ProgressFn, SyncResult};
 use crate::errors::Result;
@@ -198,7 +199,16 @@ impl ExtractionOrchestrator {
             // so pulls are caught.)
             if let Some(t) = tracked.filter(|_| !never_parsed) {
                 match FileStat::of(&full_path) {
-                    Ok(stat) if stat.size == t.size && stat.mtime_ms.floor() as i64 == t.modified_at => continue,
+                    // The row must also agree with the CURRENT size limit: a file stored as skipped
+                    // (oversize stamp) is re-read once the limit is raised past it, and an indexed
+                    // one once the limit drops below it, even though its size and mtime match.
+                    Ok(stat)
+                        if stat.size == t.size
+                            && stat.mtime_ms.floor() as i64 == t.modified_at
+                            && (t.content_hash == hash_content(&oversize_stamp(t.size))) == (stat.size > max_source_file_bytes()) =>
+                    {
+                        continue
+                    }
                     Ok(_) => {}
                     Err(error) => {
                         log_debug("Skipping unstattable file during sync", &[("filePath", file_path.clone()), ("error", error.to_string())]);

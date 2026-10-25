@@ -66,8 +66,8 @@ fn without_mocks(nodes: NodeList) -> NodeList {
     }
 }
 
-/// Largest source file the resolver reads (`MAX_SOURCE_FILE_SIZE_BYTES`).
-pub const MAX_SOURCE_FILE_SIZE_BYTES: u64 = 1024 * 1024;
+/// Largest source file the resolver reads: the same limit the indexer applies.
+use codegraph_types::limits::max_source_file_bytes;
 
 const DEFAULT_CACHE_LIMIT: usize = 5_000;
 
@@ -825,7 +825,7 @@ impl Ctx {
             // Reject anything extraction would not accept before decoding can multiply a
             // large binary blob into gigabytes of heap.
             let meta = std::fs::metadata(&full).ok()?;
-            if !meta.is_file() || meta.len() > MAX_SOURCE_FILE_SIZE_BYTES {
+            if !meta.is_file() || meta.len() > max_source_file_bytes() {
                 return None;
             }
             let bytes = std::fs::read(&full).ok()?;
@@ -842,7 +842,7 @@ impl Ctx {
         }
         let full = nodepath::join(&[&self.project_root, file_path]);
         let Ok(meta) = std::fs::metadata(&full) else { return false };
-        if !meta.is_file() || meta.len() > MAX_SOURCE_FILE_SIZE_BYTES {
+        if !meta.is_file() || meta.len() > max_source_file_bytes() {
             return false;
         }
         match std::fs::read(&full) {
