@@ -10,6 +10,7 @@ use std::{
 mod edit;
 pub mod upgrade;
 mod markers;
+pub mod original;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const TARGETS: &[&str] = &[
     "claude",
@@ -25,8 +26,32 @@ pub const TARGETS: &[&str] = &[
     "copilot-jetbrains",
 ];
 pub const INSTRUCTIONS: &str = include_str!("assets/instructions.md");
-const START: &str = "<!-- CODEGRAPH_START -->";
-const END: &str = "<!-- CODEGRAPH_END -->";
+/// The names one product writes into agent configuration, so removing it touches only its own
+/// entries: codegraphV's ([`CODEGRAPHV`]) or the original codegraph's ([`original::ORIGINAL`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Brand {
+    /// The MCP server key (`mcpServers.<server>`, `[mcp_servers.<server>]`, ...).
+    pub server: &'static str,
+    /// Claude's tool permission; allow entries starting with `permission_prefix` are this product's.
+    pub permission: &'static str,
+    pub permission_prefix: &'static str,
+    /// Its program name: a prompt hook running `<path>/<binary>[.exe|.cmd] prompt-hook` is its.
+    pub binary: &'static str,
+    /// Other prompt-hook command spellings this product has written.
+    pub hook_forms: &'static [&'static str],
+    /// The markers fencing its block in an instructions file.
+    pub start: &'static str,
+    pub end: &'static str,
+}
+pub const CODEGRAPHV: Brand = Brand {
+    server: "codegraphV",
+    permission: "mcp__codegraphV__*",
+    permission_prefix: "mcp__codegraphV__",
+    binary: "codegraphV",
+    hook_forms: &[PROMPT_HOOK_COMMAND],
+    start: "<!-- CODEGRAPHV_START -->",
+    end: "<!-- CODEGRAPHV_END -->",
+};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Location {
     Global,
@@ -220,14 +245,14 @@ impl Environment {
         let entry = self.entry(id, loc);
         self.config_path(id, loc)?;
         if id == "codex" {
-            return edit::toml("", Some(&entry));
+            return edit::toml("", CODEGRAPHV.server, Some(&entry));
         }
         if id == "hermes" {
-            return edit::yaml("", Some(&entry));
+            return edit::yaml("", CODEGRAPHV.server, Some(&entry));
         }
         let mut object = json!({});
         let mut node = &mut object;
-        for key in config_keys(id) {
+        for key in config_keys(id, CODEGRAPHV.server) {
             node = &mut node[key];
         }
         *node = entry;
@@ -238,6 +263,25 @@ impl Environment {
             .is_ok_and(|p| p.exists() || p.parent().is_some_and(Path::exists))
     }
     pub fn configured(&self, id: &str, loc: Location) -> bool {
+        self.configured_as(&CODEGRAPHV, id, loc)
+    }
+    /// What `brand` has in Claude Code's settings.json at `loc`: (its tool permission, its
+    /// prompt hook). An unreadable file has neither.
+    pub fn claude_settings_as(&self, brand: &Brand, loc: Location) -> (bool, bool) {
+        let path = self.profile(loc, "CLAUDE_CONFIG_DIR", ".claude").join("settings.json");
+        let Ok(Some(data)) = std::fs::read_to_string(path)
+            .map(|text| jsonc_parser::parse_to_serde_value(&text, &Default::default()).ok().flatten())
+        else {
+            return (false, false);
+        };
+        let permission = data["permissions"]["allow"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v.as_str().is_some_and(|s| s.starts_with(brand.permission_prefix))));
+        let hook = has_prompt_hook(brand, data.get("hooks"));
+        (permission, hook)
+    }
+    /// Whether `brand`'s MCP server entry is in `id`'s config file.
+    pub fn configured_as(&self, brand: &Brand, id: &str, loc: Location) -> bool {
         let Ok(path) = self.config_path(id, loc) else {
             return false;
         };
@@ -250,18 +294,18 @@ impl Environment {
                 .ok()
                 .is_some_and(|d| {
                     d.get("mcp_servers")
-                        .and_then(|m| m.get("codegraph"))
+                        .and_then(|m| m.get(brand.server))
                         .is_some()
                 });
         }
         if id == "hermes" {
-            return edit::yaml_configured(&text);
+            return edit::yaml_configured(&text, brand.server);
         }
         let Ok(Some(mut data)) = jsonc_parser::parse_to_serde_value(&text, &Default::default())
         else {
             return false;
         };
-        for key in config_keys(id) {
+        for key in config_keys(id, brand.server) {
             data = data[key].take();
         }
         !data.is_null()
@@ -304,6 +348,23 @@ impl Environment {
         options: InstallOptions,
         remove: bool,
     ) -> Result<WriteResult> {
+        self.apply_as(&CODEGRAPHV, id, loc, options, remove)
+    }
+    /// Remove everything `brand` wrote for `id` (its server entry, permission, prompt hook and
+    /// instructions block), leaving every other product's entries alone.
+    pub fn remove_as(&self, brand: &Brand, id: &str, loc: Location, dry_run: bool) -> Result<WriteResult> {
+        self.apply_as(brand, id, loc, InstallOptions { dry_run, ..InstallOptions::default() }, true)
+    }
+    fn apply_as(
+        &self,
+        brand: &Brand,
+        id: &str,
+        loc: Location,
+        options: InstallOptions,
+        remove: bool,
+    ) -> Result<WriteResult> {
+        // Only codegraphV is ever installed; another brand is only removed.
+        let remove = remove || brand.server != CODEGRAPHV.server;
         if !self.supports(id, loc) {
             return Ok(WriteResult {
                 files: vec![],
@@ -317,18 +378,18 @@ impl Environment {
         let entry = self.entry(id, loc);
         let value = (!remove).then_some(&entry);
         let after = match id {
-            "codex" => Some(edit::toml(&before, value)?),
-            "hermes" => Some(edit::yaml(&before, value)?),
+            "codex" => Some(edit::toml(&before, brand.server, value)?),
+            "hermes" => Some(edit::yaml(&before, brand.server, value)?),
             _ => {
-                // opencode: drop the pre-#1698 `mcp.codegraph` entry either way.
+                // opencode: drop a pre-#1698 `mcp.<server>` entry either way.
                 let legacy = if id == "opencode" {
-                    edit::json(&before, &["mcp", "codegraph"], None)?
+                    edit::json(&before, &["mcp", brand.server], None)?
                 } else {
                     before.clone()
                 };
                 match value {
-                    Some(value) => Some(edit::json(&legacy, &config_keys(id), Some(value))?),
-                    None => remove_json(&before, &legacy, &config_keys(id))?,
+                    Some(value) => Some(edit::json(&legacy, &config_keys(id, brand.server), Some(value))?),
+                    None => remove_json(&before, &legacy, &config_keys(id, brand.server))?,
                 }
             }
         };
@@ -337,14 +398,14 @@ impl Environment {
         if let Some(file) = self.instructions_path(id, loc) {
             let before = read(&file)?;
             let after = if remove {
-                match markers::strip(&before, START, END) {
+                match markers::strip(&before, brand.start, brand.end) {
                     Some(rest) if markers::is_blank(&rest) => None,
                     Some(rest) => Some(rest),
                     None => Some(before.clone()),
                 }
             } else {
                 let existing = file.exists().then_some(before.as_str());
-                Some(markers::upsert(existing, INSTRUCTIONS, START, END))
+                Some(markers::upsert(existing, INSTRUCTIONS, brand.start, brand.end))
             };
             planned.push((file, before, after));
         }
@@ -366,9 +427,9 @@ impl Environment {
                     .cloned()
                     .unwrap_or_default();
                 let prior = allow.clone();
-                allow.retain(|v| !v.as_str().is_some_and(|s| s.starts_with("mcp__codegraph")));
+                allow.retain(|v| !v.as_str().is_some_and(|s| s.starts_with(brand.permission_prefix)));
                 if !remove && options.auto_allow {
-                    allow.push(json!("mcp__codegraph__*"));
+                    allow.push(json!(brand.permission));
                 }
                 if allow != prior {
                     after = if allow.is_empty() {
@@ -382,10 +443,13 @@ impl Environment {
             if let Some(text) = after.clone() {
                 let data = parse(&text)?;
                 let current = data.get("hooks");
+                // None (a refresh) keeps whatever is there.
+                let command = prompt_hook_command(&self.executable);
                 let next = match hook_choice {
-                    Some(on) => prompt_hook_hooks(current, on),
-                    // A refresh keeps the choice but repairs a spelling that no longer runs.
-                    None => current.map(migrate_prompt_hook_spelling),
+                    Some(on) => prompt_hook_hooks(brand, current, on, &command),
+                    // A refresh keeps the choice, but brings an existing hook to today's spelling.
+                    None if has_prompt_hook(brand, current) => prompt_hook_hooks(brand, current, true, &command),
+                    None => current.cloned(),
                 };
                 if next.as_ref() != current {
                     after = match next {
@@ -401,7 +465,7 @@ impl Environment {
                 let file = self.project.join(".claude.json");
                 let before = read(&file)?;
                 if !before.is_empty() {
-                    let after = remove_json(&before, &before, &["mcpServers", "codegraph"])?;
+                    let after = remove_json(&before, &before, &["mcpServers", brand.server])?;
                     planned.push((file, before, after));
                 }
             }
@@ -415,7 +479,7 @@ impl Environment {
                 if !planned.iter().any(|(p, _, _)| p == &path) {
                     let before = read(&path)?;
                     if !before.is_empty() {
-                        let after = remove_json(&before, &before, &["mcpServers", "codegraph"])?;
+                        let after = remove_json(&before, &before, &["mcpServers", brand.server])?;
                         planned.push((path, before, after));
                     }
                 }
@@ -432,6 +496,7 @@ impl Environment {
                 }
             } else {
                 match &after {
+                    _ if options.dry_run => {}
                     Some(text) => write_atomic(&path, text)?,
                     // A link is emptied through, never replaced by deleting it.
                     None if path.is_symlink() => write_atomic(&path, "")?,
@@ -458,11 +523,11 @@ impl Environment {
         Ok(result)
     }
 }
-fn config_keys(id: &str) -> Vec<&'static str> {
+fn config_keys<'a>(id: &str, server: &'a str) -> Vec<&'a str> {
     match id {
-        "opencode" => vec!["mcp", "servers", "codegraph"],
-        "copilot-vscode" | "copilot-jetbrains" => vec!["servers", "codegraph"],
-        _ => vec!["mcpServers", "codegraph"],
+        "opencode" => vec!["mcp", "servers", server],
+        "copilot-vscode" | "copilot-jetbrains" => vec!["servers", server],
+        _ => vec!["mcpServers", server],
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -471,54 +536,82 @@ pub struct InstallOptions {
     /// Claude's front-load `UserPromptSubmit` hook: Some(true) writes it, Some(false) strips it
     /// (an opt-out round-trips), None leaves whatever is there (a refresh).
     pub prompt_hook: Option<bool>,
+    /// Report what would change (the same actions) and write nothing.
+    pub dry_run: bool,
 }
 impl Default for InstallOptions {
     fn default() -> Self {
         Self {
             auto_allow: true,
             prompt_hook: None,
+            dry_run: false,
         }
     }
 }
 
-/// The hook command `install` writes. The native binary is `codegraph.exe` on Windows, which Git
-/// Bash (Claude Code's hook shell) resolves without the extension.
-pub const PROMPT_HOOK_COMMAND: &str = "codegraph prompt-hook";
-/// Every spelling an installer has written (the TS one wrote `codegraph.cmd` on Windows).
-const PROMPT_HOOK_FORMS: [&str; 2] = ["codegraph prompt-hook", "codegraph.cmd prompt-hook"];
+/// The hook command earlier builds wrote: found through PATH, which the agent may not have
+/// (BUG-95). Still recognized, and replaced by [`prompt_hook_command`].
+pub const PROMPT_HOOK_COMMAND: &str = "codegraphV prompt-hook";
 
-fn is_prompt_hook_command(command: &Value) -> bool {
-    command.as_str().is_some_and(|c| PROMPT_HOOK_FORMS.iter().any(|f| c.contains(f)))
+/// The hook command `install` writes: the binary's absolute path, quoted, with forward slashes
+/// so Git Bash (Claude Code's hook shell on Windows) and sh read it alike. Like the MCP entry,
+/// it then runs whatever PATH the agent inherited.
+pub fn prompt_hook_command(executable: &str) -> String {
+    format!("\"{}\" prompt-hook", executable.replace('\\', "/"))
 }
 
-/// `settings.hooks` with the prompt hook written (`on`) or removed; Ok(None) = drop `hooks`.
+fn is_prompt_hook_command(brand: &Brand, command: &Value) -> bool {
+    let Some(command) = command.as_str() else { return false };
+    if brand.hook_forms.iter().any(|f| command.contains(f)) {
+        return true;
+    }
+    // `"<dir>/<binary>[.exe]" prompt-hook` or `<dir>/<binary> prompt-hook`.
+    let command = command.trim();
+    let (program, rest) = match command.strip_prefix('"') {
+        Some(quoted) => match quoted.split_once('"') {
+            Some(split) => split,
+            None => return false,
+        },
+        None => command.split_once(char::is_whitespace).unwrap_or((command, "")),
+    };
+    if rest.trim() != "prompt-hook" {
+        return false;
+    }
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let lower = name.to_ascii_lowercase();
+    let stem = if lower.ends_with(".exe") || lower.ends_with(".cmd") { &name[..name.len() - 4] } else { name };
+    stem.eq_ignore_ascii_case(brand.binary)
+}
+
+fn has_prompt_hook(brand: &Brand, hooks: Option<&Value>) -> bool {
+    hooks.and_then(Value::as_object).is_some_and(|events| {
+        events.values().filter_map(Value::as_array).flatten().any(|group| {
+            group["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_prompt_hook_command(brand, &h["command"])))
+        })
+    })
+}
+
+/// `settings.hooks` with `brand`'s prompt hook written (`on`) or removed; None = drop `hooks`.
 /// Unchanged input comes back equal, so the caller writes nothing.
-/// `hooks` with an installer-written spelling of ours (the npm build's `codegraph.cmd …`)
-/// rewritten to this one in place; an `npx …` or hand-edited variant is the user's own and stays.
-fn migrate_prompt_hook_spelling(hooks: &Value) -> Value {
-    let mut hooks = hooks.clone();
-    for group in hooks["UserPromptSubmit"].as_array_mut().into_iter().flatten() {
-        for h in group["hooks"].as_array_mut().into_iter().flatten() {
-            if h["command"].as_str().is_some_and(|c| PROMPT_HOOK_FORMS.contains(&c) && c != PROMPT_HOOK_COMMAND) {
-                h["command"] = json!(PROMPT_HOOK_COMMAND);
-            }
-        }
-    }
-    hooks
-}
-
-fn prompt_hook_hooks(hooks: Option<&Value>, on: bool) -> Option<Value> {
+/// `command` is what the hook runs; an older spelling of `brand`'s hook is rewritten in place.
+fn prompt_hook_hooks(brand: &Brand, hooks: Option<&Value>, on: bool, command: &str) -> Option<Value> {
     if on {
-        let mut hooks = hooks.filter(|h| h.is_object()).map(migrate_prompt_hook_spelling).unwrap_or_else(|| json!({}));
+        let mut hooks = hooks.filter(|h| h.is_object()).cloned().unwrap_or_else(|| json!({}));
         if !hooks["UserPromptSubmit"].is_array() {
             hooks["UserPromptSubmit"] = json!([]);
         }
         let groups = hooks["UserPromptSubmit"].as_array_mut().unwrap();
-        let already = groups
-            .iter()
-            .any(|g| g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_prompt_hook_command(&h["command"]))));
+        let mut already = false;
+        for hook in groups.iter_mut().filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut)).flatten() {
+            if is_prompt_hook_command(brand, &hook["command"]) {
+                already = true;
+                if hook["command"] != command {
+                    hook["command"] = json!(command);
+                }
+            }
+        }
         if !already {
-            groups.push(json!({"hooks": [{"type": "command", "command": PROMPT_HOOK_COMMAND}]}));
+            groups.push(json!({"hooks": [{"type": "command", "command": command}]}));
         }
         return Some(hooks);
     }
@@ -530,7 +623,7 @@ fn prompt_hook_hooks(hooks: Option<&Value>, on: bool) -> Option<Value> {
         for group in groups.iter_mut() {
             if let Some(hs) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 let before = hs.len();
-                hs.retain(|h| !is_prompt_hook_command(&h["command"]));
+                hs.retain(|h| !is_prompt_hook_command(brand, &h["command"]));
                 removed |= hs.len() != before;
             }
         }

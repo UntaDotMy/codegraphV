@@ -1,10 +1,10 @@
-# Install the Rust codegraph from a GitHub Release (Windows x64).
+# Install codegraphV (the Rust rewrite of codegraph) from a GitHub Release (Windows x64).
 #
 #   irm https://raw.githubusercontent.com/UntaDotMy/codegraphV/rust-rewrite/install-rust.ps1 | iex
 #
 # Options (environment variables, so the one-liner above can use them too):
-#   CODEGRAPH_VERSION      release tag to install, for example v0.0.1 (default: latest)
-#   CODEGRAPH_INSTALL_DIR  where codegraph.exe goes (default: %LOCALAPPDATA%\codegraph\bin)
+#   CODEGRAPHV_VERSION      release tag to install, for example v0.0.2 (default: latest)
+#   CODEGRAPHV_INSTALL_DIR  where codegraphV.exe goes (default: %LOCALAPPDATA%\codegraphV\bin)
 # The download is checked against the release's SHA256SUMS, and the temporary files are
 # deleted afterwards. The install folder is added to your user PATH.
 $ErrorActionPreference = 'Stop'
@@ -19,21 +19,25 @@ function Get-LatestTag {
         $uri = if ($r.BaseResponse.ResponseUri) { $r.BaseResponse.ResponseUri } else { $r.BaseResponse.RequestMessage.RequestUri }
         if ("$uri" -match '/releases/tag/([^/]+)$') { return $Matches[1] }
     } catch {}
-    (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'codegraph-install' }).tag_name
+    (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'codegraphV-install' }).tag_name
 }
-$version = $env:CODEGRAPH_VERSION
+# `codegraph upgrade` of codegraph v0.0.1 (before the rename) runs this script with the old
+# variable names. It gets codegraphV in codegraphV's own folder, then a migrate of its setup.
+$legacy = $env:CODEGRAPH_INSTALL_DIR -and -not $env:CODEGRAPHV_INSTALL_DIR
+$version = $env:CODEGRAPHV_VERSION
+if (-not $version -and $legacy) { $version = $env:CODEGRAPH_VERSION }
 if (-not $version) { $version = Get-LatestTag }
-if (-not $version) { throw 'Could not find the latest release; set CODEGRAPH_VERSION (for example v0.0.1).' }
+if (-not $version) { throw 'Could not find the latest release; set CODEGRAPHV_VERSION (for example v0.0.2).' }
 if ($version -notlike 'v*') { $version = "v$version" }
-$dir = $env:CODEGRAPH_INSTALL_DIR
-if (-not $dir) { $dir = Join-Path $env:LOCALAPPDATA 'codegraph\bin' }
+$dir = $env:CODEGRAPHV_INSTALL_DIR
+if (-not $dir) { $dir = Join-Path $env:LOCALAPPDATA 'codegraphV\bin' }
 
-$name = "codegraph-$version-windows-x64"
+$name = "codegraphV-$version-windows-x64"
 $base = "https://github.com/$repo/releases/download/$version"
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("codegraph-install-" + [guid]::NewGuid())
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("codegraphV-install-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force $tmp | Out-Null
 try {
-    Write-Host "Downloading codegraph $version..."
+    Write-Host "Downloading codegraphV $version..."
     Invoke-WebRequest "$base/$name.zip" -OutFile "$tmp\$name.zip"
     Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$tmp\SHA256SUMS"
     $expected = (Get-Content "$tmp\SHA256SUMS" | Where-Object { $_ -match "\s\*?$name\.zip$" }) -replace '\s.*$', ''
@@ -42,11 +46,11 @@ try {
     Expand-Archive "$tmp\$name.zip" -DestinationPath $tmp
 
     New-Item -ItemType Directory -Force $dir | Out-Null
-    $target = Join-Path $dir 'codegraph.exe'
+    $target = Join-Path $dir 'codegraphV.exe'
     Remove-Item "$target.old" -Force -ErrorAction SilentlyContinue
-    # A running codegraph (an MCP server) locks its exe; Windows still lets it be renamed.
+    # A running codegraphV (an MCP server) locks its exe; Windows still lets it be renamed.
     if (Test-Path $target) { Move-Item $target "$target.old" -Force }
-    Copy-Item "$tmp\$name\codegraph.exe" $target
+    Copy-Item "$tmp\$name\codegraphV.exe" $target
     Remove-Item "$target.old" -Force -ErrorAction SilentlyContinue
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -59,10 +63,13 @@ if (-not (($userPath -split ';') -contains $dir)) {
 }
 $env:Path = "$dir;$env:Path"
 Write-Host "Installed $(& $target --version) to $target"
-# Another codegraph earlier on PATH (often `npm i -g @colbymchenry/codegraph`) would run instead.
-$first = Get-Command codegraph -All -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($first -and $first.Source -ne $target) {
-    Write-Host "Warning: $($first.Source) comes first on PATH and runs instead of this install."
-    Write-Host "Remove it (for the npm package: npm rm -g @colbymchenry/codegraph) or put $dir first on PATH."
+if ($legacy) {
+    Write-Host "codegraph is now called codegraphV. Moving your agents and indexes over (codegraphV migrate)..."
+    & $target migrate --yes
+    Write-Host "From now on run 'codegraphV' (in a new terminal). The old 'codegraph upgrade' may now report that codegraph.exe does not report $version; that is expected, because codegraphV.exe replaced it."
+} elseif (Get-Command codegraph -ErrorAction SilentlyContinue) {
+    # The original codegraph (npm @colbymchenry/codegraph, or codegraph v0.0.1 of this fork).
+    Write-Host "Found the original codegraph. Next: run 'codegraphV migrate' to move your agents and indexes over."
+} else {
+    Write-Host "Next: run 'codegraphV install' to connect Claude Code, Cursor, Codex or opencode."
 }
-Write-Host "Next: run 'codegraph install' to connect Claude Code, Cursor, Codex or opencode."

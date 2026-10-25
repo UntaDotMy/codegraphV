@@ -283,7 +283,7 @@ pub const PROMPT_HOOK_INJECTION_MAX: usize = 9_000;
 /// for the rest" notice when truncated. Lengths are UTF-16 code units, as in the TypeScript.
 pub fn cap_prompt_hook_injection(text: &str, max: usize) -> String {
     if codegraph_types::jscompat::utf16_len(text) > max {
-        format!("{}\n…(truncated; call codegraph_explore for the rest)", codegraph_types::jscompat::utf16_prefix(text, max))
+        format!("{}\n…(truncated; call codegraphV_explore for the rest)", codegraph_types::jscompat::utf16_prefix(text, max))
     } else {
         text.to_string()
     }
@@ -376,7 +376,7 @@ mod tests {
         assert!(is_task_notification(&strip_system_reminders(
             "<system-reminder>s</system-reminder><task-notification>done</task-notification>"
         )));
-        assert_eq!(cap_prompt_hook_injection("abcdef", 3), "abc\n…(truncated; call codegraph_explore for the rest)");
+        assert_eq!(cap_prompt_hook_injection("abcdef", 3), "abc\n…(truncated; call codegraphV_explore for the rest)");
         assert_eq!(cap_prompt_hook_injection("abc", 3), "abc");
     }
 }

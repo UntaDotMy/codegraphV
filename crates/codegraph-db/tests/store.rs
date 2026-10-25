@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 fn tmp() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join(".codegraph").join("codegraph.db");
+    let db = dir.path().join(".codegraphV").join("codegraph.db");
     (dir, db)
 }
 
@@ -347,4 +347,21 @@ fn removing_database_files_takes_the_wal_sidecars_too() {
     assert!(!db.with_extension("db-wal").exists());
     // Removing again is fine.
     codegraph_db::remove_database_files(&db).unwrap();
+}
+
+/// DEV-85: migrate copies an index the original's server still has open (Windows cannot move it).
+#[test]
+fn copy_database_works_while_the_source_is_open_and_mid_write() {
+    let (dir, db) = tmp();
+    let store = Store::initialize(&db).unwrap();
+    store.insert_nodes(&[func("a", "alpha", "src/a.ts", 1)]).unwrap();
+    // Another writer is part-way through a transaction.
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE; DELETE FROM nodes;").unwrap();
+    let copy = dir.path().join("copy.db");
+    codegraph_db::copy_database(&db, &copy).unwrap();
+    let copied = Store::open(&copy, OpenOptions::default()).unwrap();
+    let names: Vec<String> = copied.conn().prepare("SELECT name FROM nodes").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+    assert_eq!(names, vec!["alpha"], "the last committed state, not the uncommitted delete");
+    writer.execute_batch("ROLLBACK").unwrap();
 }

@@ -154,8 +154,8 @@ pub fn reindex_advisory() -> String {
     [
         "Your existing project indexes keep working, but were built by the previous version.",
         "To pick up this version's extraction improvements, refresh each project:",
-        "  codegraph sync        # incremental, fast",
-        "  codegraph index -f    # full rebuild",
+        "  codegraphV sync        # incremental, fast",
+        "  codegraphV index -f    # full rebuild",
     ]
     .join("\n")
 }
@@ -209,7 +209,7 @@ pub fn resolve_latest_version(timeout_secs: u64) -> Result<String, String> {
             return Ok(normalize_version(&tag));
         }
     }
-    Err("could not resolve the latest version from GitHub. Check your network (curl is needed), or pin a version: `codegraph upgrade <version>`.".into())
+    Err("could not resolve the latest version from GitHub. Check your network (curl is needed), or pin a version: `codegraphV upgrade <version>`.".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -240,12 +240,12 @@ fn env_truthy(raw: Option<String>) -> bool {
 /// The check is off entirely — no network call, no notice — under CODEGRAPH_NO_UPDATE_CHECK
 /// or DO_NOT_TRACK.
 pub fn update_check_disabled(env: &dyn Fn(&str) -> Option<String>) -> bool {
-    env_truthy(env("CODEGRAPH_NO_UPDATE_CHECK")) || env_truthy(env("DO_NOT_TRACK"))
+    env_truthy(env("CODEGRAPHV_NO_UPDATE_CHECK")) || env_truthy(env("DO_NOT_TRACK"))
 }
 
 /// `~/.codegraph`, where the cache lives.
 pub fn default_state_dir() -> Option<PathBuf> {
-    codegraph_types::paths::home_dir().map(|h| h.join(".codegraph"))
+    codegraph_types::paths::home_dir().map(|h| h.join(".codegraphV"))
 }
 
 /// Not the TS `update-check.json`: that one names npm versions (v1.6.x), and a machine switched
@@ -269,7 +269,7 @@ fn write_update_check_cache(dir: &Path, cache: &UpdateCheckCache) {
 
 /// The one sentence every surface (stderr, initialize, status) shows.
 pub fn format_update_notice(current: &str, latest: &str) -> String {
-    format!("CodeGraph {latest} is available (this server is running {current}). Update with `codegraph upgrade`.")
+    format!("CodeGraphV {latest} is available (this server is running {current}). Update with `codegraphV upgrade`.")
 }
 
 fn notice_from(cache: Option<&UpdateCheckCache>, current: &str) -> Option<String> {
@@ -379,7 +379,7 @@ pub fn check_for_update_in_background(current: &str) {
     let Some(dir) = default_state_dir() else { return };
     spawn_refresh(dir, current.to_string(), |notice| {
         if let Some(notice) = notice {
-            eprintln!("[CodeGraph] {}", notice.trim_start_matches("CodeGraph "));
+            eprintln!("[CodeGraphV] {}", notice.trim_start_matches("CodeGraphV "));
         }
     });
 }
@@ -460,7 +460,7 @@ mod tests {
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
         };
-        assert!(update_check_disabled(&env(&[("CODEGRAPH_NO_UPDATE_CHECK", "1")])));
+        assert!(update_check_disabled(&env(&[("CODEGRAPHV_NO_UPDATE_CHECK", "1")])));
         assert!(update_check_disabled(&env(&[("DO_NOT_TRACK", "true")])));
         assert!(!update_check_disabled(&env(&[("DO_NOT_TRACK", "0")])));
         assert!(!update_check_disabled(&env(&[])));

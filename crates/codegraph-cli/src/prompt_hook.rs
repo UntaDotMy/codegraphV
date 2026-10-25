@@ -49,10 +49,10 @@ pub fn frontload(cwd: &str, prompt: &str) -> Option<String> {
         }
         // Several indexed sub-projects, none a clear match: say they exist and how to query one.
         return Some(format!(
-            "<codegraph_context note=\"CodeGraph is available for this workspace's indexed sub-projects — query one by passing projectPath to codegraph_explore.\">\n{}</codegraph_context>\n",
+            "<codegraphV_context note=\"CodeGraphV is available for this workspace's indexed sub-projects — query one by passing projectPath to codegraphV_explore.\">\n{}</codegraphV_context>\n",
             nudge(
                 &plan.nudge_projects,
-                "This workspace's CodeGraph indexes live in sub-projects. To use CodeGraph, call codegraph_explore with the projectPath of the relevant one:"
+                "This workspace's CodeGraphV indexes live in sub-projects. To use CodeGraphV, call codegraphV_explore with the projectPath of the relevant one:"
             )
         ));
     };
@@ -89,12 +89,12 @@ fn frontload_project(
         }
         let body = cap_prompt_hook_injection_default(text);
         let more = if via_sub_scan {
-            format!("call codegraph_explore with projectPath: \"{root}\" for more")
+            format!("call codegraphV_explore with projectPath: \"{root}\" for more")
         } else {
-            "call codegraph_explore for more".to_string()
+            "call codegraphV_explore for more".to_string()
         };
         return Some(format!(
-            "<codegraph_context note=\"Structural context from CodeGraph for this prompt — treat returned source as already read; {more}.\">\n{body}{others}\n</codegraph_context>\n"
+            "<codegraphV_context note=\"Structural context from CodeGraphV for this prompt — treat returned source as already read; {more}.\">\n{body}{others}\n</codegraphV_context>\n"
         ));
     }
     // MEDIUM. A database indexed before the vocab table existed starts with it empty; heal it.
@@ -112,7 +112,7 @@ fn frontload_project(
     let example_query = related.iter().take(3).map(|m| m.name.as_str()).collect::<Vec<_>>().join(" ");
     let project_hint = if via_sub_scan { format!(" with projectPath: \"{root}\"") } else { String::new() };
     Some(format!(
-        "<codegraph_context note=\"CodeGraph found indexed symbols matching this prompt — query the graph before searching files.\">\nThis project's CodeGraph index contains symbols matching this request:\n{}\nCall codegraph_explore ONCE{project_hint} with the relevant names in one query (e.g. \"{example_query}\") to get their source, call paths, and blast radius — cheaper and more complete than Read/Grep.\n{others}</codegraph_context>\n",
+        "<codegraphV_context note=\"CodeGraphV found indexed symbols matching this prompt — query the graph before searching files.\">\nThis project's CodeGraphV index contains symbols matching this request:\n{}\nCall codegraphV_explore ONCE{project_hint} with the relevant names in one query (e.g. \"{example_query}\") to get their source, call paths, and blast radius — cheaper and more complete than Read/Grep.\n{others}</codegraphV_context>\n",
         lines.join("\n")
     ))
 }
@@ -120,8 +120,8 @@ fn frontload_project(
 /// The command: reads the hook payload and prints the context, never failing.
 pub fn run() {
     // Kill-switch: disable the nudge without uninstalling or editing settings.json.
-    if std::env::var("CODEGRAPH_NO_PROMPT_HOOK").as_deref() == Ok("1")
-        || std::env::var("CODEGRAPH_PROMPT_HOOK").as_deref() == Ok("0")
+    if std::env::var("CODEGRAPHV_NO_PROMPT_HOOK").as_deref() == Ok("1")
+        || std::env::var("CODEGRAPHV_PROMPT_HOOK").as_deref() == Ok("0")
     {
         return;
     }

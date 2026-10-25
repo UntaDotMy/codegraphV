@@ -72,7 +72,7 @@ pub fn json(text: &str, path: &[&str], value: Option<&Value>) -> Result<String> 
     }
     Ok(root.to_string())
 }
-pub fn toml(text: &str, value: Option<&Value>) -> Result<String> {
+pub fn toml(text: &str, server: &str, value: Option<&Value>) -> Result<String> {
     if text.trim().is_empty() && value.is_none() {
         return Ok(text.into());
     }
@@ -80,7 +80,7 @@ pub fn toml(text: &str, value: Option<&Value>) -> Result<String> {
     if let Some(entry) = value {
         let expected_command = entry["command"].as_str().unwrap();
         let expected_args = entry["args"].as_array().unwrap();
-        let existing = doc.get("mcp_servers").and_then(|m| m.get("codegraph"));
+        let existing = doc.get("mcp_servers").and_then(|m| m.get(server));
         if existing.is_some_and(|v| {
             v.get("command").and_then(|v| v.as_str()) == Some(expected_command)
                 && v.get("args").and_then(|v| v.as_array()).is_some_and(|a| {
@@ -95,7 +95,7 @@ pub fn toml(text: &str, value: Option<&Value>) -> Result<String> {
         }
         if let Some(parent) = doc.get("mcp_servers") {
             if !parent.is_table() {
-                return Err("mcp_servers is defined as a value; add CodeGraph manually or use a TOML table. Nothing was changed.".into());
+                return Err("mcp_servers is defined as a value; add CodeGraphV manually or use a TOML table. Nothing was changed.".into());
             }
         }
         if doc.get("mcp_servers").is_none() {
@@ -110,12 +110,12 @@ pub fn toml(text: &str, value: Option<&Value>) -> Result<String> {
             args.push(arg.as_str().unwrap());
         }
         table["args"] = toml_edit::value(args);
-        doc["mcp_servers"]["codegraph"] = toml_edit::Item::Table(table);
+        doc["mcp_servers"][server] = toml_edit::Item::Table(table);
     } else {
         let Some(parent) = doc.get_mut("mcp_servers").and_then(|v| v.as_table_mut()) else {
             return Ok(text.into());
         };
-        if parent.remove("codegraph").is_none() {
+        if parent.remove(server).is_none() {
             return Ok(text.into());
         }
     }
@@ -144,7 +144,7 @@ fn end(lines: &[String], start: usize) -> usize {
         })
         .unwrap_or(lines.len())
 }
-pub fn yaml_configured(text: &str) -> bool {
+pub fn yaml_configured(text: &str, server: &str) -> bool {
     let lines: Vec<_> = text.lines().map(str::to_owned).collect();
     let Some(top) = lines
         .iter()
@@ -152,9 +152,9 @@ pub fn yaml_configured(text: &str) -> bool {
     else {
         return false;
     };
-    (top + 1..end(&lines, top)).any(|i| key(&lines[i], "codegraph"))
+    (top + 1..end(&lines, top)).any(|i| key(&lines[i], server))
 }
-pub fn yaml(text: &str, value: Option<&Value>) -> Result<String> {
+pub fn yaml(text: &str, server: &str, value: Option<&Value>) -> Result<String> {
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines: Vec<_> = text.lines().map(str::to_owned).collect();
     let top = lines
@@ -189,11 +189,11 @@ pub fn yaml(text: &str, value: Option<&Value>) -> Result<String> {
             .starts_with('#')
     {
     } else {
-        return Err("mcp_servers uses an inline YAML value; add CodeGraph manually or use block YAML. Nothing was changed.".into());
+        return Err("mcp_servers uses an inline YAML value; add CodeGraphV manually or use block YAML. Nothing was changed.".into());
     }
     let finish = end(&lines, top);
-    let server = (top + 1..finish).find(|i| key(&lines[*i], "codegraph"));
-    match (value, server) {
+    let found = (top + 1..finish).find(|i| key(&lines[*i], server));
+    match (value, found) {
         (None, None) => return Ok(text.into()),
         (None, Some(i)) => {
             let finish = end(&lines, i);
@@ -227,7 +227,7 @@ pub fn yaml(text: &str, value: Option<&Value>) -> Result<String> {
             lines.splice(
                 finish..finish,
                 [
-                    "  codegraph:".into(),
+                    format!("  {server}:"),
                     format!("    command: {}", serde_json::to_string(&entry["command"])?),
                     "    args: [serve, --mcp]".into(),
                 ],

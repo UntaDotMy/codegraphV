@@ -54,9 +54,9 @@ pub fn source_checkout(exe: &Path) -> Option<PathBuf> {
 
 fn binary_name() -> &'static str {
     if cfg!(windows) {
-        "codegraph.exe"
+        "codegraphV.exe"
     } else {
-        "codegraph"
+        "codegraphV"
     }
 }
 
@@ -88,7 +88,7 @@ fn run_installer(tag: &str, dir: &Path) -> std::io::Result<bool> {
         c.args(["-c", &format!("curl -fsSL '{url}' | sh")]);
         c
     };
-    command.env("CODEGRAPH_VERSION", tag).env("CODEGRAPH_INSTALL_DIR", dir);
+    command.env("CODEGRAPHV_VERSION", tag).env("CODEGRAPHV_INSTALL_DIR", dir);
     Ok(command.status()?.success())
 }
 
@@ -104,7 +104,7 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
         }
     };
     println!(
-        "CodeGraph  current {}  {} {target}",
+        "CodeGraphV  current {}  {} {target}",
         normalize_version(current),
         if pinned { "target" } else { "latest" }
     );
@@ -112,7 +112,7 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
     match plan(current, &target, pinned, check, force, &exe) {
         Plan::Report { update_available: true } => {
             println!("An update is available: {} -> {target}", normalize_version(current));
-            println!("Run `codegraph upgrade` to install it.");
+            println!("Run `codegraphV upgrade` to install it.");
             0
         }
         Plan::Report { update_available: false } => {
@@ -121,7 +121,7 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
         }
         Plan::UpToDate => {
             println!("Already up to date ({}).", normalize_version(current));
-            println!("Use `--force` to reinstall, or `codegraph upgrade <version>` to change versions.");
+            println!("Use `--force` to reinstall, or `codegraphV upgrade <version>` to change versions.");
             0
         }
         Plan::Source { root } => {
@@ -133,7 +133,7 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
             match run_installer(&tag, &dir) {
                 Ok(true) => {}
                 Ok(false) => {
-                    eprintln!("Error: the installer failed; codegraph was not changed.");
+                    eprintln!("Error: the installer failed; codegraphV was not changed.");
                     return 1;
                 }
                 Err(error) => {
@@ -147,19 +147,19 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
                 return 1;
             }
             // Another codegraph earlier on PATH would keep serving the old version.
-            let on_path = reported_version(Path::new("codegraph"));
+            let on_path = reported_version(Path::new("codegraphV"));
             if on_path.as_deref().is_some_and(|v| v != tag) {
                 println!(
-                    "Warning: the `codegraph` first on your PATH still reports {}; remove that install or put {} first on PATH.",
+                    "Warning: the `codegraphV` first on your PATH still reports {}; remove that install or put {} first on PATH.",
                     on_path.unwrap_or_default(),
                     dir.display()
                 );
-                println!("Then run `codegraph install --refresh` to refresh agent configuration.");
-            } else if std::env::var("CODEGRAPH_NO_INSTALL_REFRESH").as_deref() != Ok("1") {
+                println!("Then run `codegraphV install --refresh` to refresh agent configuration.");
+            } else if std::env::var("CODEGRAPHV_NO_INSTALL_REFRESH").as_deref() != Ok("1") {
                 println!("Refreshing agent configuration written by previous versions...");
                 let refreshed = Command::new(&installed).args(["install", "--refresh"]).status();
                 if !refreshed.is_ok_and(|s| s.success()) {
-                    println!("Could not refresh agent configuration; run `codegraph install --refresh`.");
+                    println!("Could not refresh agent configuration; run `codegraphV install --refresh`.");
                 }
             }
             // The installer renamed the binary this process runs from aside; drop it once we exit.
@@ -204,13 +204,13 @@ mod tests {
 
     #[test]
     fn plan_check_up_to_date_force_pin_and_source() {
-        let installed = Path::new("C:/Users/x/AppData/Local/codegraph/bin/codegraph.exe");
+        let installed = Path::new("C:/Users/x/AppData/Local/codegraphV/bin/codegraphV.exe");
         assert_eq!(plan("0.0.1", "v0.0.2", false, true, false, installed), Plan::Report { update_available: true });
         assert_eq!(plan("0.0.2", "v0.0.2", false, true, false, installed), Plan::Report { update_available: false });
         assert_eq!(plan("0.0.2", "v0.0.2", false, false, false, installed), Plan::UpToDate);
         let install = Plan::Install {
             tag: "v0.0.2".into(),
-            dir: PathBuf::from("C:/Users/x/AppData/Local/codegraph/bin"),
+            dir: PathBuf::from("C:/Users/x/AppData/Local/codegraphV/bin"),
         };
         assert_eq!(plan("0.0.2", "v0.0.2", false, false, true, installed), install);
         assert_eq!(plan("0.0.1", "0.0.2", false, false, false, installed), install);
@@ -219,12 +219,12 @@ mod tests {
 
         let repo = tempfile::tempdir().unwrap();
         std::fs::write(repo.path().join("Cargo.toml"), "[workspace]").unwrap();
-        let built = repo.path().join("target").join("release").join("codegraph.exe");
+        let built = repo.path().join("target").join("release").join("codegraphV.exe");
         assert_eq!(
             plan("0.0.1", "v0.0.2", false, false, false, &built),
             Plan::Source { root: repo.path().to_path_buf() }
         );
-        let cross = repo.path().join("target").join("x86_64-pc-windows-msvc").join("release").join("codegraph.exe");
+        let cross = repo.path().join("target").join("x86_64-pc-windows-msvc").join("release").join("codegraphV.exe");
         assert_eq!(source_checkout(&cross).as_deref(), Some(repo.path()));
         assert_eq!(source_checkout(installed), None);
     }
