@@ -607,7 +607,7 @@ fn run() -> Result<()> {
                 codegraph_mcp::daemon::proxy(&shared.unwrap(), &std::env::current_exe()?)?;
             } else {
                 codegraph_mcp::session::serve(
-                    io::stdin().lock(),
+                    io::BufReader::new(io::stdin()),
                     io::stdout().lock(),
                     path,
                     !no_watch,

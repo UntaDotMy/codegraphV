@@ -148,15 +148,37 @@ fn response(id: Value, result: Value) -> Value {
 fn error(id: Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
-pub fn serve<R: BufRead, W: Write>(
+/// Serve newline-delimited requests from `reader`. Lines are read on their own thread, so a
+/// project opened for a `projectPath` is released on its own idle deadline while the client is
+/// quiet (#2087).
+pub fn serve<R: BufRead + Send + 'static, W: Write>(
     reader: R,
     mut writer: W,
     path: Option<String>,
     watch: bool,
 ) -> io::Result<()> {
     let mut session = Session::new(path, watch);
-    for line in reader.lines() {
-        let line = line?;
+    let (sender, lines) = std::sync::mpsc::channel::<io::Result<String>>();
+    std::thread::spawn(move || {
+        for line in reader.lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    loop {
+        let next = match session.handler.next_release_due() {
+            Some(due) => lines.recv_timeout(due.saturating_duration_since(std::time::Instant::now())),
+            None => lines.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+        };
+        let line = match next {
+            Ok(line) => line?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                session.handler.release_idle(std::time::Instant::now());
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         if line.trim().is_empty() {
             continue;
         }

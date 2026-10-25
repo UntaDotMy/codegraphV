@@ -283,7 +283,7 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
                 let method = control.as_ref().and_then(|v| v["method"].as_str());
                 let responses = if method == Some("daemon/status") {
                     vec![
-                        json!({"jsonrpc":"2.0","id":control.as_ref().unwrap()["id"],"result":{"pid":endpoint.pid,"projectPath":root,"version":endpoint.version,"clients":client_count,"projects":pool.projects.len()}}),
+                        json!({"jsonrpc":"2.0","id":control.as_ref().unwrap()["id"],"result":{"pid":endpoint.pid,"projectPath":root,"version":endpoint.version,"clients":client_count,"projects":pool.open_project_count()}}),
                     ]
                 } else if method == Some("daemon/stop") {
                     quitting = true;
@@ -291,9 +291,9 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
                         json!({"jsonrpc":"2.0","id":control.as_ref().unwrap()["id"],"result":{"stopped":true}}),
                     ]
                 } else {
-                    std::mem::swap(&mut pool.projects, &mut client.session.handler.projects);
+                    pool.swap_projects(&mut client.session.handler);
                     let responses = client.session.process(&line);
-                    std::mem::swap(&mut pool.projects, &mut client.session.handler.projects);
+                    pool.swap_projects(&mut client.session.handler);
                     responses
                 };
                 let mut failed = false;
@@ -311,6 +311,10 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        // A project opened for a `projectPath` goes on its own idle deadline (#2087).
+        if pool.next_release_due().is_some_and(|due| due <= Instant::now()) {
+            pool.release_idle(Instant::now());
         }
         if clients.is_empty() && idle.elapsed() >= idle_timeout {
             break;

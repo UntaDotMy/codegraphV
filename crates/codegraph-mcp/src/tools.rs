@@ -7,7 +7,9 @@ use codegraph_types::nodepath;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 pub const TOOLS_JSON: &str = include_str!("assets/tools.json");
 pub const INSTRUCTIONS: &str = include_str!("assets/server_instructions.md");
@@ -79,7 +81,29 @@ pub struct ToolHandler {
     pub default_path: Option<String>,
     pub watch: bool,
     pub(crate) projects: IndexMap<String, CodeGraph>,
+    /// When each open project last answered a call.
+    pub(crate) used_at: HashMap<String, Instant>,
+    /// How long a project other than the default one may go unused before it is released; `None`
+    /// never releases.
+    pub idle_timeout: Option<Duration>,
     pub(crate) shown: std::collections::HashMap<String, std::collections::HashSet<u32>>,
+}
+
+/// How long an explicit-`projectPath` project may go unused before the handler releases it
+/// (#2087). Releasing frees its SQLite handle, its watcher and the writer lock it may hold, which
+/// otherwise stay held for the whole session and lock the project's own daemon and `codegraph
+/// index` out. The next call reopens it and catches up. `CODEGRAPH_PROJECT_IDLE_TIMEOUT_MS`
+/// overrides the 10-minute default; `0` never releases.
+pub fn project_idle_timeout() -> Option<Duration> {
+    const DEFAULT_MS: u64 = 600_000;
+    let ms = match std::env::var("CODEGRAPH_PROJECT_IDLE_TIMEOUT_MS") {
+        Ok(raw) if !raw.is_empty() => match raw.trim().parse::<f64>() {
+            Ok(n) if n.is_finite() && n >= 0.0 => n.floor() as u64,
+            _ => DEFAULT_MS,
+        },
+        _ => DEFAULT_MS,
+    };
+    (ms > 0).then(|| Duration::from_millis(ms))
 }
 impl ToolHandler {
     pub fn new(default_path: Option<String>, watch: bool) -> Self {
@@ -87,8 +111,61 @@ impl ToolHandler {
             default_path,
             watch,
             projects: IndexMap::new(),
+            used_at: HashMap::new(),
+            idle_timeout: project_idle_timeout(),
             shown: Default::default(),
         }
+    }
+
+    /// The open projects' table, swapped with another handler's (the daemon lends its pool to
+    /// each client's session for one request).
+    pub fn swap_projects(&mut self, other: &mut ToolHandler) {
+        std::mem::swap(&mut self.projects, &mut other.projects);
+        std::mem::swap(&mut self.used_at, &mut other.used_at);
+    }
+
+    /// How many projects are open.
+    pub fn open_project_count(&self) -> usize {
+        self.projects.len()
+    }
+
+    /// The default project's root as the project table keys it, if there is one.
+    fn default_key(&self) -> Option<String> {
+        let root = self.default_root()?;
+        Some(codegraph_types::paths::real_path(Path::new(&root)).map(|p| p.to_string_lossy().into_owned()).unwrap_or(root))
+    }
+
+    /// When the next project other than the default one is due for release.
+    pub fn next_release_due(&self) -> Option<Instant> {
+        let timeout = self.idle_timeout?;
+        let default = self.default_key();
+        self.projects
+            .keys()
+            .filter(|root| default.as_deref() != Some(root.as_str()))
+            .filter_map(|root| self.used_at.get(root))
+            .min()
+            .map(|used| *used + timeout)
+    }
+
+    /// Close every project other than the default one whose idle deadline has passed at `now`,
+    /// each on its own deadline. Returns the roots released.
+    pub fn release_idle(&mut self, now: Instant) -> Vec<String> {
+        let Some(timeout) = self.idle_timeout else { return Vec::new() };
+        let default = self.default_key();
+        let due: Vec<String> = self
+            .projects
+            .keys()
+            .filter(|root| default.as_deref() != Some(root.as_str()))
+            .filter(|root| self.used_at.get(*root).is_some_and(|used| *used + timeout <= now))
+            .cloned()
+            .collect();
+        for root in &due {
+            if let Some(cg) = self.projects.shift_remove(root) {
+                cg.close();
+            }
+            self.used_at.remove(root);
+        }
+        due
     }
     pub fn default_root(&self) -> Option<String> {
         self.default_path
@@ -141,7 +218,7 @@ impl ToolHandler {
             match CodeGraph::open(&root,OpenOptions::default()){
                 Ok(mut cg)=>{
                     if self.watch{let _=cg.watch(WatchOptions::default());}
-                    if self.projects.len()>=8{if let Some((_,old))=self.projects.shift_remove_index(0){old.close();}}
+                    if self.projects.len()>=8{if let Some((old_root,old))=self.projects.shift_remove_index(0){self.used_at.remove(&old_root);old.close();}}
                     self.projects.insert(root.clone(),cg);
                 },Err(error)=>return ToolResult::error(format!("Could not open CodeGraph: {error}. Retry once; if it persists, report the failure."))
             }
@@ -157,6 +234,7 @@ impl ToolHandler {
         };
         let pending = cg.get_pending_files();
         let degraded = cg.get_watcher_degraded_reason();
+        self.used_at.insert(root.clone(), Instant::now());
         self.projects.insert(root, cg);
         if result.is_error {
             return result;
