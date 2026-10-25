@@ -196,3 +196,39 @@ fn claude_prompt_hook_is_added_migrated_idempotent_and_removed_without_touching_
     assert!(!left.contains("prompt-hook"), "{left}");
     assert!(!left.contains("UserPromptSubmit"), "{left}");
 }
+
+/// BUG-75: the npm build wrote `codegraph.cmd prompt-hook` on Windows; the Rust build has no
+/// `.cmd` shim, so after the switch that hook fails on every prompt. A refresh keeps the user's
+/// choice (it never turns the hook on) but rewrites an installer-written spelling.
+#[test]
+fn claude_refresh_rewrites_the_npm_hook_spelling_and_never_adds_one() {
+    let commands = |p: &std::path::Path| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
+        v["hooks"]["UserPromptSubmit"].as_array().into_iter().flatten()
+            .flat_map(|g| g["hooks"].as_array().cloned().unwrap_or_default())
+            .map(|h| h["command"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let refresh = InstallOptions { prompt_hook: None, ..InstallOptions::default() };
+    let dir = tempfile::tempdir().unwrap();
+    let first_env = env(&dir);
+    let settings = first_env.home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"npx @colbymchenry/codegraph prompt-hook"}]},{"hooks":[{"type":"command","command":"codegraph.cmd prompt-hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"stop-hook"}]}]}}"#).unwrap();
+    first_env.apply("claude", Location::Global, refresh, false).unwrap();
+    assert_eq!(commands(&settings), vec!["npx @colbymchenry/codegraph prompt-hook", "codegraph prompt-hook"]);
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "stop-hook");
+    let first = fs::read_to_string(&settings).unwrap();
+    first_env.apply("claude", Location::Global, refresh, false).unwrap();
+    assert_eq!(fs::read_to_string(&settings).unwrap(), first, "idempotent");
+
+    // No hook before the refresh: none after it.
+    let dir2 = tempfile::tempdir().unwrap();
+    let env2 = env(&dir2);
+    let settings2 = env2.home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings2.parent().unwrap()).unwrap();
+    fs::write(&settings2, r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"stop-hook"}]}]}}"#).unwrap();
+    env2.apply("claude", Location::Global, refresh, false).unwrap();
+    assert!(commands(&settings2).is_empty());
+}

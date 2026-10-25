@@ -379,10 +379,14 @@ impl Environment {
                 }
             }
             let hook_choice = if remove { Some(false) } else { options.prompt_hook };
-            if let (Some(on), Some(text)) = (hook_choice, after.clone()) {
+            if let Some(text) = after.clone() {
                 let data = parse(&text)?;
                 let current = data.get("hooks");
-                let next = prompt_hook_hooks(current, on);
+                let next = match hook_choice {
+                    Some(on) => prompt_hook_hooks(current, on),
+                    // A refresh keeps the choice but repairs a spelling that no longer runs.
+                    None => current.map(migrate_prompt_hook_spelling),
+                };
                 if next.as_ref() != current {
                     after = match next {
                         Some(hooks) => Some(edit::json(&text, &["hooks"], Some(&hooks))?),
@@ -489,22 +493,27 @@ fn is_prompt_hook_command(command: &Value) -> bool {
 
 /// `settings.hooks` with the prompt hook written (`on`) or removed; Ok(None) = drop `hooks`.
 /// Unchanged input comes back equal, so the caller writes nothing.
+/// `hooks` with an installer-written spelling of ours (the npm build's `codegraph.cmd …`)
+/// rewritten to this one in place; an `npx …` or hand-edited variant is the user's own and stays.
+fn migrate_prompt_hook_spelling(hooks: &Value) -> Value {
+    let mut hooks = hooks.clone();
+    for group in hooks["UserPromptSubmit"].as_array_mut().into_iter().flatten() {
+        for h in group["hooks"].as_array_mut().into_iter().flatten() {
+            if h["command"].as_str().is_some_and(|c| PROMPT_HOOK_FORMS.contains(&c) && c != PROMPT_HOOK_COMMAND) {
+                h["command"] = json!(PROMPT_HOOK_COMMAND);
+            }
+        }
+    }
+    hooks
+}
+
 fn prompt_hook_hooks(hooks: Option<&Value>, on: bool) -> Option<Value> {
     if on {
-        let mut hooks = hooks.filter(|h| h.is_object()).cloned().unwrap_or_else(|| json!({}));
+        let mut hooks = hooks.filter(|h| h.is_object()).map(migrate_prompt_hook_spelling).unwrap_or_else(|| json!({}));
         if !hooks["UserPromptSubmit"].is_array() {
             hooks["UserPromptSubmit"] = json!([]);
         }
         let groups = hooks["UserPromptSubmit"].as_array_mut().unwrap();
-        // Rewrite an installer-written spelling to this one in place; an `npx …` or hand-edited
-        // variant is the user's own and stays.
-        for group in groups.iter_mut() {
-            for h in group["hooks"].as_array_mut().into_iter().flatten() {
-                if h["command"].as_str().is_some_and(|c| PROMPT_HOOK_FORMS.contains(&c) && c != PROMPT_HOOK_COMMAND) {
-                    h["command"] = json!(PROMPT_HOOK_COMMAND);
-                }
-            }
-        }
         let already = groups
             .iter()
             .any(|g| g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_prompt_hook_command(&h["command"]))));
