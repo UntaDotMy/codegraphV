@@ -168,7 +168,8 @@ fn read_git_exclude_extra_patterns(root_dir: &Path) -> String {
 }
 
 /// Directories `git ls-files -o -i --exclude-standard --directory` reports as
-/// ignored-untracked, in trailing-slash form (#1728).
+/// ignored-untracked, relative to `root_dir` and trailing-slashed (#1728). Each
+/// one is a path, not a pattern: see [`ScopeIgnore`].
 fn list_git_ignored_directories(root_dir: &Path) -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let root = root_dir.to_string_lossy();
@@ -176,7 +177,13 @@ fn list_git_ignored_directories(root_dir: &Path) -> Vec<String> {
     let Ok(out) = run_git(&cwd, &args, Duration::from_secs(60), MAX_BUFFER) else {
         return Vec::new();
     };
-    out.split('\0').filter(|e| !e.is_empty()).map(|e| if e.ends_with('/') { e.to_string() } else { format!("{e}/") }).collect()
+    // `./` is git's "this whole directory" for a root that is itself ignored (#936); the root's
+    // own files stay in scope.
+    out.split('\0')
+        .filter(|e| !is_whole_cwd_entry(e))
+        .map(normalize_path)
+        .map(|e| if e.ends_with('/') { e } else { format!("{e}/") })
+        .collect()
 }
 
 /// A matcher seeded with the built-in defaults, merged with the project's root
@@ -520,6 +527,11 @@ pub struct ScopeIgnore {
     exclude: Option<Ignore>,
     include: Option<Ignore>,
     include_roots: Vec<String>,
+    /// The directories `git ls-files --exclude-standard` reports as ignored: root-relative,
+    /// trailing-slashed paths, each matched as a literal path prefix, never as a gitignore
+    /// pattern. As a pattern, `src/` matched every `src/` below the root too, hiding a whole Maven
+    /// monorepo's sources (#2849), and a folder named `[draft]` read as a glob.
+    git_ignored_dirs: HashSet<String>,
 }
 
 impl ScopeIgnore {
@@ -531,7 +543,18 @@ impl ScopeIgnore {
         include_roots: Vec<String>,
     ) -> ScopeIgnore {
         embedded.sort_by(|a, b| utf16_len(&b.0).cmp(&utf16_len(&a.0)));
-        ScopeIgnore { root_matcher, embedded, defaults: defaults_only_ignore(), exclude, include, include_roots }
+        ScopeIgnore { root_matcher, embedded, defaults: defaults_only_ignore(), exclude, include, include_roots, git_ignored_dirs: HashSet::new() }
+    }
+
+    /// The same matcher with the directories git reports as ignored (see `git_ignored_dirs`).
+    pub fn with_git_ignored_dirs(mut self, dirs: impl IntoIterator<Item = String>) -> ScopeIgnore {
+        self.git_ignored_dirs = dirs.into_iter().collect();
+        self
+    }
+
+    /// True when `rel` is one of `git_ignored_dirs` or lies inside one.
+    fn in_git_ignored_dir(&self, rel: &str) -> bool {
+        !self.git_ignored_dirs.is_empty() && rel.match_indices('/').any(|(slash, _)| self.git_ignored_dirs.contains(&rel[..=slash]))
     }
 
     pub fn ignores(&self, rel: &str) -> Result<bool, IgnoreError> {
@@ -568,7 +591,7 @@ impl ScopeIgnore {
         if rel.ends_with('/') && self.embedded.iter().any(|(root, _)| root.starts_with(rel)) {
             return Ok(false);
         }
-        self.root_matcher.ignores(rel)
+        Ok(self.root_matcher.ignores(rel)? || self.in_git_ignored_dir(rel))
     }
 }
 
@@ -581,16 +604,29 @@ pub fn build_scope_ignore(root_dir: &Path, embedded_roots: Option<Vec<String>>) 
         None => discover_embedded_repo_roots(root_dir)?,
     };
     let include = load_include_matcher(root_dir);
-    // Root matcher already has defaults + root `.gitignore` + info/exclude +
-    // core.excludesFile; seed ignored-untracked directories from git so nested
-    // `.gitignore` effects prune the watcher identically to the indexer (#1728).
-    let mut root_matcher = build_default_ignore(root_dir);
-    for dir in list_git_ignored_directories(root_dir) {
-        root_matcher.add(&dir);
-    }
+    // The root matcher has defaults + root `.gitignore` + info/exclude + core.excludesFile. The
+    // ignored-untracked directories git reports join them, so nested `.gitignore` effects prune
+    // the watcher identically to the indexer (#1728) — as literal paths, not patterns (#2849).
+    let root_matcher = build_default_ignore(root_dir);
     let embedded = roots.iter().map(|root| (root.clone(), build_default_ignore(&root_dir.join(root)))).collect();
     let include_roots = if include.is_some() { include_static_roots(&load_include_patterns(root_dir)) } else { Vec::new() };
-    Ok(ScopeIgnore::new(root_matcher, embedded, load_exclude_matcher(root_dir), include, include_roots))
+    Ok(ScopeIgnore::new(root_matcher, embedded, load_exclude_matcher(root_dir), include, include_roots)
+        .with_git_ignored_dirs(list_git_ignored_directories(root_dir)))
+}
+
+/// The `codegraph.json` `includeIgnored` pattern that opts in exactly the repo at `repo_dir`, a
+/// root-relative, trailing-slashed path from [`find_unindexed_ignored_repos`]. Patterns are
+/// gitignore syntax, so the path is anchored to the root (a bare `child/` also matches every
+/// `child/` below it) and its `*` and `[` are escaped (#2849); a `?` stays a wildcard.
+pub fn include_ignored_pattern_for(repo_dir: &str) -> String {
+    let mut out = String::from("/");
+    for c in repo_dir.chars() {
+        if c == '*' || c == '[' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Whether an embedded repo found as a tracked gitlink (mode 160000, #1031/#1033)
@@ -1296,6 +1332,24 @@ pub fn preload_languages_for_files(files: &[String], overrides: Option<&HashMap<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_ignored_dirs_match_as_literal_paths() {
+        let scope = ScopeIgnore::new(Ignore::new(), Vec::new(), None, None, Vec::new())
+            .with_git_ignored_dirs(["src/".to_string(), "[draft]/".to_string()]);
+        assert!(scope.ignores("src/").unwrap());
+        assert!(scope.ignores("src/Main.java").unwrap());
+        // A pattern `src/` would also hide every nested `src/` (#2849).
+        assert!(!scope.ignores("module/src/Main.java").unwrap());
+        assert!(scope.ignores("[draft]/note.md").unwrap());
+        assert!(!scope.ignores("d/note.md").unwrap());
+    }
+
+    #[test]
+    fn include_ignored_pattern_is_anchored_and_escaped() {
+        assert_eq!(include_ignored_pattern_for("child/"), "/child/");
+        assert_eq!(include_ignored_pattern_for("a[b]/*x/"), r"/a\[b]/\*x/");
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cg-scan-{tag}-{}", std::process::id()));

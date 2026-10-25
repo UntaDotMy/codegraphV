@@ -13,6 +13,6 @@ pub mod ignore;
 
 pub use discovery::{
     build_default_ignore, build_scope_ignore, can_trust_git_fast_path, classify_git_dir, defaults_only_ignore, discover_embedded_repo_roots,
-    find_nested_git_repos, find_unindexed_ignored_repos, get_git_changed_files, get_git_head_sha, get_git_visible_files, include_static_roots,
+    find_nested_git_repos, find_unindexed_ignored_repos, include_ignored_pattern_for, get_git_changed_files, get_git_head_sha, get_git_visible_files, include_static_roots,
     preload_languages_for_files, read_gitignore_patterns, scan_directory, GitChanges, GitDirKind, ScanSkipStats, ScopeIgnore, INDEXED_AT_COMMIT_KEY,
 };
