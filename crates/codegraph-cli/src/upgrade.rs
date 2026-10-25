@@ -68,11 +68,20 @@ fn reported_version(program: &Path) -> Option<String> {
     Some(normalize_version(version))
 }
 
+/// `powershell.exe -NoProfile` for codegraph's own scripts. It gets no PSModulePath, so it builds
+/// its own: one inherited from PowerShell 7 makes 5.1 load 7's modules and lose built-in cmdlets
+/// such as Get-FileHash and Start-Sleep.
+pub fn windows_powershell() -> Command {
+    let mut c = Command::new("powershell.exe");
+    c.arg("-NoProfile").env_remove("PSModulePath");
+    c
+}
+
 fn run_installer(tag: &str, dir: &Path) -> std::io::Result<bool> {
     let url = installer_url(cfg!(windows));
     let mut command = if cfg!(windows) {
-        let mut c = Command::new("powershell.exe");
-        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &format!("irm '{url}' | iex")]);
+        let mut c = windows_powershell();
+        c.args(["-ExecutionPolicy", "Bypass", "-Command", &format!("irm '{url}' | iex")]);
         c
     } else {
         let mut c = Command::new("sh");
@@ -163,6 +172,33 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-73: started from PowerShell 7, the inherited PSModulePath makes Windows PowerShell 5.1
+    /// load 7's modules and lose Get-FileHash / Start-Sleep, so the installer script fails.
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_gets_its_own_module_path() {
+        // The module path a real PowerShell 7 hands its children (only real 7 module folders
+        // trigger it). No pwsh on the machine: nothing to reproduce.
+        let Ok(ps7) = Command::new("pwsh").args(["-NoProfile", "-Command", "$env:PSModulePath"]).output() else {
+            return;
+        };
+        let ps7 = String::from_utf8_lossy(&ps7.stdout).trim().to_string();
+        assert!(ps7.to_lowercase().contains("powershell"), "{ps7}");
+        // As when codegraph itself was started from PowerShell 7 (no other test here reads it).
+        std::env::set_var("PSModulePath", ps7);
+        let out = windows_powershell()
+            .args(["-Command", "(Get-Command Get-FileHash).Source; (Get-Command Start-Sleep).Source"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            text.matches("Microsoft.PowerShell.Utility").count(),
+            2,
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     #[test]
     fn plan_check_up_to_date_force_pin_and_source() {

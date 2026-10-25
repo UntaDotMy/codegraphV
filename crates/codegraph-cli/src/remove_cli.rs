@@ -81,8 +81,8 @@ pub fn path_without(value: &str, dir: &str) -> Option<String> {
 #[cfg(windows)]
 fn powershell(script: &str) -> Option<String> {
     use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+    let out = crate::upgrade::windows_powershell()
+        .args(["-NonInteractive", "-Command", script])
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output()
         .ok()?;
@@ -128,8 +128,8 @@ fn delete_running(exe: &Path, dedicated_dir: Option<&Path>) -> std::io::Result<(
             script.push_str(&format!("; try {{ [IO.Directory]::Delete({}) }} catch {{}}", ps_quote(&d.to_string_lossy())));
         }
     }
-    std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    crate::upgrade::windows_powershell()
+        .args(["-NonInteractive", "-Command", &script])
         // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP: hidden, and a Ctrl+C in this console does not
         // reach it. Not DETACHED_PROCESS — PowerShell without a console never starts.
         .creation_flags(0x0800_0000 | 0x0000_0200)
