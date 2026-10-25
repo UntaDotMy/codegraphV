@@ -228,7 +228,7 @@ fn read_declared_supertypes(cls: &Node, ctx: &Ctx) -> Vec<String> {
     };
     let cap = |pattern: &Re, text: &str| pattern.captures(text).and_then(|c| c.text(1).map(|s| s.to_string()));
     match cls.language {
-        Language::Pascal => names(cap(re!(r"=\s*class\s*\(([^)]*)\)", "i"), &head)),
+        Language::Pascal => names(cap(re!(r"=\s*class\s*(?:sealed|abstract)?\s*\(([^)]*)\)", "i"), &head)),
         Language::Python => {
             let inner = cap(re!(r"\bclass\s+\w+\s*\(([^)]*)\)"), &head)
                 .map(|s| re!(r"\w+\s*=\s*[\w.]+", "g").replace_all_str(&s, ""))

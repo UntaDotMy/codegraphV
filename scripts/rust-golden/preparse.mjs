@@ -67,7 +67,7 @@ for (const abs of all) {
   const rel = path.basename(abs);
   const language = detectLanguage(rel, source);
   if (!EXTRACTORS[language]?.preParse) continue;
-  if (!['c', 'cpp', 'csharp', 'kotlin', 'swift', 'typescript', 'tsx'].includes(language)) continue;
+  if (!['c', 'cpp', 'csharp', 'kotlin', 'swift', 'typescript', 'tsx', 'pascal'].includes(language)) continue;
   if (langFilter && !langFilter.has(language)) continue;
   files.push({ abs, rel, language, source });
 }

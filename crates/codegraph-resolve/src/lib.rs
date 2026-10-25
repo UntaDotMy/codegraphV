@@ -38,5 +38,6 @@ pub mod callback_synthesizer;
 pub mod module_importers;
 pub mod resolver;
 pub mod vbnet_receivers;
+pub mod pascal_scope;
 
 pub use resolver::ReferenceResolver;

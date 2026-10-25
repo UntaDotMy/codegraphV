@@ -13,6 +13,10 @@ use crate::callback_synthesizer::synthesize_callback_edges;
 use crate::cpp_constructor::{is_cpp_constructor_ref, match_cpp_constructor};
 use crate::cpp_macro_visibility::is_visible_cpp_macro;
 use crate::cpp_supertypes::{is_cpp_supertype_ref, match_cpp_supertype};
+use crate::pascal_scope::{
+    gate_pascal_call, is_pascal_parenless_ref, is_pascal_system_call, match_pascal_nested_call, match_pascal_parenless_ref,
+    match_pascal_system_call,
+};
 use crate::ctx::{is_supertype_bearing_kind, Ctx, RESOLUTION_READ_EDGE_KINDS};
 use crate::dart_local_scope::gate_dart_local;
 use crate::frameworks::{detect_frameworks, get_resolving_frameworks, FrameworkRef};
@@ -114,6 +118,9 @@ name_set!(PASCAL_BUILT_INS, [
     "Exception", "EAbort", "EConvertError", "EAccessViolation",
     "IInterface", "IUnknown",
 ]);
+
+/// PASCAL_BUILT_INS lowercased: Pascal names ignore case.
+static PASCAL_BUILT_INS_LOWER: LazyLock<HashSet<String>> = LazyLock::new(|| PASCAL_BUILT_INS.iter().map(|n| n.to_lowercase()).collect());
 
 name_set!(C_BUILT_INS, [
     "printf", "fprintf", "sprintf", "snprintf", "scanf", "fscanf", "sscanf",
@@ -665,6 +672,9 @@ impl ReferenceResolver {
         if !r.is_kind(EdgeKind::Calls) {
             return Some(resolved);
         }
+        // A Pascal call to data runs only a routine the data holds, in scope, and one to a
+        // routine nested in another comes only from inside that one (gate_pascal_call).
+        let resolved = if r.language == Language::Pascal { gate_pascal_call(resolved, r, ctx)? } else { resolved };
         let Some(target) = self.node_by_id(&resolved.target_node_id) else { return Some(resolved) };
         let member_name = r.reference_name.rfind('.').map(|dot| &r.reference_name[dot + 1..]);
         let Some(forwarded) = resolve_alias_binding(&target, member_name, ctx) else { return Some(resolved) };
@@ -685,6 +695,20 @@ impl ReferenceResolver {
         }
         if is_cpp_supertype_ref(r) {
             return match_cpp_supertype(r, ctx);
+        }
+        // A Pascal name written without parentheses (#2514) links only to a routine its scope
+        // reaches, or through a receiver to a method of the receiver's declared type.
+        if is_pascal_parenless_ref(r) {
+            return match_pascal_parenless_ref(r, ctx);
+        }
+        // So does a Pascal call to a name the System unit gives meaning to: only a declaration in
+        // the call's scope shadows it.
+        if is_pascal_system_call(r, ctx) {
+            return match_pascal_system_call(r, ctx);
+        }
+        // A bare Pascal call to a routine nested where it is made is that one.
+        if let Some(nested) = match_pascal_nested_call(r, ctx) {
+            return Some(nested);
         }
         if is_dart_member_read(r) {
             return match_dart_member_read(r, ctx);
@@ -1565,10 +1589,12 @@ impl ReferenceResolver {
             }
         }
         if r.language == Language::Pascal {
-            if PASCAL_UNIT_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            // Whatever their case: Pascal names ignore it (`length(S)`, `system.TypeInfo(T)`).
+            let lower = crate::ctx::js_lower(name);
+            if PASCAL_UNIT_PREFIXES.iter().any(|p| name.starts_with(p)) || lower.starts_with("system.") {
                 return true;
             }
-            if PASCAL_BUILT_INS.contains(name) {
+            if PASCAL_BUILT_INS_LOWER.contains(lower.as_str()) {
                 return true;
             }
         }

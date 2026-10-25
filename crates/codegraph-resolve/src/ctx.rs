@@ -631,6 +631,11 @@ impl Ctx {
         self.keep_visible(self.mockless_nodes_by_lower_name(lower_name))
     }
 
+    /// The names of every node of the given kinds in one language (`getNodeNamesOfKinds`).
+    pub fn get_node_names_of_kinds(&self, language: Language, kinds: &[NodeKind]) -> Vec<String> {
+        q("getNodeNamesOfKinds", self.store.get_node_names_of_kinds(language, kinds))
+    }
+
     fn mockless_nodes_by_lower_name(&self, lower_name: &str) -> NodeList {
         if let Some(mocks) = self.active_mocks() {
             if mocks.lower_names.contains(lower_name) {

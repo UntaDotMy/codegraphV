@@ -1374,6 +1374,19 @@ impl Store {
         self.query_nodes(&format!("SELECT {NODE_COLS} FROM nodes WHERE lower(name) = lower(?)"), &[&name])
     }
 
+    /// The name of every node of the given kinds in one language (duplicates kept), as
+    /// `getNodeNamesOfKinds` reads them: `+language` lets the kind index narrow further.
+    pub fn get_node_names_of_kinds(&self, language: Language, kinds: &[NodeKind]) -> Result<Vec<String>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!("SELECT name FROM nodes WHERE kind IN ({}) AND +language = ?", vec!["?"; kinds.len()].join(", "));
+        let params: Vec<String> = kinds.iter().map(|k| k.as_str().to_string()).chain([language.as_str().to_string()]).collect();
+        let mut stmt = self.conn().prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Does the index hold any file of this language? One seek on idx_files_language.
     pub fn has_files_of_language(&self, language: &str) -> Result<bool> {
         self.exists("SELECT 1 FROM files WHERE language = ? LIMIT 1", &[&language])

@@ -64,8 +64,10 @@ mod erlang;
 mod terraform;
 mod cobol;
 mod vbnet;
+mod pascal;
 
 pub use decode::decode_tables;
+pub use pascal::is_system_name as is_pascal_system_name;
 pub use langs::{grammar_for, LANGUAGES as NATIVE_LANGUAGES};
 pub use stack::with_error_tolerance;
 
@@ -84,6 +86,12 @@ pub fn has_native_walker(language: Language) -> bool {
 /// contains parse errors, or when the file nests deeper than the walker's stack
 /// budget allows.
 pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result<ExtractionResult, String> {
+    extract_file_with(file_path, source, source, language)
+}
+
+/// [`extract_file`] with the file as written beside its pre-parsed `source`: Pascal
+/// signatures read the source as written (`signatureAsWritten`).
+fn extract_file_with(file_path: &str, source: &str, as_written: &str, language: Language) -> Result<ExtractionResult, String> {
     let lang = language.as_str();
     let started = std::time::Instant::now();
     let out = stack::run_guarded(|| match lang {
@@ -107,6 +115,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result
         "terraform" => terraform::extract(file_path, source),
         "cobol" => cobol::extract(file_path, source),
         "vbnet" => vbnet::extract(file_path, source),
+        "pascal" => pascal::extract(file_path, source, as_written),
         "typescript" | "tsx" | "javascript" | "jsx" | "arkts" => tsjs::extract(file_path, source, lang),
         other => Err(format!("no native walker for language {other}")),
     })?;
@@ -152,7 +161,7 @@ pub fn extract_source(file_path: &str, source: &str, language: Language) -> Resu
         _ => {}
     }
     let pre = pre_parse(file_path, source, language);
-    let mut result = extract_file(file_path, &pre, language)?;
+    let mut result = extract_file_with(file_path, &pre, source, language)?;
     if matches!(language, Language::TypeScript | Language::Tsx | Language::ArkTs) && pre != source && preparse::blanks_export_type_star(source) {
         restore_re_export_signatures(&mut result, source);
     }
