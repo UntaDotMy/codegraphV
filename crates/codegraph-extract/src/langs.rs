@@ -51,10 +51,10 @@ extern "C" {
 
 /// Languages this kernel binary can extract (reported by contractInfo;
 /// TS-side routing policy decides what actually routes).
-pub const LANGUAGES: [&str; 27] = [
+pub const LANGUAGES: [&str; 28] = [
     "typescript", "tsx", "javascript", "jsx", "java", "python", "go", "c", "cpp", "rust",
     "csharp", "ruby", "php", "swift", "kotlin", "r", "lua", "luau", "scala", "dart",
-    "nix", "solidity", "erlang", "terraform", "cobol", "arkts", "objc",
+    "nix", "solidity", "erlang", "terraform", "cobol", "arkts", "objc", "vbnet",
 ];
 
 pub fn grammar_for(language: &str) -> Option<Language> {

@@ -63,6 +63,7 @@ mod wasm_grammars;
 mod erlang;
 mod terraform;
 mod cobol;
+mod vbnet;
 
 pub use decode::decode_tables;
 pub use langs::{grammar_for, LANGUAGES as NATIVE_LANGUAGES};
@@ -105,6 +106,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result
         "erlang" => erlang::extract(file_path, source),
         "terraform" => terraform::extract(file_path, source),
         "cobol" => cobol::extract(file_path, source),
+        "vbnet" => vbnet::extract(file_path, source),
         "typescript" | "tsx" | "javascript" | "jsx" | "arkts" => tsjs::extract(file_path, source, lang),
         other => Err(format!("no native walker for language {other}")),
     })?;
