@@ -1546,7 +1546,9 @@ impl ReferenceResolver {
             }
         }
         if r.language == Language::Go {
-            if let Some(dot) = name.find('.').filter(|&i| i > 0) {
+            // What the file imports decides before the name does: a project package may be
+            // called `errors`, `log` or `types` too.
+            if let Some(dot) = name.find('.').filter(|&i| i > 0 && !is_go_project_package(r, &name[..i], ctx)) {
                 let pkg = &name[..dot];
                 if GO_STDLIB_PACKAGES.contains(pkg) && !is_go_asserted_local(pkg, r, ctx) && !is_go_project_local_call(r, ctx) {
                     return true;
@@ -2019,4 +2021,12 @@ impl Known<'_> {
     fn contains(&self, name: &str) -> bool {
         self.all.contains(name) && !self.only.is_some_and(|o| o.contains(name))
     }
+}
+
+/// Whether the Go file imports `qualifier` — by its last path segment or an alias — from a package
+/// of one of the project's own modules.
+fn is_go_project_package(r: &UnresolvedRef, qualifier: &str, ctx: &Ctx) -> bool {
+    ctx.get_import_mappings(&r.file_path, r.language)
+        .iter()
+        .any(|imp| imp.local_name == qualifier && ctx.get_go_package_dir(&imp.source, Some(&r.file_path)).is_some())
 }
