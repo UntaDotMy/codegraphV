@@ -60,6 +60,10 @@ fn uninstall_removes_the_installed_binary_unless_keep_cli() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(kept.exists(), "--keep-cli must keep the binary");
 
+    // BUG-79: copies an upgrade renamed aside are removed with it (Windows names; harmless elsewhere).
+    let dir = kept.parent().unwrap();
+    std::fs::write(dir.join(format!("{}.old", exe_name())), "stale").unwrap();
+    std::fs::write(dir.join(format!("{}.old-123", exe_name())), "stale").unwrap();
     let out = uninstall(&kept, &home, &[]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);

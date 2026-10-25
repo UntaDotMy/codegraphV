@@ -162,6 +162,8 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
                     println!("Could not refresh agent configuration; run `codegraph install --refresh`.");
                 }
             }
+            // The installer renamed the binary this process runs from aside; drop it once we exit.
+            crate::remove_cli::delete_now_or_after_exit(&crate::remove_cli::stale_copies(&dir), &[]);
             println!("Upgraded to {tag}.");
             println!("{}", reindex_advisory());
             0

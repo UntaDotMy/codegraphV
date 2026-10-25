@@ -111,22 +111,55 @@ fn remove_from_user_path(dir: &Path) -> bool {
     }
 }
 
-/// Delete the running binary after this process exits (Windows): rename it aside now, then a
-/// hidden helper waits for this PID and removes the file, and the dedicated folder if empty.
-#[cfg(windows)]
-fn delete_running(exe: &Path, dedicated_dir: Option<&Path>) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
-    let aside = exe.with_file_name(format!("{}.old-{}", exe_name(), std::process::id()));
-    std::fs::rename(exe, &aside)?;
-    let mut script = format!(
-        "Wait-Process -Id {} -ErrorAction SilentlyContinue; for ($i = 0; $i -lt 50 -and (Test-Path -LiteralPath {a}); $i++) {{ Remove-Item -LiteralPath {a} -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 200 }}",
-        std::process::id(),
-        a = ps_quote(&aside.to_string_lossy())
-    );
-    if let Some(dir) = dedicated_dir {
-        for d in [dir, dir.parent().unwrap_or(dir)] {
-            script.push_str(&format!("; try {{ [IO.Directory]::Delete({}) }} catch {{}}", ps_quote(&d.to_string_lossy())));
+/// Copies an upgrade or uninstall renamed aside next to an installed binary
+/// (`codegraph.exe.old`, `codegraph.exe.old-<pid>`): stale once their process exits.
+pub fn stale_copies(dir: &Path) -> Vec<PathBuf> {
+    let prefix = format!("{}.old", exe_name());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix) && e.path().is_file())
+        .map(|e| e.path())
+        .collect();
+    found.sort();
+    found
+}
+
+/// Delete each of `paths` now, or (Windows, a file still in use) once this process has exited.
+/// `dirs` are removed afterwards when empty. Returns false when a deletion could not even be
+/// scheduled.
+pub fn delete_now_or_after_exit(paths: &[PathBuf], dirs: &[PathBuf]) -> bool {
+    let locked: Vec<PathBuf> = paths.iter().filter(|p| std::fs::remove_file(p).is_err() && p.exists()).cloned().collect();
+    if locked.is_empty() {
+        for d in dirs {
+            let _ = std::fs::remove_dir(d);
         }
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        delete_after_exit(&locked, dirs).is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// A hidden helper waits for this PID, removes `paths`, then the `dirs` left empty.
+#[cfg(windows)]
+fn delete_after_exit(paths: &[PathBuf], dirs: &[PathBuf]) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let mut script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue", std::process::id());
+    for path in paths {
+        script.push_str(&format!(
+            "; for ($i = 0; $i -lt 50 -and (Test-Path -LiteralPath {a}); $i++) {{ Remove-Item -LiteralPath {a} -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 200 }}",
+            a = ps_quote(&path.to_string_lossy())
+        ));
+    }
+    for d in dirs {
+        script.push_str(&format!("; try {{ [IO.Directory]::Delete({}) }} catch {{}}", ps_quote(&d.to_string_lossy())));
     }
     crate::upgrade::windows_powershell()
         .args(["-NonInteractive", "-Command", &script])
@@ -148,15 +181,15 @@ pub fn execute(plan: &Plan, exe: &Path, env: &dyn Fn(&str) -> Option<String>, ho
         let dir = binary.parent().unwrap_or(Path::new("")).to_path_buf();
         let is_dedicated = cfg!(windows) && same_file(&dir, &dedicated);
         let running = same_file(binary, exe);
-        #[cfg(windows)]
-        let removed = if running {
-            delete_running(binary, is_dedicated.then_some(dir.as_path())).is_ok()
+        // Copies earlier upgrades renamed aside go too, so the folder is left empty.
+        let mut stale = stale_copies(&dir);
+        // Windows cannot delete a running exe but can rename it; it is deleted after we exit.
+        let removed = if cfg!(windows) && running {
+            let aside = binary.with_file_name(format!("{}.old-{}", exe_name(), std::process::id()));
+            let moved = std::fs::rename(binary, &aside).is_ok();
+            stale.push(aside);
+            moved
         } else {
-            std::fs::remove_file(binary).is_ok()
-        };
-        #[cfg(not(windows))]
-        let removed = {
-            let _ = running;
             std::fs::remove_file(binary).is_ok()
         };
         if removed {
@@ -164,9 +197,10 @@ pub fn execute(plan: &Plan, exe: &Path, env: &dyn Fn(&str) -> Option<String>, ho
             if remove_from_user_path(&dir) {
                 println!("Removed {} from your user PATH.", dir.display());
             }
-            if is_dedicated && !running {
-                let _ = std::fs::remove_dir(&dir);
-                let _ = dir.parent().map(std::fs::remove_dir);
+            let dirs: Vec<PathBuf> =
+                if is_dedicated { std::iter::once(dir.clone()).chain(dir.parent().map(Path::to_path_buf)).collect() } else { Vec::new() };
+            if !delete_now_or_after_exit(&stale, &dirs) {
+                println!("Could not remove old copies next to it: {}", stale.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
             }
         } else {
             println!(
