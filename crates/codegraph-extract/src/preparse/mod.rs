@@ -32,9 +32,17 @@ pub fn pre_parse(file_path: &str, source: &str, language: Language) -> String {
         "csharp" => with_shadow(source, small::blank_csharp_preprocessor_directives),
         "kotlin" => with_shadow(source, small::pre_parse_kotlin),
         "swift" => with_shadow(source, small::join_swift_composition_continuations),
-        // Only `@flow` files, which `detectLanguage` sends here from `.js`.
-        "typescript" | "tsx" if small::is_flow_candidate_path(file_path) && has_flow_pragma(source) => {
-            with_shadow(source, small::blank_flow_syntax)
+        // Flow syntax only in `@flow` files, which `detectLanguage` sends here from `.js`; then
+        // `export type *`, in every file.
+        "typescript" | "tsx" => {
+            let flow = small::is_flow_candidate_path(file_path) && has_flow_pragma(source);
+            if !flow && !small::has_export_type_star(source) {
+                return source.to_string();
+            }
+            with_shadow(source, |s| {
+                let s = if flow { small::blank_flow_syntax(s) } else { s.to_string() };
+                small::blank_export_type_star(&s)
+            })
         }
         "c" => with_shadow(source, conly::pre_parse_c),
         "cpp" => with_shadow(source, |s| cpp::pre_parse_cpp(s, Some(file_path))),

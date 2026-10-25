@@ -163,6 +163,30 @@ pub(crate) fn blank_flow_syntax(source: &str) -> String {
     FLOW_INEXACT.replace_all(&s, |_| Some("   ".into()))
 }
 
+/// Whether the file writes `export type *` anywhere: most files don't, and skip the rest.
+static EXPORT_TYPE_STAR_HINT: LazyLock<Re> = LazyLock::new(|| Re::new(r"export\s+type\s*\*"));
+/// `export type *` where a statement starts (a line's first word, or after `;`, `{`, `}` or the
+/// end of a block comment), followed by `from` or `as`.
+static EXPORT_TYPE_STAR: LazyLock<Re> =
+    LazyLock::new(|| Re::multiline(r"(^|[;{}]|\*/)([ \t]*export\s+)type(?=\s*\*\s*(?:from|as)\b)"));
+
+pub(crate) fn has_export_type_star(source: &str) -> bool {
+    EXPORT_TYPE_STAR_HINT.is_match(source)
+}
+
+/// TypeScript 5.0's type-only re-export of a whole module, `export type * from './types'` and
+/// `export type * as ns from './types'`, with its `type` blanked to spaces so it reads as the
+/// `export *` it is: the grammar has no rule for it, and parsed `type` as an error (#2474). Only a
+/// statement start is blanked, so a mention in a comment keeps its text.
+pub(crate) fn blank_export_type_star(source: &str) -> String {
+    if !has_export_type_star(source) {
+        return source.to_string();
+    }
+    EXPORT_TYPE_STAR.replace_all(source, |c| {
+        Some(format!("{}{}    ", c.get(1).map_or("", |m| m.as_str()), c.get(2).map_or("", |m| m.as_str())))
+    })
+}
+
 /// `/\.(?:jsx?|mjs|cjs)$/.test(filePath)`.
 pub(crate) fn is_flow_candidate_path(file_path: &str) -> bool {
     [".js", ".jsx", ".mjs", ".cjs"].iter().any(|ext| file_path.ends_with(ext))
@@ -171,6 +195,17 @@ pub(crate) fn is_flow_candidate_path(file_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_type_star_blanks_only_statement_starts() {
+        let src = "export type * from './a';\nexport type * as ns from './b'; export type * from './c'\n// export type * from './d'\nexport type T = 1;\n";
+        let out = blank_export_type_star(src);
+        assert_eq!(out.len(), src.len());
+        assert_eq!(
+            out,
+            "export      * from './a';\nexport      * as ns from './b'; export      * from './c'\n// export type * from './d'\nexport type T = 1;\n"
+        );
+    }
 
     #[test]
     fn csharp_directives_keep_offsets() {
