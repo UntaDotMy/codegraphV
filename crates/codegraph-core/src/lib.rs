@@ -9,6 +9,7 @@ pub mod file_limits;
 pub mod orchestrator;
 pub mod prompt_hook;
 pub mod query;
+pub mod supervision;
 pub mod utils;
 pub mod watch_policy;
 mod watch;

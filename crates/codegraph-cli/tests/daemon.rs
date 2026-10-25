@@ -57,7 +57,7 @@ fn shared_daemon_reuses_engine_and_keeps_client_source_history_separate() {
     let cg = codegraph_core::CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
     cg.close();
     let mut daemon = Daemon {
-        child: Command::new(env!("CARGO_BIN_EXE_codegraph"))
+        child: Command::new(env!("CARGO_BIN_EXE_codegraphV"))
             .args([
                 "__daemon",
                 "--path",
@@ -65,14 +65,14 @@ fn shared_daemon_reuses_engine_and_keeps_client_source_history_separate() {
                 "--idle-timeout",
                 "20",
             ])
-            .env_remove("CODEGRAPH_MCP_TOOLS")
+            .env_remove("CODEGRAPHV_MCP_TOOLS")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     };
-    let path = dir.path().join(".codegraph/native-daemon.json");
+    let path = dir.path().join(".codegraphV/native-daemon.json");
     let begin = Instant::now();
     let endpoint: Value = loop {
         if let Ok(bytes) = std::fs::read(&path) {
@@ -89,7 +89,7 @@ fn shared_daemon_reuses_engine_and_keeps_client_source_history_separate() {
     let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
     assert!(send(&mut first, initialize.clone()).get("result").is_some());
     assert!(send(&mut second, initialize).get("result").is_some());
-    let request = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"codegraph_explore","arguments":{"query":"start finish"}}});
+    let request = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"codegraphV_explore","arguments":{"query":"start finish"}}});
     let a = send(&mut first, request.clone());
     let b = send(&mut second, request.clone());
     assert!(a["result"]["content"][0]["text"]
@@ -124,5 +124,46 @@ fn shared_daemon_reuses_engine_and_keeps_client_source_history_separate() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!path.exists());
-    assert!(!dir.path().join(".codegraph/native-daemon.lock").exists());
+    assert!(!dir.path().join(".codegraphV/native-daemon.lock").exists());
+}
+
+/// BUG-89: with no clients left, the daemon leaves after its idle timeout and removes the
+/// endpoint and lock that would claim it is still alive.
+#[test]
+fn idle_daemon_exits_and_leaves_no_state() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.ts"), "export function start(){return 1;}\n").unwrap();
+    let cg = codegraph_core::CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
+    cg.close();
+    let mut daemon = Daemon {
+        child: Command::new(env!("CARGO_BIN_EXE_codegraphV"))
+            .args(["__daemon", "--path", dir.path().to_str().unwrap(), "--idle-timeout", "1"])
+            .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    };
+    let path = dir.path().join(".codegraphV/native-daemon.json");
+    let begin = Instant::now();
+    let endpoint: Value = loop {
+        if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+            break v;
+        }
+        assert!(begin.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // One client comes and goes; the idle clock starts when it leaves.
+    let mut client = connect(&endpoint);
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+    assert!(send(&mut client, init).get("result").is_some());
+    drop(client);
+    let left = Instant::now();
+    while daemon.child.try_wait().unwrap().is_none() {
+        assert!(left.elapsed() < Duration::from_secs(6), "still running 6 s after its 1 s idle timeout");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!path.exists());
+    assert!(!dir.path().join(".codegraphV/native-daemon.lock").exists());
 }

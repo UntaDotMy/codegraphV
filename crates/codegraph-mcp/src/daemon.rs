@@ -26,7 +26,7 @@ pub struct Endpoint {
     pub version: String,
 }
 fn endpoint_path(root: &str) -> PathBuf {
-    Path::new(root).join(".codegraph/native-daemon.json")
+    Path::new(&directory::get_code_graph_dir(root)).join("native-daemon.json")
 }
 fn read_endpoint(root: &str) -> Option<Endpoint> {
     serde_json::from_slice(&std::fs::read(endpoint_path(root)).ok()?).ok()
@@ -87,6 +87,19 @@ pub fn stop(root: &str) -> Result<bool> {
     BufReader::new(stream).read_line(&mut line)?;
     Ok(serde_json::from_str::<Value>(&line)?["result"]["stopped"] == true)
 }
+/// Windows gives a child every inheritable handle of its parent, so the daemon would get the
+/// proxy's stdin/stdout pipes and hold the agent's pipes open after the proxy exits (BUG-89).
+#[cfg(windows)]
+fn keep_stdio_from_children() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+    let handles = [std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()];
+    for handle in handles.into_iter().filter(|h| !h.is_null()) {
+        // SAFETY: a handle this process owns; only its inherit flag changes.
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    }
+}
+
 /// Proxy stdio, preserving half-close: EOF from the client drains responses
 /// before returning. The daemon stays alive for other clients.
 pub fn proxy(root: &str, executable: &Path) -> Result<()> {
@@ -94,6 +107,8 @@ pub fn proxy(root: &str, executable: &Path) -> Result<()> {
         .filter(|e| e.version == env!("CARGO_PKG_VERSION"))
         .and_then(|e| connect(&e).ok());
     if stream.is_none() {
+        #[cfg(windows)]
+        keep_stdio_from_children();
         let mut command = Command::new(executable);
         command
             .args(["__daemon", "--path", root])
@@ -155,7 +170,7 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
     if !directory::is_initialized(&root) {
         return Err("Project is not indexed".into());
     }
-    let mut lock = FileLock::new(Path::new(&root).join(".codegraph/native-daemon.lock"));
+    let mut lock = FileLock::new(Path::new(&directory::get_code_graph_dir(&root)).join("native-daemon.lock"));
     lock.acquire()?;
     codegraph_installer::upgrade::check_for_update_in_background(env!("CARGO_PKG_VERSION"));
     let listener = TcpListener::bind(("127.0.0.1", 0))?;

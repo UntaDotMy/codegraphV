@@ -86,7 +86,7 @@ pub fn escape_reg_exp(text: &str) -> String {
 }
 
 /// Is a process with this PID still running?
-fn is_process_alive(pid: u32) -> bool {
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: signal 0 only probes for existence.
@@ -144,7 +144,7 @@ impl FileLock {
                     if let Some(pid) = parse_int_prefix(content.trim()) {
                         if is_process_alive(pid) {
                             return Err(format!(
-                                "CodeGraph database is locked by another process (PID {pid}). If this is stale, run 'codegraph unlock' or delete {}",
+                                "CodeGraphV database is locked by another process (PID {pid}). If this is stale, run 'codegraphV unlock' or delete {}",
                                 self.lock_path.display()
                             ));
                         }
@@ -169,7 +169,7 @@ impl FileLock {
             }
             // Race condition: another process grabbed the lock between our check and write.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
-                "CodeGraph database is locked by another process. If this is stale, run 'codegraph unlock' or delete {}",
+                "CodeGraphV database is locked by another process. If this is stale, run 'codegraphV unlock' or delete {}",
                 self.lock_path.display()
             )),
             Err(e) => Err(e.to_string()),
@@ -257,14 +257,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
         let outside = dir.path().join("outside");
-        std::fs::create_dir_all(root.join(".codegraph")).unwrap();
+        std::fs::create_dir_all(root.join(".codegraphV")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let link = root.join(".codegraph").join("ui");
+        let link = root.join(".codegraphV").join("ui");
         link_dir(&outside, &link);
         let r = root.to_string_lossy().into_owned();
-        let refused = validate_path_within_root(&r, ".codegraph/ui/trails", ValidateOptions::default());
+        let refused = validate_path_within_root(&r, ".codegraphV/ui/trails", ValidateOptions::default());
         // The escape hatch for indexing still allows it.
-        let escaped = validate_path_within_root(&r, ".codegraph/ui/trails", ValidateOptions { allow_symlink_escape: true });
+        let escaped = validate_path_within_root(&r, ".codegraphV/ui/trails", ValidateOptions { allow_symlink_escape: true });
         remove_link(&link);
         assert!(refused.is_none());
         assert!(escaped.is_some());
