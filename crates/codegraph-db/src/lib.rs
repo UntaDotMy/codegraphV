@@ -21,7 +21,7 @@ pub use error::{DbError, Result};
 pub use graph_queries::DOMINANT_FILE_METADATA_KEY;
 pub use migrations::CURRENT_SCHEMA_VERSION;
 pub use store::{
-    database_path, remove_database_files, resolve_wal_heal_bytes, wal_heal_threshold_bytes, CheckpointMode,
+    configure_sqlite, copy_database, remove_database_files, resolve_wal_heal_bytes, wal_heal_threshold_bytes, CheckpointMode,
     FileBundle, NodeIdentity, OpenOptions, RawConnection, Store, DATABASE_FILENAME, SQLITE_PARAM_CHUNK_SIZE,
 };
 

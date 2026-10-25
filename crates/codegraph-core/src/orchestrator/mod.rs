@@ -32,7 +32,8 @@ use std::sync::{Arc, Mutex};
 pub use git_state::{ChangedFiles, GitIndexSnapshot};
 
 /// Number of files whose parse may be in flight per worker, before the in-order commit catches up.
-pub(crate) const WINDOW_PER_WORKER: usize = 2;
+/// Room enough that one slow file at the commit cursor does not stall every other worker.
+pub(crate) const WINDOW_PER_WORKER: usize = 8;
 
 /// How many files the `sync()` reconcile processes between checks of whether to keep going
 /// (the TypeScript yields to its event loop here; this port has no loop to starve, but keeps the

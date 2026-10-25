@@ -52,7 +52,7 @@ const MAX_SEGMENTED_NAMES: usize = 65536;
 /// anything a healthy open sees yet small enough to cap the leak. Override with
 /// `CODEGRAPH_WAL_HEAL_MB`.
 pub fn wal_heal_threshold_bytes() -> u64 {
-    resolve_wal_heal_bytes(std::env::var("CODEGRAPH_WAL_HEAL_MB").ok().as_deref())
+    resolve_wal_heal_bytes(std::env::var("CODEGRAPHV_WAL_HEAL_MB").ok().as_deref())
 }
 
 /// Resolve the heal threshold from the env override (MB); invalid ⇒ 64 MB.
@@ -179,6 +179,7 @@ impl Store {
         if let Some(dir) = db_path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        configure_sqlite();
         let conn = Connection::open(db_path)?;
         Self::configure_connection(&conn, false)?;
 
@@ -202,6 +203,7 @@ impl Store {
         if !db_path.exists() {
             return Err(DbError::NotFound(db_path.to_path_buf()));
         }
+        configure_sqlite();
         let conn = if options.read_only {
             Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?
         } else {
@@ -401,6 +403,40 @@ impl Store {
                 let _ = self.conn.execute_batch("ROLLBACK");
                 Err(e)
             }
+        }
+    }
+
+    /// Open a transaction that [`Store::transaction`] calls then join, until
+    /// [`Store::commit_batch`] or [`Store::rollback_batch`]. For a writer storing many small units:
+    /// each unit stays atomic, and the batch saves a commit (and its log writes) per unit. No-op
+    /// when a transaction is already open.
+    pub fn begin_batch(&self) -> Result<()> {
+        if self.tx_depth.get() == 0 {
+            self.conn.execute_batch("BEGIN")?;
+            self.tx_depth.set(1);
+        }
+        Ok(())
+    }
+
+    /// Commit the batch [`Store::begin_batch`] opened.
+    pub fn commit_batch(&self) -> Result<()> {
+        if self.tx_depth.get() != 1 {
+            return Ok(());
+        }
+        self.tx_depth.set(0);
+        if let Err(e) = self.conn.execute_batch("COMMIT") {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    /// Drop everything the open batch wrote: a unit inside it failed part-way (a joined
+    /// transaction cannot roll back on its own).
+    pub fn rollback_batch(&self) {
+        if self.tx_depth.get() == 1 {
+            self.tx_depth.set(0);
+            let _ = self.conn.execute_batch("ROLLBACK");
         }
     }
 
@@ -815,7 +851,7 @@ impl Store {
     /// Insert a new node (replacing one with the same id).
     pub fn insert_node(&self, node: &Node) -> Result<()> {
         if !valid_node(node) {
-            eprintln!("[CodeGraph] Skipping node with missing required fields: {:?}", node.id);
+            eprintln!("[CodeGraphV] Skipping node with missing required fields: {:?}", node.id);
             return Ok(());
         }
         // INSERT OR REPLACE may overwrite a node we have cached; drop the stale entry.
@@ -839,7 +875,7 @@ impl Store {
             let mut segment_rows: Vec<SqlRow> = Vec::new();
             for node in nodes {
                 if !valid_node(node) {
-                    eprintln!("[CodeGraph] Skipping node with missing required fields: {:?}", node.id);
+                    eprintln!("[CodeGraphV] Skipping node with missing required fields: {:?}", node.id);
                     continue;
                 }
                 self.node_cache.borrow_mut().pop(&node.id);
@@ -878,7 +914,7 @@ impl Store {
     pub fn update_node(&self, node: &Node) -> Result<()> {
         self.node_cache.borrow_mut().pop(&node.id);
         if !valid_node(node) {
-            eprintln!("[CodeGraph] Skipping node update with missing required fields: {:?}", node.id);
+            eprintln!("[CodeGraphV] Skipping node update with missing required fields: {:?}", node.id);
             return Ok(());
         }
         let mut stmt = self.conn.prepare_cached(
@@ -1796,8 +1832,27 @@ impl Store {
 }
 
 /// The database path for a project: `<root>/.codegraph/codegraph.db`.
-pub fn database_path(project_root: &Path) -> PathBuf {
-    project_root.join(".codegraph").join(DATABASE_FILENAME)
+/// Process-wide SQLite setup, before the first connection opens (SQLite refuses it after).
+/// Memory statistics off: they take one global lock on every SQLite allocation, which
+/// serializes the parallel resolve workers' reads.
+pub fn configure_sqlite() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: sqlite3_config takes (op, int) for SQLITE_CONFIG_MEMSTATUS; before SQLite
+        // starts it only sets a flag, and after it returns SQLITE_MISUSE, which changes nothing.
+        unsafe {
+            rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0 as std::os::raw::c_int);
+        }
+    });
+}
+
+/// A consistent copy of the database at `src` written to `dest` (`VACUUM INTO`), which works
+/// while another process has `src` open. `dest` must not exist yet.
+pub fn copy_database(src: &Path, dest: &Path) -> Result<()> {
+    configure_sqlite();
+    let conn = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    conn.execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
+    Ok(())
 }
 
 /// Delete a database file and its WAL sidecars (`-wal`/`-shm`).

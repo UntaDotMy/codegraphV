@@ -33,7 +33,6 @@ use std::rc::Rc;
 type Has<'a> = &'a dyn Fn(&[&str]) -> bool;
 
 struct SynthPass {
-    #[allow(dead_code)]
     name: &'static str,
     gate: fn(Has) -> bool,
     run: fn(&Ctx) -> Vec<Edge>,
@@ -158,11 +157,9 @@ pub fn synthesize_callback_edges(store: &Rc<Store>, ctx: &Rc<Ctx>) -> codegraph_
     let from_test_code = |id: &str| ctx.node_by_id(id).is_none_or(|n| codegraph_search::is_test_path(&n.file_path));
     let mut merged: Vec<Edge> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for pass in synth_passes() {
-        if !(pass.gate)(&has) {
-            continue;
-        }
-        for e in (pass.run)(ctx) {
+    let passes: Vec<SynthPass> = synth_passes().into_iter().filter(|pass| (pass.gate)(&has)).collect();
+    for edges in run_passes(store, ctx, &passes) {
+        for e in edges {
             if !seen.insert(format!("{}>{}", e.source, e.target)) {
                 continue;
             }
@@ -175,6 +172,72 @@ pub fn synthesize_callback_edges(store: &Rc<Store>, ctx: &Rc<Ctx>) -> codegraph_
     insert_chunked(store, &merged)?;
     store.replace_synthesis_inputs(&collect_inputs(ctx))?;
     Ok(merged.len() + go_impl.len() + go_method_contains.len())
+}
+
+/// Address space for a pass thread's stack: the passes walk nested code recursively.
+const PASS_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+/// Every pass's edges, in `passes` order. The passes read only the committed database, so they
+/// run on every core at once, each thread with its own read-only connection and context; a pass
+/// whose thread fails runs here on `ctx`. Inside a transaction (a sync's refresh) other
+/// connections cannot see its writes, so every pass runs here.
+fn run_passes(store: &Store, ctx: &Ctx, passes: &[SynthPass]) -> Vec<Vec<Edge>> {
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Mutex};
+    let timed = std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty());
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let threads = if store.in_transaction() { 1 } else { cpus.min(passes.len()) };
+    let db_path = store.path().to_path_buf();
+    let slots: Vec<Mutex<Option<(Vec<Edge>, std::time::Duration)>>> = passes.iter().map(|_| Mutex::new(None)).collect();
+    if threads > 1 && db_path.is_file() {
+        let next = AtomicUsize::new(0);
+        let root = ctx.project_root().to_string();
+        std::thread::scope(|scope| {
+            for n in 0..threads {
+                let (next, slots, db_path, root) = (&next, &slots, &db_path, &root);
+                let body = move || {
+                    let Ok(store) = Store::open(db_path, codegraph_db::OpenOptions { read_only: true }) else { return };
+                    let store = Rc::new(store);
+                    let ctx = Ctx::new(root.clone(), store.clone());
+                    // One read transaction for all of this thread's passes (nothing writes while
+                    // they run): outside one, every statement takes SQLite's WAL read lock anew.
+                    let _ = store.begin_batch();
+                    ctx.warm_caches();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(pass) = passes.get(i) else { break };
+                        let start = std::time::Instant::now();
+                        if let Ok(edges) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (pass.run)(&ctx))) {
+                            *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some((edges, start.elapsed()));
+                        }
+                    }
+                    store.rollback_batch(); // read-only: ends the transaction, nothing to undo
+                };
+                let _ = std::thread::Builder::new()
+                    .name(format!("codegraph-synth-{n}"))
+                    .stack_size(PASS_STACK_BYTES)
+                    .spawn_scoped(scope, body);
+            }
+        });
+    }
+    let mut timings = Vec::new();
+    let out = slots
+        .into_iter()
+        .zip(passes)
+        .map(|(slot, pass)| {
+            let (edges, took) = slot.into_inner().unwrap_or_else(|e| e.into_inner()).unwrap_or_else(|| {
+                let start = std::time::Instant::now();
+                ((pass.run)(ctx), start.elapsed())
+            });
+            timings.push((took, pass.name));
+            edges
+        })
+        .collect();
+    if timed {
+        timings.sort_by(|a, b| b.cmp(a));
+        let top: Vec<String> = timings.iter().take(8).map(|(d, name)| format!("{name} {}ms", d.as_millis())).collect();
+        eprintln!("[phase-timing]     synthesis passes on {threads} threads, slowest: {}", top.join(", "));
+    }
+    out
 }
 
 /// Files whose text could feed a pass (inputs that produce NO edges included, e.g. an over-cap

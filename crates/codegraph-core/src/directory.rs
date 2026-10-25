@@ -32,7 +32,7 @@ pub fn code_graph_dir_name() -> String {
 ///
 /// Every other host keeps the plain name without a stat: the WSL check is cached per process.
 pub fn code_graph_dir_name_for(project_root: &str) -> String {
-    let overridden = std::env::var("CODEGRAPH_DIR").map(|v| !codegraph_types::jscompat::js_trim(&v).is_empty()).unwrap_or(false);
+    let overridden = std::env::var("CODEGRAPHV_DIR").map(|v| !codegraph_types::jscompat::js_trim(&v).is_empty()).unwrap_or(false);
     if overridden || !is_wsl_windows_drive(project_root) {
         return code_graph_dir_name();
     }
@@ -48,6 +48,11 @@ pub fn code_graph_dir_name_for(project_root: &str) -> String {
 /// Get the `.codegraph` directory path for a project.
 pub fn get_code_graph_dir(project_root: &str) -> String {
     nodepath::join(&[project_root, &code_graph_dir_name_for(project_root)])
+}
+
+/// The project's database, in its data directory (`getDatabasePath`).
+pub fn database_path(project_root: &Path) -> PathBuf {
+    Path::new(&get_code_graph_dir(&project_root.to_string_lossy())).join(codegraph_db::DATABASE_FILENAME)
 }
 
 /// What `codegraph.db` holds.
@@ -92,6 +97,7 @@ fn probe_schema(db_path: &Path) -> SchemaProbe {
         rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::NotADatabase => SchemaProbe::NotSqlite,
         _ => SchemaProbe::Unknown,
     };
+    codegraph_db::configure_sqlite();
     let conn = match Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
         Ok(c) => c,
         Err(e) => return classify(&e),
@@ -537,10 +543,10 @@ pub fn plan_frontload(cwd: &str, prompt: &str) -> FrontloadPlan {
 /// add — out of git, without having to enumerate each name (issues #788, #492, #484). Older
 /// versions wrote an explicit allowlist that never listed `daemon.pid` or the socket, so those
 /// runtime files were silently committed.
-const GITIGNORE_CONTENT: &str = "# CodeGraph data files — local to each machine, not for committing.\n# Ignore everything in .codegraph/ except this file itself, so transient\n# files (the database, daemon.pid, sockets, logs) never show up in git.\n*\n!.gitignore\n";
+const GITIGNORE_CONTENT: &str = "# CodeGraphV data files — local to each machine, not for committing.\n# Ignore everything in .codegraphV/ except this file itself, so transient\n# files (the database, daemon.pid, sockets, logs) never show up in git.\n*\n!.gitignore\n";
 
 /// Header line that prefixes every .gitignore CodeGraph has auto-generated.
-const GITIGNORE_MARKER: &str = "# CodeGraph data files";
+const GITIGNORE_MARKER: &str = "# CodeGraphV data files";
 
 /// Is `content` a stale CodeGraph-generated `.gitignore` that should be regenerated in place?
 /// True when it carries our header but predates the wildcard ignore (it has no bare `*` line) —
@@ -577,7 +583,7 @@ pub fn create_directory(project_root: &str) -> Result<(), String> {
     // a schema-less codegraph.db left by an interrupted init (#1895) — is fine: initialize() adds
     // the schema to it.
     if is_initialized(project_root) {
-        return Err(format!("CodeGraph already initialized in {project_root}"));
+        return Err(format!("CodeGraphV already initialized in {project_root}"));
     }
 
     // Create main directory (if it doesn't exist).
@@ -700,11 +706,11 @@ pub fn validate_directory(project_root: &str) -> DirectoryValidation {
     let dir = Path::new(&codegraph_dir);
 
     if !dir.exists() {
-        errors.push("CodeGraph directory does not exist".to_string());
+        errors.push("CodeGraphV directory does not exist".to_string());
         return DirectoryValidation { valid: false, errors };
     }
     if !dir.is_dir() {
-        errors.push(".codegraph exists but is not a directory".to_string());
+        errors.push(format!("{} exists but is not a directory", code_graph_dir_name_for(project_root)));
         return DirectoryValidation { valid: false, errors };
     }
 
@@ -716,7 +722,7 @@ pub fn validate_directory(project_root: &str) -> DirectoryValidation {
     if !ensure_gitignore(&gitignore_path) && !existed_before {
         // Only a missing-and-uncreatable file is surfaced; a failed in-place upgrade of an
         // existing file is non-fatal — the index still works.
-        errors.push(".gitignore missing in .codegraph directory and could not be created".to_string());
+        errors.push(".gitignore missing in .codegraphV directory and could not be created".to_string());
     }
 
     DirectoryValidation { valid: errors.is_empty(), errors }
@@ -747,7 +753,7 @@ mod tests {
     fn stale_gitignore_is_upgraded_but_user_file_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(".gitignore");
-        std::fs::write(&p, "# CodeGraph data files\n*.db\ncache/\n").unwrap();
+        std::fs::write(&p, "# CodeGraphV data files\n*.db\ncache/\n").unwrap();
         assert!(ensure_gitignore(&p));
         assert!(std::fs::read_to_string(&p).unwrap().contains("\n*\n"));
         std::fs::write(&p, "my own rules\n").unwrap();

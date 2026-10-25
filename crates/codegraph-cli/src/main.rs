@@ -1,8 +1,16 @@
 use clap::{Args, Parser, Subcommand};
+mod migrate;
 mod prompt_hook;
 mod remove_cli;
 mod upgrade;
 mod wire;
+
+// Indexing allocates heavily on every core. The system allocator on Windows returns large
+// blocks to the kernel and takes a process-wide lock for them, so resolve stops scaling
+// with threads; mimalloc keeps memory per thread (DEV-87).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use codegraph_core::{directory, CodeGraph, IndexOptions, OpenOptions};
 use codegraph_mcp::{render, tools::ToolHandler};
 use codegraph_types::*;
@@ -17,7 +25,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser)]
 #[command(
-    name = "codegraph",
+    name = "codegraphV",
     version,
     about = "Local code intelligence — native Rust executable"
 )]
@@ -216,7 +224,7 @@ enum Command {
         path: String,
     },
     /// Open the local browser viewer (preview).
-    #[command(alias="web",hide=std::env::var("CODEGRAPH_UI").as_deref()!=Ok("1"))]
+    #[command(alias="web",hide=std::env::var("CODEGRAPHV_UI").as_deref()!=Ok("1"))]
     Ui {
         #[arg(default_value = ".")]
         path: String,
@@ -227,7 +235,7 @@ enum Command {
         #[arg(long)]
         read_only: bool,
     },
-    /// Connect CodeGraph to coding agents.
+    /// Connect codegraphV to coding agents.
     Install {
         #[arg(short, long, default_value = "auto")]
         target: String,
@@ -244,7 +252,7 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
-    /// Remove CodeGraph configuration from coding agents.
+    /// Remove codegraphV configuration from coding agents.
     Uninstall {
         #[arg(short, long, default_value = "all")]
         target: String,
@@ -255,11 +263,11 @@ enum Command {
         #[arg(long)]
         keep_cli: bool,
     },
-    /// Claude UserPromptSubmit hook: inject CodeGraph context for structural prompts (reads
+    /// Claude UserPromptSubmit hook: inject codegraphV context for structural prompts (reads
     /// {prompt,cwd} JSON on stdin).
     #[command(hide = true)]
     PromptHook,
-    /// Update codegraph to the latest release, or to the version given.
+    /// Update codegraphV to the latest release, or to the version given.
     Upgrade {
         /// Release to install, for example v0.0.2 (default: the latest)
         version: Option<String>,
@@ -269,6 +277,19 @@ enum Command {
         /// Reinstall even when already on that version
         #[arg(long)]
         force: bool,
+    },
+    /// Move from the original codegraph to codegraphV: agent configuration, project indexes
+    /// (kept, not rebuilt) and the original's install.
+    Migrate {
+        /// Show what would change and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask before changing anything
+        #[arg(short, long)]
+        yes: bool,
+        /// Another project folder whose .codegraph/ index to move (repeatable)
+        #[arg(long = "path", value_name = "DIR")]
+        paths: Vec<std::path::PathBuf>,
     },
     /// Print the installed version.
     Version,
@@ -283,7 +304,7 @@ fn root(path: Option<&str>) -> Result<String> {
     let path = path.unwrap_or(".");
     let absolute = nodepath::resolve(&[path]);
     directory::find_nearest_code_graph_root(&absolute).ok_or_else(|| {
-        format!("Project is not indexed: {absolute}. Run `codegraph init` first.").into()
+        format!("Project is not indexed: {absolute}. Run `codegraphV init` first.").into()
     })
 }
 fn open(project: &Project) -> Result<CodeGraph> {
@@ -327,6 +348,12 @@ fn run() -> Result<()> {
     };
     match command {
         Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
+        Command::Migrate { dry_run, yes, paths } => {
+            let code = migrate::run(migrate::Options { dry_run, yes, paths })?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Command::PromptHook => prompt_hook::run(),
         Command::Upgrade { version, check, force } => {
             let code = upgrade::run(version, check, force);
@@ -390,7 +417,7 @@ fn run() -> Result<()> {
         Command::Uninit { path, force } => {
             let root = nodepath::resolve(&[&path]);
             if !directory::is_initialized(&root) {
-                println!("No CodeGraph index in {root}");
+                println!("No CodeGraphV index in {root}");
                 return Ok(());
             }
             if !force && !confirm(&format!("Remove {}?", directory::get_code_graph_dir(&root)))? {
@@ -409,11 +436,11 @@ fn run() -> Result<()> {
             {
                 if as_json {
                     print_json(
-                        &json!({"initialized":false,"version":env!("CARGO_PKG_VERSION"),"projectPath":absolute,"indexPath":std::path::Path::new(&absolute).join(".codegraph"),"lastIndexed":null}),
+                        &json!({"initialized":false,"version":env!("CARGO_PKG_VERSION"),"projectPath":absolute,"indexPath":directory::get_code_graph_dir(&absolute),"lastIndexed":null}),
                     )?;
                 } else {
                     println!(
-                        "Not initialized: {absolute}\nRun `codegraph init` to index this project."
+                        "Not initialized: {absolute}\nRun `codegraphV init` to index this project."
                     );
                 }
             } else {
@@ -481,7 +508,7 @@ fn run() -> Result<()> {
             if let Some(n) = max_files {
                 args["maxFiles"] = json!(n);
             }
-            tool(project, "codegraph_explore", args)?;
+            tool(project, "codegraphV_explore", args)?;
         }
         Command::Node {
             name,
@@ -504,7 +531,7 @@ fn run() -> Result<()> {
             if let Some(n) = limit {
                 args["limit"] = json!(n);
             }
-            tool(project, "codegraph_node", args)?;
+            tool(project, "codegraphV_node", args)?;
         }
         Command::Files {
             project,
@@ -522,7 +549,7 @@ fn run() -> Result<()> {
                 print_json(&wire::file_json(&files))?;
                 cg.close();
             } else {
-                tool(project, "codegraph_files", args)?;
+                tool(project, "codegraphV_files", args)?;
             }
         }
         Command::Callers(s) => symbol_command(s, true)?,
@@ -622,11 +649,13 @@ fn run() -> Result<()> {
                     "Pass --mcp to serve the MCP protocol over standard input/output.".into(),
                 );
             }
+            // Exit when the agent that started this server is gone (BUG-89).
+            codegraph_core::supervision::start();
             let path = project.path.map(|path| nodepath::resolve(&[&path]));
             let from = path.clone().unwrap_or_else(|| nodepath::resolve(&["."]));
             let shared = directory::resolve_server_root(&from, true).root;
             if !no_watch
-                && std::env::var("CODEGRAPH_DAEMON").as_deref() != Ok("0")
+                && std::env::var("CODEGRAPHV_DAEMON").as_deref() != Ok("0")
                 && shared.is_some()
             {
                 codegraph_mcp::daemon::proxy(&shared.unwrap(), &std::env::current_exe()?)?;
@@ -677,7 +706,7 @@ fn run() -> Result<()> {
         }
         Command::Unlock { path } => {
             let root = root(Some(&path))?;
-            let lock = std::path::Path::new(&root).join(".codegraph/codegraph.lock");
+            let lock = std::path::Path::new(&directory::get_code_graph_dir(&root)).join("codegraph.lock");
             if !lock.exists() {
                 println!("No database lock present.");
             } else {
@@ -693,9 +722,9 @@ fn run() -> Result<()> {
             no_open,
             read_only,
         } => {
-            if std::env::var("CODEGRAPH_UI").as_deref() != Ok("1") {
+            if std::env::var("CODEGRAPHV_UI").as_deref() != Ok("1") {
                 return Err(
-                    "The viewer is not released yet. Set CODEGRAPH_UI=1 to use the preview.".into(),
+                    "The viewer is not released yet. Set CODEGRAPHV_UI=1 to use the preview.".into(),
                 );
             }
             let root = root(Some(&path))?;
@@ -712,7 +741,7 @@ fn run() -> Result<()> {
             };
             codegraph_ui_server::serve(options, &stop, |port| {
                 let url = format!("http://127.0.0.1:{port}");
-                println!("CodeGraph viewer: {url}\nPress Ctrl-C to stop.");
+                println!("CodeGraphV viewer: {url}\nPress Ctrl-C to stop.");
                 if !no_open {
                     open_browser(&url);
                 }
@@ -765,7 +794,7 @@ fn run() -> Result<()> {
                 Some(true)
             } else {
                 Some(confirm_default_yes(
-                    "Front-load CodeGraph on \"how / where / trace\" prompts? Auto-injects structural context so answers need fewer steps (adds a moment to those prompts; Claude Code only).",
+                    "Front-load CodeGraphV on \"how / where / trace\" prompts? Auto-injects structural context so answers need fewer steps (adds a moment to those prompts; Claude Code only).",
                 )?)
             };
             for id in targets {
@@ -775,6 +804,7 @@ fn run() -> Result<()> {
                     InstallOptions {
                         auto_allow: !no_permissions,
                         prompt_hook,
+                        dry_run: false,
                     },
                     false,
                 )?;
@@ -819,7 +849,7 @@ fn run() -> Result<()> {
             let targets = environment.resolve_targets(&target, loc)?;
             if !yes
                 && !confirm(&format!(
-                    "Remove CodeGraph configuration for {}?",
+                    "Remove CodeGraphV configuration for {}?",
                     targets.join(", ")
                 ))?
             {
@@ -843,7 +873,7 @@ fn run() -> Result<()> {
                         let plan = remove_cli::plan(&exe, &env, &home);
                         remove_cli::execute(&plan, &exe, &env, &home);
                     }
-                    None => println!("No home directory found; the codegraph CLI was left installed."),
+                    None => println!("No home directory found; the codegraphV CLI was left installed."),
                 }
             }
         }
@@ -883,7 +913,7 @@ fn confirm(message: &str) -> Result<bool> {
     Ok(matches!(reply.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 fn open_browser(url: &str) {
-    let override_browser = std::env::var("CODEGRAPH_BROWSER").ok();
+    let override_browser = std::env::var("CODEGRAPHV_BROWSER").ok();
     if override_browser
         .as_deref()
         .is_some_and(|s| matches!(s, "" | "none" | "0" | "false" | "off"))

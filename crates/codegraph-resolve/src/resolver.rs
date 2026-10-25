@@ -221,21 +221,76 @@ fn is_cfml_template_path(name: &str) -> bool {
 }
 
 const PARALLEL_MIN_REFS: usize = 100_000;
-const MAX_RESOLVE_WORKERS: usize = 4;
 /// Address space for a worker's stack, as for the parse workers: the matchers recurse.
 const RESOLVE_STACK_BYTES: usize = 256 * 1024 * 1024;
+/// References per work item, at least. A batch is cut into chunks that idle workers take in
+/// turn, so one slow file no longer holds the batch while the other workers wait. A chunk ends
+/// at a file boundary: a file's references stay on one worker, whose caches (imports, the
+/// file's nodes) then fill once rather than on every worker.
+const RESOLVE_CHUNK: usize = 128;
+/// ...and at most this many: a file with more is split, so it does not run alone on one worker.
+/// (Measured on a 1.9k-file repository: 128..256 beat smaller chunks, which spread a file over
+/// every worker's caches, and larger ones, which leave one worker finishing a batch alone.)
+const RESOLVE_CHUNK_MAX: usize = 256;
 
-/// `CODEGRAPH_RESOLVE_WORKERS` sets the count (1 = single-threaded); unset, a big run takes half
-/// the cores, at most four, so indexing leaves the machine responsive.
+/// `CODEGRAPHV_RESOLVE_WORKERS` sets the count (1 = single-threaded); unset, a big run takes
+/// every core.
 fn resolve_worker_count(total: usize) -> usize {
-    if let Some(n) = std::env::var("CODEGRAPH_RESOLVE_WORKERS").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
-        return n.clamp(1, 16);
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    worker_count_for(std::env::var("CODEGRAPHV_RESOLVE_WORKERS").ok().as_deref(), total, cpus)
+}
+
+fn worker_count_for(env: Option<&str>, total: usize, cpus: usize) -> usize {
+    if let Some(n) = env.and_then(|v| v.trim().parse::<usize>().ok()) {
+        return n.max(1);
     }
     if total < PARALLEL_MIN_REFS {
         return 1;
     }
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    (cpus / 2).clamp(1, MAX_RESOLVE_WORKERS)
+    cpus.max(1)
+}
+
+/// One batch for the pool: workers take chunk indexes from `next` until none are left.
+struct BatchJob {
+    refs: Vec<UnresolvedReference>,
+    /// Where each chunk starts in `refs`; the last chunk runs to the end.
+    starts: Vec<usize>,
+    next: std::sync::atomic::AtomicUsize,
+    /// Which batch this is: a worker's first chunk of a new batch refreshes its supertype memo,
+    /// since the batch before it persisted edges.
+    number: usize,
+}
+
+impl BatchJob {
+    fn new(refs: Vec<UnresolvedReference>, number: usize) -> BatchJob {
+        let starts = chunk_starts(&refs, RESOLVE_CHUNK, RESOLVE_CHUNK_MAX);
+        BatchJob { refs, starts, next: std::sync::atomic::AtomicUsize::new(0), number }
+    }
+    fn chunks(&self) -> usize {
+        self.starts.len()
+    }
+    fn chunk(&self, i: usize) -> &[UnresolvedReference] {
+        let end = self.starts.get(i + 1).copied().unwrap_or(self.refs.len());
+        &self.refs[self.starts[i]..end]
+    }
+}
+
+/// Chunk starts: a chunk takes at least `min` references, then runs on to the end of its last
+/// file (references arrive grouped by file), but never past `max`.
+fn chunk_starts(refs: &[UnresolvedReference], min: usize, max: usize) -> Vec<usize> {
+    let (min, max) = (min.max(1), max.max(min.max(1)));
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i < refs.len() {
+        starts.push(i);
+        let mut end = (i + min).min(refs.len());
+        let limit = (i + max).min(refs.len());
+        while end < limit && refs[end].file_path == refs[end - 1].file_path {
+            end += 1;
+        }
+        i = end;
+    }
+    starts
 }
 
 /// One chunk's result, with the references its resolver parked for the deferred passes.
@@ -252,21 +307,25 @@ impl ChunkOutcome {
     }
 }
 
+/// What a worker sends back for one chunk: its index and outcome, or None when resolving it
+/// panicked (the caller then resolves that chunk itself).
+type ChunkReply = (usize, Option<ChunkOutcome>, std::time::Duration);
+
 /// A resolve worker thread with a read-only connection and a resolver of its own.
 struct Worker {
-    jobs: std::sync::mpsc::Sender<Vec<UnresolvedReference>>,
-    results: std::sync::mpsc::Receiver<ChunkOutcome>,
+    jobs: std::sync::mpsc::Sender<std::sync::Arc<BatchJob>>,
 }
 
 impl Worker {
-    fn spawn<'scope>(
-        scope: &'scope std::thread::Scope<'scope, '_>,
+    /// Detached: once its jobs channel closes the thread frees its caches and connection on its
+    /// own, while indexing goes on.
+    fn spawn(
         n: usize,
         db_path: &std::path::Path,
         project_root: &str,
+        replies: std::sync::mpsc::Sender<ChunkReply>,
     ) -> Option<Worker> {
-        let (jobs, job_rx) = std::sync::mpsc::channel::<Vec<UnresolvedReference>>();
-        let (result_tx, results) = std::sync::mpsc::channel::<ChunkOutcome>();
+        let (jobs, job_rx) = std::sync::mpsc::channel::<std::sync::Arc<BatchJob>>();
         let db_path = db_path.to_path_buf();
         let root = project_root.to_string();
         let body = move || {
@@ -277,23 +336,45 @@ impl Worker {
                     return;
                 }
             };
-            let resolver = ReferenceResolver::create(&root, Rc::new(store));
-            for chunk in job_rx {
-                let result = resolver.resolve_batch(&chunk);
-                let chain = std::mem::take(&mut *resolver.deferred_chain_refs.borrow_mut());
-                let this_member = std::mem::take(&mut *resolver.deferred_this_member_refs.borrow_mut());
-                resolver.deferred_row_ids.borrow_mut().clear();
-                if result_tx.send(ChunkOutcome { result, chain, this_member }).is_err() {
-                    break;
+            let store = Rc::new(store);
+            let resolver = ReferenceResolver::create(&root, store.clone());
+            let mut last_batch = None;
+            for job in job_rx {
+                loop {
+                    let i = job.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= job.chunks() {
+                        break;
+                    }
+                    let fresh_batch = last_batch != Some(job.number);
+                    last_batch = Some(job.number);
+                    let started = std::time::Instant::now();
+                    // One read transaction per chunk. Outside one, every statement takes and
+                    // drops SQLite's WAL read lock, a kernel call that all workers contend on.
+                    // Nothing writes while a batch resolves, so the chunk sees the same rows.
+                    let _ = store.begin_batch();
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let result = resolver.resolve_chunk(job.chunk(i), fresh_batch);
+                        let chain = std::mem::take(&mut *resolver.deferred_chain_refs.borrow_mut());
+                        let this_member = std::mem::take(&mut *resolver.deferred_this_member_refs.borrow_mut());
+                        ChunkOutcome { result, chain, this_member }
+                    }))
+                    .ok();
+                    store.rollback_batch(); // read-only: ends the transaction, nothing to undo
+                    resolver.deferred_chain_refs.borrow_mut().clear();
+                    resolver.deferred_this_member_refs.borrow_mut().clear();
+                    resolver.deferred_row_ids.borrow_mut().clear();
+                    if replies.send((i, outcome, started.elapsed())).is_err() {
+                        return;
+                    }
                 }
             }
         };
         std::thread::Builder::new()
             .name(format!("codegraph-resolve-{n}"))
             .stack_size(RESOLVE_STACK_BYTES)
-            .spawn_scoped(scope, body)
+            .spawn(body)
             .ok()
-            .map(|_| Worker { jobs, results })
+            .map(|_| Worker { jobs })
     }
 }
 
@@ -1142,7 +1223,12 @@ impl ReferenceResolver {
     }
 
     /// Persist a result: edges in chunks, resolved rows deleted, failures parked.
+    /// One transaction for the whole batch: a commit per statement chunk rewrote the same pages.
     fn persist_resolution_result(&self, result: &ResolutionResult) -> codegraph_db::Result<(usize, PersistOutcome)> {
+        self.store.transaction(|| self.persist_resolution_result_now(result))
+    }
+
+    fn persist_resolution_result_now(&self, result: &ResolutionResult) -> codegraph_db::Result<(usize, PersistOutcome)> {
         const PERSIST_CHUNK: usize = 1000;
         let edges = self.create_edges(&result.resolved);
         for chunk in edges.chunks(PERSIST_CHUNK) {
@@ -1373,15 +1459,27 @@ impl ReferenceResolver {
         let total = self.store.get_unresolved_references_count()? as usize;
         let workers = resolve_worker_count(total);
         let db_path = self.store.path().to_path_buf();
-        let parallel = workers > 1 && db_path.is_file();
-        let mut aggregate = std::thread::scope(|scope| {
+        // Other connections cannot see an open transaction's writes.
+        let parallel = workers > 1 && db_path.is_file() && !self.store.in_transaction();
+        let timed = std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty());
+        let scope_started = std::time::Instant::now();
+        let ran_ms: u128;
+        let mut aggregate = {
+            let (reply_tx, replies) = std::sync::mpsc::channel::<ChunkReply>();
             let pool: Vec<Worker> = if parallel {
-                (0..workers).filter_map(|n| Worker::spawn(scope, n, &db_path, self.ctx.project_root())).collect()
+                (0..workers).filter_map(|n| Worker::spawn(n, &db_path, self.ctx.project_root(), reply_tx.clone())).collect()
             } else {
                 Vec::new()
             };
-            self.run_batches(&pool, on_progress, batch_size, total)
-        })?;
+            drop(reply_tx);
+            let run_started = std::time::Instant::now();
+            let out = self.run_batches(&pool, &replies, on_progress, batch_size, total);
+            ran_ms = run_started.elapsed().as_millis();
+            out
+        }?;
+        if timed {
+            eprintln!("[phase-timing]     pool setup + teardown {}ms", scope_started.elapsed().as_millis().saturating_sub(ran_ms));
+        }
         if synthesize {
             let count = synthesize_callback_edges(&self.store, &self.ctx).unwrap_or(0);
             aggregate.by_method.insert("callback-synthesis".to_string(), count);
@@ -1392,6 +1490,7 @@ impl ReferenceResolver {
     fn run_batches(
         &self,
         pool: &[Worker],
+        replies: &std::sync::mpsc::Receiver<ChunkReply>,
         on_progress: Option<&dyn Fn(usize, usize)>,
         batch_size: usize,
         total: usize,
@@ -1416,15 +1515,28 @@ impl ReferenceResolver {
             Ok(next)
         };
         let mut prev_remaining = i64::MAX;
-        let timed = std::env::var("CODEGRAPH_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty());
+        let timed = std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty());
         let (mut read_ms, mut resolve_ms, mut persist_ms) = (0u128, 0u128, 0u128);
         let mut batch = read_next_batch(&mut prerequisites, &mut after_row_id)?;
+        let mut batch_number = 0usize;
         while !batch.is_empty() {
+            batch_number += 1;
             let t = std::time::Instant::now();
             let next_batch = read_next_batch(&mut prerequisites, &mut after_row_id)?;
             read_ms += t.elapsed().as_millis();
             let t = std::time::Instant::now();
-            let result = if pool.is_empty() { self.resolve_batch(&batch) } else { self.resolve_batch_on(pool, &batch) };
+            let result = if pool.is_empty() {
+                // One transaction around the batch's reads, as the workers do (see Worker), unless
+                // the caller already holds one: commit_batch must not end someone else's.
+                let opened = !self.store.in_transaction() && self.store.begin_batch().is_ok();
+                let result = self.resolve_batch(&batch);
+                if opened {
+                    self.store.commit_batch()?;
+                }
+                result
+            } else {
+                self.resolve_batch_on(pool, replies, std::mem::take(&mut batch), batch_number)
+            };
             resolve_ms += t.elapsed().as_millis();
             let t = std::time::Instant::now();
             let (_, outcome) = self.persist_resolution_result(&result)?;
@@ -1437,7 +1549,7 @@ impl ReferenceResolver {
             for (method, count) in &result.stats.by_method {
                 *aggregate.by_method.entry(method.clone()).or_insert(0) += count;
             }
-            processed += batch.len();
+            processed += result.stats.total;
             if let Some(cb) = on_progress {
                 cb(processed, total);
             }
@@ -1461,14 +1573,47 @@ impl ReferenceResolver {
 
     /// One batch across the pool: contiguous chunks, merged back in order. A chunk whose worker
     /// is gone (its connection failed to open) is resolved here.
-    fn resolve_batch_on(&self, pool: &[Worker], batch: &[UnresolvedReference]) -> ResolutionResult {
-        let per = batch.len().div_ceil(pool.len());
-        let chunks: Vec<&[UnresolvedReference]> = batch.chunks(per).collect();
-        let sent: Vec<bool> = chunks.iter().zip(pool).map(|(chunk, w)| w.jobs.send(chunk.to_vec()).is_ok()).collect();
+    fn resolve_batch_on(
+        &self,
+        pool: &[Worker],
+        replies: &std::sync::mpsc::Receiver<ChunkReply>,
+        batch: Vec<UnresolvedReference>,
+        number: usize,
+    ) -> ResolutionResult {
+        let job = std::sync::Arc::new(BatchJob::new(batch, number));
+        let chunks = job.chunks();
+        let live = pool.iter().filter(|w| w.jobs.send(job.clone()).is_ok()).count();
+        let mut parts: Vec<Option<ChunkOutcome>> = (0..chunks).map(|_| None).collect();
+        let started = std::time::Instant::now();
+        let (mut slowest, mut busy) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        if live > 0 {
+            // Every chunk is answered once: by the worker that took it, or as failed.
+            for _ in 0..chunks {
+                match replies.recv() {
+                    Ok((i, outcome, took)) => {
+                        parts[i] = outcome;
+                        slowest = slowest.max(took);
+                        busy += took;
+                    }
+                    Err(_) => break, // every worker is gone; the rest is resolved below
+                }
+            }
+        }
+        if std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty()) {
+            let wall = started.elapsed();
+            if wall.as_millis() >= 500 {
+                eprintln!(
+                    "[phase-timing]       batch {number}: {} refs, wall {}ms, slowest chunk {}ms, busy {}ms",
+                    job.refs.len(),
+                    wall.as_millis(),
+                    slowest.as_millis(),
+                    busy.as_millis()
+                );
+            }
+        }
         let mut merged = ResolutionResult { resolved: Vec::new(), unresolved: Vec::new(), stats: ResolutionStats::default() };
-        for ((chunk, w), sent) in chunks.iter().zip(pool).zip(sent) {
-            let part = if sent { w.results.recv().ok() } else { None };
-            let part = part.unwrap_or_else(|| ChunkOutcome::local(self, chunk));
+        for (i, part) in parts.into_iter().enumerate() {
+            let part = part.unwrap_or_else(|| ChunkOutcome::local(self, job.chunk(i)));
             for r in &part.chain {
                 self.defer_reference(r, &self.deferred_chain_refs);
             }
@@ -1489,8 +1634,16 @@ impl ReferenceResolver {
     }
 
     fn resolve_batch(&self, batch: &[UnresolvedReference]) -> ResolutionResult {
+        self.resolve_chunk(batch, true)
+    }
+
+    /// `fresh_batch`: the first chunk this resolver sees of a batch, after which earlier batches'
+    /// edges are in the database.
+    fn resolve_chunk(&self, batch: &[UnresolvedReference], fresh_batch: bool) -> ResolutionResult {
         self.warm_caches();
-        self.ctx.advance_supertype_generation();
+        if fresh_batch {
+            self.ctx.advance_supertype_generation();
+        }
         let mut resolved: Vec<ResolvedRef> = Vec::new();
         let mut unresolved: Vec<UnresolvedRef> = Vec::new();
         let mut by_method: IndexMap<String, usize> = IndexMap::new();
@@ -2229,4 +2382,41 @@ fn is_go_project_package(r: &UnresolvedRef, qualifier: &str, ctx: &Ctx) -> bool 
     ctx.get_import_mappings(&r.file_path, r.language)
         .iter()
         .any(|imp| imp.local_name == qualifier && ctx.get_go_package_dir(&imp.source, Some(&r.file_path)).is_some())
+}
+
+#[cfg(test)]
+mod worker_count_tests {
+    use super::{chunk_starts, worker_count_for, PARALLEL_MIN_REFS};
+
+    #[test]
+    fn chunks_end_at_file_boundaries() {
+        let refs: Vec<codegraph_types::UnresolvedReference> = ["a", "a", "a", "b", "b", "c", "d", "d", "d", "d"]
+            .iter()
+            .map(|f| codegraph_types::UnresolvedReference {
+                from_node_id: String::new(),
+                reference_name: String::new(),
+                reference_kind: codegraph_types::ReferenceKind::FunctionRef,
+                line: 0,
+                column: 0,
+                file_path: Some(f.to_string()),
+                language: None,
+                candidates: None,
+                row_id: None,
+            })
+            .collect();
+        assert_eq!(chunk_starts(&refs, 2, 100), vec![0, 3, 5]);
+        assert_eq!(chunk_starts(&refs, 1, 100), vec![0, 3, 5, 6]);
+        assert_eq!(chunk_starts(&refs, 100, 100), vec![0]);
+        assert_eq!(chunk_starts(&refs, 1, 2), vec![0, 2, 3, 5, 6, 8], "a big file is split at max");
+        assert!(chunk_starts(&[], 4, 8).is_empty());
+    }
+
+    #[test]
+    fn a_big_run_uses_every_core_and_the_variable_overrides() {
+        assert_eq!(worker_count_for(None, PARALLEL_MIN_REFS, 12), 12);
+        assert_eq!(worker_count_for(None, PARALLEL_MIN_REFS, 64), 64);
+        assert_eq!(worker_count_for(None, PARALLEL_MIN_REFS - 1, 12), 1, "a small run stays on one thread");
+        assert_eq!(worker_count_for(Some("24"), 10, 12), 24);
+        assert_eq!(worker_count_for(Some("0"), PARALLEL_MIN_REFS, 12), 1);
+    }
 }

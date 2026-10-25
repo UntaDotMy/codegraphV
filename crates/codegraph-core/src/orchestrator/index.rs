@@ -32,21 +32,21 @@ use std::time::Instant;
 /// deeply nested files on the happy side of it. It is address space, not committed memory.
 const PARSE_STACK_BYTES: usize = 256 * 1024 * 1024;
 
-const DEFAULT_PARSE_POOL_CAP: usize = 8;
-const MAX_PARSE_POOL_SIZE: usize = 16;
+/// Files stored per transaction during a full index.
+const STORE_GROUP_FILES: usize = 256;
 
-/// `CODEGRAPH_PARSE_WORKERS`: an explicit worker count (1 = single-threaded); unset or invalid →
-/// `clamp(cpus - 1, 1, 8)`.
+/// `CODEGRAPHV_PARSE_WORKERS`: an explicit worker count (1 = single-threaded); unset or invalid →
+/// every core but the one committing results (`cpus - 1`, at least 1).
 pub fn resolve_parse_pool_size(env_val: Option<&str>, cpu_count: usize) -> usize {
     if let Some(v) = env_val.filter(|v| !v.is_empty()) {
         if let Ok(n) = v.trim().parse::<f64>() {
             if n.is_finite() && n >= 0.0 {
-                return (n.floor() as usize).clamp(1, MAX_PARSE_POOL_SIZE);
+                return (n.floor() as usize).max(1);
             }
         }
         // non-numeric / negative → fall through to the default
     }
-    cpu_count.saturating_sub(1).clamp(1, DEFAULT_PARSE_POOL_CAP)
+    cpu_count.saturating_sub(1).max(1)
 }
 
 /// One file's read-and-parse outcome, produced on a worker and committed in file order.
@@ -239,7 +239,7 @@ impl ExtractionOrchestrator {
         let total = files.len();
         emit(IndexProgress::new(IndexPhase::Parsing, 0, total));
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(3);
-        let workers = resolve_parse_pool_size(std::env::var("CODEGRAPH_PARSE_WORKERS").ok().as_deref(), cpus).min(total.max(1));
+        let workers = resolve_parse_pool_size(std::env::var("CODEGRAPHV_PARSE_WORKERS").ok().as_deref(), cpus).min(total.max(1));
         log(&format!("Parse worker pool: {workers} worker(s)"));
 
         let gate = self.framework_gate();
@@ -275,23 +275,63 @@ impl ExtractionOrchestrator {
 
             let mut pending: BTreeMap<usize, Prepared> = BTreeMap::new();
             let mut next_to_store = 0usize;
+            let (mut wait, mut commit) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+            // Files are stored in groups, one transaction each (every file still atomic): a commit
+            // per file rewrote the same table and index pages into the log every time. A group
+            // is committed before the writer waits, so nothing sits uncommitted while it idles.
+            let mut in_group = 0usize;
             'receive: while next_to_store < total {
+                if in_group > 0 && !pending.contains_key(&next_to_store) {
+                    if let Err(e) = self.store.commit_batch() {
+                        failure = Some(e.into());
+                        break 'receive;
+                    }
+                    in_group = 0;
+                }
+                let waited = Instant::now();
                 let Ok((i, item)) = rx.recv() else { break };
+                wait += waited.elapsed();
                 pending.insert(i, item);
                 while let Some(item) = pending.remove(&next_to_store) {
+                    let committing = Instant::now();
                     if aborted_flag() {
                         aborted = true;
                         break 'receive;
                     }
+                    if in_group == 0 {
+                        if let Err(e) = self.store.begin_batch() {
+                            failure = Some(e.into());
+                            break 'receive;
+                        }
+                    }
                     let file_path = &files[next_to_store];
                     if let Err(e) = self.commit_prepared(&mut tally, file_path, item, total, &mut emit) {
+                        self.store.rollback_batch();
+                        in_group = 0;
                         failure = Some(e);
                         break 'receive;
+                    }
+                    in_group += 1;
+                    if in_group >= STORE_GROUP_FILES {
+                        if let Err(e) = self.store.commit_batch() {
+                            failure = Some(e.into());
+                            break 'receive;
+                        }
+                        in_group = 0;
                     }
                     next_to_store += 1;
                     *shared.committed.lock().unwrap_or_else(|e| e.into_inner()) = next_to_store;
                     shared.room.notify_all();
+                    commit += committing.elapsed();
                 }
+            }
+            if in_group > 0 {
+                if let Err(e) = self.store.commit_batch() {
+                    failure = failure.take().or(Some(e.into()));
+                }
+            }
+            if std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty()) {
+                eprintln!("[phase-timing] parse: {workers} workers, writer waited {}ms, committed {}ms", wait.as_millis(), commit.as_millis());
             }
             // Release any worker still waiting for room, and let the ones mid-parse finish.
             shared.stop.store(true, Ordering::SeqCst);
@@ -643,5 +683,20 @@ fn parse_on_big_stack(file_path: &str, content: &str, language: Language, names:
                 ..ExtractionResult::default()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_size_tests {
+    use super::resolve_parse_pool_size;
+
+    #[test]
+    fn the_default_uses_every_core_but_one_and_the_variable_overrides() {
+        assert_eq!(resolve_parse_pool_size(None, 12), 11);
+        assert_eq!(resolve_parse_pool_size(None, 64), 63);
+        assert_eq!(resolve_parse_pool_size(None, 1), 1);
+        assert_eq!(resolve_parse_pool_size(Some("32"), 12), 32);
+        assert_eq!(resolve_parse_pool_size(Some("0"), 12), 1);
+        assert_eq!(resolve_parse_pool_size(Some("lots"), 12), 11);
     }
 }
