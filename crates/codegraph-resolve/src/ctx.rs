@@ -8,6 +8,7 @@
 //! effect on results.
 
 use crate::go_module::{find_go_module_for_import, go_module_package_dir, load_go_module, GoModule};
+use crate::js_class_expressions::{build_class_expression_index, ClassExpressionIndex};
 use crate::import_resolver::{
     extract_import_mappings, extract_re_exports, is_external_import, load_cpp_include_dirs, resolve_import_path,
     ExternalOpts,
@@ -207,7 +208,18 @@ pub struct Ctx {
     /// The manual mocks' names: None until read, then Some(None) when the project has none.
     manual_mocks: RefCell<Option<Option<Rc<ManualMockNames>>>>,
     mockless_caches: RefCell<MocklessCaches>,
-    mockless_memos: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
+    /// Resolving a TS/JS reference outside the named class expressions: lookups answer as if
+    /// their classes and members were not indexed (#2499).
+    class_free: Cell<bool>,
+    /// The class expressions' classes: None until read, then Some(None) when there are none.
+    class_expressions: RefCell<Option<Option<Rc<ClassExpressionIndex>>>>,
+    /// The names only the class expressions' classes and members carry.
+    class_only_names: RefCell<Option<Rc<HashSet<String>>>>,
+    /// The class-expression-free view's nodes by kind, by whether the mock-free view is on too.
+    class_free_by_kind: RefCell<HashMap<(bool, NodeKind), NodeList>>,
+    /// The memos of the views other than the whole graph, by view (`view_bits`): a TypeScript
+    /// WeakMap keyed by the view's context object.
+    view_memos: RefCell<HashMap<(u8, TypeId), Rc<dyn Any>>>,
 }
 
 impl Ctx {
@@ -250,7 +262,11 @@ impl Ctx {
             mockless: Cell::new(false),
             manual_mocks: RefCell::new(None),
             mockless_caches: RefCell::new(MocklessCaches::default()),
-            mockless_memos: RefCell::new(HashMap::new()),
+            class_free: Cell::new(false),
+            class_expressions: RefCell::new(None),
+            class_only_names: RefCell::new(None),
+            class_free_by_kind: RefCell::new(HashMap::new()),
+            view_memos: RefCell::new(HashMap::new()),
         })
     }
 
@@ -278,15 +294,28 @@ impl Ctx {
     /// `T` carries its own interior mutability; give each memo its own newtype.
     pub fn memo<T: Default + 'static>(&self) -> Rc<T> {
         let id = TypeId::of::<T>();
-        // The mock-free view keeps memos of its own, as a TypeScript WeakMap keyed by the
-        // view's context object does.
-        let memos = if self.mockless.get() { &self.mockless_memos } else { &self.memos };
-        if let Some(m) = memos.borrow().get(&id) {
+        // Each view keeps memos of its own, as a TypeScript WeakMap keyed by the view's context
+        // object does.
+        let view = self.view_bits();
+        if view != 0 {
+            if let Some(m) = self.view_memos.borrow().get(&(view, id)) {
+                return Rc::clone(m).downcast::<T>().ok().expect("memo type id collision");
+            }
+            let m: Rc<T> = Rc::new(T::default());
+            self.view_memos.borrow_mut().insert((view, id), m.clone() as Rc<dyn Any>);
+            return m;
+        }
+        if let Some(m) = self.memos.borrow().get(&id) {
             return Rc::clone(m).downcast::<T>().ok().expect("memo type id collision");
         }
         let m: Rc<T> = Rc::new(T::default());
-        memos.borrow_mut().insert(id, m.clone() as Rc<dyn Any>);
+        self.memos.borrow_mut().insert(id, m.clone() as Rc<dyn Any>);
         m
+    }
+
+    /// Which view lookups answer for: bit 0 the mock-free one, bit 1 the class-expression-free one.
+    fn view_bits(&self) -> u8 {
+        u8::from(self.mockless.get()) | (u8::from(self.class_free.get()) << 1)
     }
 
     /// The names the project's manual mocks declare, None when it has none; read once per
@@ -315,10 +344,83 @@ impl Ctx {
     /// Run `f` on the mock-free view when `on` (production code in a project with manual
     /// mocks, ReferenceResolver.resolveOne), else on the whole graph.
     pub fn with_mockless<R>(&self, on: bool, f: impl FnOnce() -> R) -> R {
-        let outer = self.mockless.replace(on);
+        self.with_view(on, self.class_free.get(), f)
+    }
+
+    /// Run `f` with the mock-free view when `mockless` and the class-expression-free view when
+    /// `class_free` (ReferenceResolver.resolveOne), restoring the outer view after.
+    pub fn with_view<R>(&self, mockless: bool, class_free: bool, f: impl FnOnce() -> R) -> R {
+        let outer = (self.mockless.replace(mockless), self.class_free.replace(class_free));
         let result = f();
-        self.mockless.set(outer);
+        self.mockless.set(outer.0);
+        self.class_free.set(outer.1);
         result
+    }
+
+    /// Whether lookups hide the class expressions' classes and members.
+    pub fn class_free_view(&self) -> bool {
+        self.class_free.get()
+    }
+
+    /// The classes named class expressions declare, read once per cache window; None when
+    /// there are none (ReferenceResolver.classExpressions).
+    pub fn class_expressions(&self) -> Option<Rc<ClassExpressionIndex>> {
+        if let Some(cached) = self.class_expressions.borrow().as_ref() {
+            return cached.clone();
+        }
+        let classes = self.all_nodes_by_kind(NodeKind::Class);
+        let index = build_class_expression_index(
+            &classes,
+            |file| {
+                self.get_file_lines(file)
+                    .or_else(|| self.read_file(file).map(|s| Rc::new(re!(r"\r?\n").split(&s).into_iter().map(String::from).collect())))
+                    .unwrap_or_default()
+            },
+            |files| q("getNodesByFiles", self.store.get_nodes_by_files(files)),
+        )
+        .map(Rc::new);
+        *self.class_expressions.borrow_mut() = Some(index.clone());
+        index
+    }
+
+    /// The names only the class expressions' classes and members carry, which name nothing in
+    /// the view that hides them (classExpressionOnlyNames).
+    pub fn class_expression_only_names(&self) -> Rc<HashSet<String>> {
+        if let Some(cached) = self.class_only_names.borrow().as_ref() {
+            return Rc::clone(cached);
+        }
+        let mut only = HashSet::new();
+        if let Some(index) = self.class_expressions() {
+            let names: HashSet<String> = index.hidden_ids.iter().filter_map(|id| self.node_by_id(id)).map(|n| n.name.clone()).collect();
+            for name in names {
+                if !self.all_nodes_by_name(&name).iter().any(|n| !index.hidden_ids.contains(&n.id)) {
+                    only.insert(name);
+                }
+            }
+        }
+        let only = Rc::new(only);
+        *self.class_only_names.borrow_mut() = Some(Rc::clone(&only));
+        only
+    }
+
+    /// The class expressions while the class-expression-free view is on.
+    fn active_class_expressions(&self) -> Option<Rc<ClassExpressionIndex>> {
+        if self.class_free.get() {
+            self.class_expressions()
+        } else {
+            None
+        }
+    }
+
+    /// `nodes` without the class expressions' classes and members while the view hiding them is
+    /// on (the same list when none is among them).
+    fn keep_visible(&self, nodes: NodeList) -> NodeList {
+        match self.active_class_expressions() {
+            Some(index) if nodes.iter().any(|n| index.hidden_ids.contains(&n.id)) => {
+                Rc::new(nodes.iter().filter(|n| !index.hidden_ids.contains(&n.id)).cloned().collect())
+            }
+            _ => nodes,
+        }
     }
 
     /// The manual mocks' names while the mock-free view is on.
@@ -361,7 +463,10 @@ impl Ctx {
         self.memos.borrow_mut().clear();
         *self.manual_mocks.borrow_mut() = None;
         *self.mockless_caches.borrow_mut() = MocklessCaches::default();
-        self.mockless_memos.borrow_mut().clear();
+        *self.class_expressions.borrow_mut() = None;
+        *self.class_only_names.borrow_mut() = None;
+        self.class_free_by_kind.borrow_mut().clear();
+        self.view_memos.borrow_mut().clear();
     }
 
     /// Pre-build the lightweight caches for resolution: the known file paths and symbol names.
@@ -422,6 +527,14 @@ impl Ctx {
 
     /// Get all nodes in a file.
     pub fn get_nodes_in_file(&self, file_path: &str) -> NodeList {
+        let nodes = self.all_nodes_in_file(file_path);
+        match self.active_class_expressions() {
+            Some(index) if index.files.contains(file_path) => self.keep_visible(nodes),
+            _ => nodes,
+        }
+    }
+
+    fn all_nodes_in_file(&self, file_path: &str) -> NodeList {
         if let Some(c) = self.node_cache.borrow().get(&file_path.to_string()) {
             return c;
         }
@@ -456,6 +569,10 @@ impl Ctx {
 
     /// Get all nodes by name.
     pub fn get_nodes_by_name(&self, name: &str) -> NodeList {
+        self.keep_visible(self.mockless_nodes_by_name(name))
+    }
+
+    fn mockless_nodes_by_name(&self, name: &str) -> NodeList {
         if let Some(mocks) = self.active_mocks() {
             if mocks.names.contains(name) {
                 if let Some(c) = self.mockless_caches.borrow().by_name.get(name) {
@@ -487,15 +604,15 @@ impl Ctx {
             self.qualified_name_cache.borrow_mut().set(qualified_name.to_string(), Rc::clone(&r));
             r
         });
-        if self.active_mocks().is_some() {
-            without_mocks(r)
-        } else {
-            r
-        }
+        self.keep_visible(if self.active_mocks().is_some() { without_mocks(r) } else { r })
     }
 
     /// Get nodes by lowercase name (O(1) lookup for fuzzy matching).
     pub fn get_nodes_by_lower_name(&self, lower_name: &str) -> NodeList {
+        self.keep_visible(self.mockless_nodes_by_lower_name(lower_name))
+    }
+
+    fn mockless_nodes_by_lower_name(&self, lower_name: &str) -> NodeList {
         if let Some(mocks) = self.active_mocks() {
             if mocks.lower_names.contains(lower_name) {
                 if let Some(c) = self.mockless_caches.borrow().by_lower_name.get(lower_name) {
@@ -520,6 +637,19 @@ impl Ctx {
 
     /// Get all nodes of a kind (cached; callers must treat the list as read-only).
     pub fn get_nodes_by_kind(&self, kind: NodeKind) -> NodeList {
+        if self.active_class_expressions().is_none() {
+            return self.mockless_nodes_by_kind(kind);
+        }
+        let key = (self.mockless.get(), kind);
+        if let Some(c) = self.class_free_by_kind.borrow().get(&key) {
+            return Rc::clone(c);
+        }
+        let r = self.keep_visible(self.mockless_nodes_by_kind(kind));
+        self.class_free_by_kind.borrow_mut().insert(key, Rc::clone(&r));
+        r
+    }
+
+    fn mockless_nodes_by_kind(&self, kind: NodeKind) -> NodeList {
         if self.active_mocks().is_some() {
             if let Some(c) = self.mockless_caches.borrow().by_kind.get(&kind) {
                 return Rc::clone(c);
@@ -543,8 +673,9 @@ impl Ctx {
     /// Stream nodes of a kind one at a time, without populating the per-kind cache.
     pub fn for_each_node_of_kind(&self, kind: NodeKind, mut visit: impl FnMut(Node)) {
         let mockless = self.active_mocks().is_some();
+        let hidden = self.active_class_expressions();
         let r = self.store.for_each_node_of_kind(kind, |n| {
-            if !(mockless && is_manual_mock_path(&n.file_path)) {
+            if !(mockless && is_manual_mock_path(&n.file_path)) && !hidden.as_ref().is_some_and(|h| h.hidden_ids.contains(&n.id)) {
                 visit(n);
             }
             true
@@ -557,10 +688,10 @@ impl Ctx {
     /// (language, type, method).
     pub fn get_method_matches(&self, type_name: &str, method_name: &str, language: Language) -> NodeList {
         let matches = self.all_method_matches(type_name, method_name, language);
-        match self.active_mocks() {
+        self.keep_visible(match self.active_mocks() {
             Some(mocks) if mocks.names.contains(method_name) => without_mocks(matches),
             _ => matches,
-        }
+        })
     }
 
     fn all_method_matches(&self, type_name: &str, method_name: &str, language: Language) -> NodeList {

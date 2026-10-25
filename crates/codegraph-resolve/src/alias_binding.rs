@@ -138,13 +138,14 @@ pub fn extract_local_export_aliases(content: &str) -> Vec<LocalExportAlias> {
             }
         }
     }
-    // CommonJS: `exports.setCharset = function setCharset(…)`, `module.exports.x = impl`.
+    // CommonJS: `exports.setCharset = function setCharset(…)`, `module.exports.x = impl`, and a
+    // named class expression, `exports.Router = class Router {…}` (#2499).
     let member_re = re!(
-        r"^[ \t]*(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=\s*(?:(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|([A-Za-z_$][\w$]*)\s*;?[ \t]*$)",
+        r"^[ \t]*(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=\s*(?:(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|class\s+(?!extends\b)([A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)\s*;?[ \t]*$)",
         "gm"
     );
     for member in member_re.captures_iter(content) {
-        let local = member.text(2).or_else(|| member.text(3)).unwrap_or("");
+        let local = member.text(2).or_else(|| member.text(3)).or_else(|| member.text(4)).unwrap_or("");
         out.push(LocalExportAlias { exported_name: member.text(1).unwrap().to_string(), local_name: local.to_string() });
     }
     // `module.exports = { parse, format: formatDate }`.

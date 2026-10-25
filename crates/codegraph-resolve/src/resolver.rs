@@ -506,7 +506,11 @@ impl ReferenceResolver {
 
     /// Cheap pre-filter: could any indexed symbol be what this name refers to?
     fn has_any_possible_match(&self, name: &str) -> bool {
-        let Some(known) = self.ctx.known_names() else { return true };
+        let Some(all) = self.ctx.known_names() else { return true };
+        // In the view outside the class expressions, names only their classes and members carry
+        // name nothing.
+        let only = self.ctx.class_free_view().then(|| self.ctx.class_expression_only_names());
+        let known = Known { all: &all, only: only.as_deref() };
         if known.contains(name) {
             return true;
         }
@@ -583,7 +587,11 @@ impl ReferenceResolver {
     /// (#2455). Test code, a mock included, keeps the whole graph.
     pub fn resolve_one(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
         let mockless = !is_test_path(&r.file_path) && self.ctx.manual_mock_names().is_some();
-        self.ctx.with_mockless(mockless, || self.resolve_one_in(r))
+        // Code outside the named class expressions resolves as if their classes were not
+        // indexed: a class expression's name is bound inside it alone (#2499).
+        let class_free = crate::js_class_expressions::is_class_expression_ref_language(r.language)
+            && self.ctx.class_expressions().is_some_and(|index| crate::js_class_expressions::wants_class_expression_free_view(r, &index));
+        self.ctx.with_view(mockless, class_free, || self.resolve_one_in(r))
     }
 
     fn resolve_one_in(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
@@ -1947,5 +1955,17 @@ fn is_python_builtin_named_method_call(r: &UnresolvedRef) -> bool {
     match r.reference_name.find('.') {
         Some(dot) if dot > 0 => PYTHON_BUILT_IN_METHODS.contains(&r.reference_name[dot + 1..]) && !PYTHON_BUILT_IN_TYPES.contains(&r.reference_name[..dot]),
         _ => false,
+    }
+}
+
+/// The known-name set with the names a view hides taken out (hasAnyPossibleMatch's `known`).
+struct Known<'a> {
+    all: &'a std::collections::HashSet<String>,
+    only: Option<&'a std::collections::HashSet<String>>,
+}
+
+impl Known<'_> {
+    fn contains(&self, name: &str) -> bool {
+        self.all.contains(name) && !self.only.is_some_and(|o| o.contains(name))
     }
 }
