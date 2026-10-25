@@ -22,8 +22,11 @@ fn orphaned_server(home: &Path, project: &Path, daemon: bool) -> (std::process::
         c
     } else {
         let mut c = Command::new("sh");
-        // A background job's stdin is /dev/null unless redirected from a saved copy.
-        c.arg("-c").arg(format!("exec 3<&0; '{exe}' serve --mcp <&3 &"));
+        // A background job's stdin is /dev/null unless redirected from a saved copy. The shell
+        // lives on briefly so the server starts as its child: POSIX signals parent death by
+        // reparenting, so a server that starts already reparented has no change to notice (as
+        // in the TypeScript watchdog, which also must not treat pid 1 itself as orphaning).
+        c.arg("-c").arg(format!("exec 3<&0; '{exe}' serve --mcp <&3 & sleep 2"));
         c
     };
     shell
