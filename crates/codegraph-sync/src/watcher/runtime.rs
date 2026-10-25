@@ -103,6 +103,7 @@ enum Message {
     Native(u64, notify::Result<notify::Event>),
     Finished(SyncRequest, Result<WatchSyncResult, SyncError>),
     Flush(mpsc::Sender<bool>),
+    Full(mpsc::Sender<bool>),
     Shutdown,
 }
 struct Shared {
@@ -282,6 +283,16 @@ impl FileWatcher {
         }
         let (tx, rx) = mpsc::channel();
         self.tx.send(Message::Flush(tx)).is_ok() && rx.recv().unwrap_or(false)
+    }
+    /// Reconcile the whole project now, with no file event to start it: the catch-up an MCP
+    /// server runs after opening a project, for edits made while nothing watched. False when
+    /// the watcher is not active. Follow with `wait_until_idle` to wait for it.
+    pub fn request_full_sync(&self) -> bool {
+        if thread::current().id() == self.driver_id {
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Message::Full(tx)).is_ok() && rx.recv().unwrap_or(false)
     }
     pub fn snapshot(&self) -> WatchSnapshot {
         self.shared.lock().snapshot.clone()
@@ -541,6 +552,16 @@ impl Driver {
             Message::Flush(reply) => {
                 let started = self.dispatch_sync();
                 let _ = reply.send(started);
+            }
+            Message::Full(reply) => {
+                let active = {
+                    let mut state = self.shared.lock();
+                    state.request_full(now_ms());
+                    state.snapshot.active
+                };
+                // A sync already in flight keeps the full scan queued for right after it.
+                self.dispatch_sync();
+                let _ = reply.send(active);
             }
             Message::Finished(request, result) => {
                 let effects = self.shared.lock().complete(&request, result, now_ms());

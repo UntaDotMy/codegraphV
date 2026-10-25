@@ -218,6 +218,7 @@ impl ToolHandler {
             match CodeGraph::open(&root,OpenOptions::default()){
                 Ok(mut cg)=>{
                     if self.watch{let _=cg.watch(WatchOptions::default());}
+                    catch_up(&mut cg, &root);
                     if self.projects.len()>=8{if let Some((old_root,old))=self.projects.shift_remove_index(0){self.used_at.remove(&old_root);old.close();}}
                     self.projects.insert(root.clone(),cg);
                 },Err(error)=>return ToolResult::error(format!("Could not open CodeGraph: {error}. Retry once; if it persists, report the failure."))
@@ -317,4 +318,24 @@ pub fn required<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolResult> 
                 "{name} must be a non-empty string (at most 10000 characters)."
             ))
         })
+}
+
+/// The post-open reconcile (TS `catchUpSync` + `awaitCatchUpGate`): edits, adds and deletes
+/// made while no server watched the project are synced before the first tool call is served.
+/// The wait is time-boxed — CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS, default 3000, 0 = always wait —
+/// so a huge reconcile never reads as a hang; it then finishes in the background.
+fn catch_up(cg: &mut CodeGraph, root: &str) {
+    let timeout_ms = std::env::var("CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .unwrap_or(3000.0);
+    let wait = (timeout_ms > 0.0).then(|| std::time::Duration::from_millis(timeout_ms as u64));
+    match cg.catch_up(wait) {
+        Ok(true) => {}
+        Ok(false) => eprintln!(
+            "[CodeGraph MCP] Catch-up reconcile still running after {timeout_ms}ms; serving this tool call now and finishing the reconcile in the background. Set CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS=0 to always wait for it."
+        ),
+        Err(error) => eprintln!("[CodeGraph MCP] Catch-up sync failed for {root}: {error}"),
+    }
 }

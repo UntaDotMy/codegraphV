@@ -130,6 +130,24 @@ impl CodeGraph {
         self.last_watch_revision.set(0);
         self.store().clear_cache();
     }
+    /// Reconcile the index with the files on disk once, for edits made while nothing watched
+    /// (the MCP server's post-open catch-up). Watching: the watcher runs a full sync on its own
+    /// connection and this waits for it up to `wait` (None = until done), returning false when
+    /// it is still running — it then finishes in the background. Not watching: a blocking sync.
+    pub fn catch_up(&mut self, wait: Option<Duration>) -> Result<bool> {
+        if self.store().is_read_only() {
+            return Ok(true);
+        }
+        if let Some(watcher) = self.watcher.as_ref().filter(|w| w.is_active()) {
+            if !watcher.request_full_sync() {
+                return Ok(true);
+            }
+            let done = watcher.wait_until_idle(wait.unwrap_or(Duration::from_secs(u32::MAX as u64))).is_ok();
+            return Ok(done);
+        }
+        self.sync(&IndexOptions::default(), None)?;
+        Ok(true)
+    }
     pub fn is_watching(&self) -> bool {
         self.watcher.as_ref().is_some_and(FileWatcher::is_active)
     }

@@ -68,6 +68,31 @@ fn lifecycle_pending_filters_scope_refresh_and_exact_sync_paths() {
     w.stop();
 }
 
+/// The MCP server's start-up catch-up (OPS-69): with no file event at all, a full reconcile
+/// (paths None) runs at once and the watcher goes idle after it.
+#[test]
+fn request_full_sync_runs_a_full_reconcile_without_events() {
+    let d = fixture();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let record = calls.clone();
+    let w = FileWatcher::new(
+        d.path().to_str().unwrap(),
+        move |paths| {
+            record.lock().unwrap().push(paths);
+            Ok(WatchSyncResult::default())
+        },
+        inert(),
+    )
+    .unwrap();
+    assert!(!w.request_full_sync(), "an inactive watcher runs nothing");
+    assert!(w.start());
+    w.wait_until_ready(Duration::from_secs(2)).unwrap();
+    assert!(w.request_full_sync());
+    w.wait_until_idle(Duration::from_secs(5)).unwrap();
+    assert_eq!(*calls.lock().unwrap(), vec![None]);
+    w.stop();
+}
+
 #[test]
 fn events_arrive_while_sync_is_in_flight_and_are_retained() {
     let d = fixture();
