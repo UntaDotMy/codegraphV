@@ -29,6 +29,7 @@ pub mod commonjs;
 /// `codegraph-text` so query-time crates can share it without the parser.
 pub use codegraph_text as strip_comments;
 mod ccpp;
+mod cfml;
 pub mod cfnptr;
 mod csharp;
 mod dart;
@@ -116,7 +117,7 @@ fn extract_file_with(file_path: &str, source: &str, as_written: &str, language: 
         "cobol" => cobol::extract(file_path, source),
         "vbnet" => vbnet::extract(file_path, source),
         "pascal" => pascal::extract(file_path, source, as_written),
-        "typescript" | "tsx" | "javascript" | "jsx" | "arkts" => tsjs::extract(file_path, source, lang),
+        "typescript" | "tsx" | "javascript" | "jsx" | "arkts" | "cfscript" | "cfquery" => tsjs::extract(file_path, source, lang),
         other => Err(format!("no native walker for language {other}")),
     })?;
     let mut result = decode::decode_tables(&out, file_path, language)?;
@@ -158,6 +159,9 @@ pub fn extract_source(file_path: &str, source: &str, language: Language) -> Resu
         Language::Xml => return Ok(templates::extract_mybatis(file_path, source)),
         Language::Yaml | Language::Twig | Language::Properties => return Ok(ExtractionResult::default()),
         Language::Pascal if matches!(codegraph_types::nodepath::extname(file_path).to_lowercase().as_str(), ".dfm" | ".fmx") => return Ok(templates::extract_dfm(file_path, source)),
+        // CFML dialect-switches between the tag grammar and bare cfscript (CfmlExtractor); a
+        // `.cfs` goes the same way so its unnamed component takes the file's name.
+        Language::Cfml | Language::CfScript => return cfml::extract(file_path, source, language),
         _ => {}
     }
     let pre = pre_parse(file_path, source, language);

@@ -57,8 +57,9 @@ impl<'t> Walker<'t> {
             docstring: crate::docstring::preceding_docstring(node, self.src),
             signature: self.signature_of(node),
             visibility: self.visibility_of(node),
-            is_exported: Some(common_js_export || self.is_exported(node)),
-            is_async: Some(self.is_async(node)),
+            // `commonJsExport || isExported?.()`: absent when the language has no hook.
+            is_exported: if common_js_export { Some(true) } else { self.exported_flag(node) },
+            is_async: self.async_flag(node),
             is_static: self.is_static(node),
             ..Extra::default()
         };
@@ -353,6 +354,10 @@ impl<'t> Walker<'t> {
     /// attributed to the component — never the component the call wraps.
     /// Mirrors captureWrapperArgumentRefs.
     fn capture_wrapper_argument_refs(&mut self, args: Node<'t>, base: Option<Node<'t>>) {
+        // Only a language with a function-as-value spec (FN_REF_SPECS) captures.
+        if !self.variant.is_chain() {
+            return;
+        }
         let Some(mode) = super::fnref::dispatch(args.kind()) else { return };
         if self.stack.is_empty() {
             return;
@@ -378,7 +383,7 @@ impl<'t> Walker<'t> {
         let extra = Extra {
             docstring: crate::docstring::preceding_docstring(node, self.src),
             visibility: self.visibility_of(node),
-            is_exported: Some(!expression && self.is_exported(node)),
+            is_exported: if expression { Some(false) } else { self.exported_flag(node) },
             signature: if expression { resolved_body.map(|body| class_expression_head(self.src, node, body)) } else { None },
             ..Extra::default()
         };
@@ -423,7 +428,7 @@ impl<'t> Walker<'t> {
             docstring: crate::docstring::preceding_docstring(node, self.src),
             signature: self.signature_of(node),
             visibility: self.visibility_of(node),
-            is_async: Some(self.is_async(node)),
+            is_async: self.async_flag(node),
             is_static: self.is_static(node),
             ..Extra::default() // methods carry no isExported (mirrors extractMethod)
         };
@@ -475,7 +480,7 @@ impl<'t> Walker<'t> {
         let name = self.extract_name(node);
         let extra = Extra {
             docstring: crate::docstring::preceding_docstring(node, self.src),
-            is_exported: Some(self.is_exported(node)),
+            is_exported: self.exported_flag(node),
             ..Extra::default()
         };
         let Some(row) = self.create_node("interface", &name, node, extra) else {
@@ -1505,6 +1510,9 @@ impl<'t> Walker<'t> {
     // --- extractImport + binding refs ---------------------------------------------------
 
     pub(super) fn extract_import(&mut self, node: Node<'t>) {
+        if self.variant.is_cf() {
+            return self.extract_cf_import(node);
+        }
         let import_text = self.text(node).trim().to_string();
         // typescriptExtractor.extractImport: the `source` field, quotes stripped
         // globally. A missing/empty module means the hook declined — no node.
@@ -1615,6 +1623,9 @@ impl<'t> Walker<'t> {
     }
 
     pub(super) fn extract_call(&mut self, node: Node<'t>) {
+        if self.variant.is_cf() {
+            return self.extract_cf_call(node);
+        }
         if self.stack.is_empty() {
             return;
         }
@@ -2185,6 +2196,10 @@ impl<'t> Walker<'t> {
                 // TS class_heritage wraps extends/implements — recurse.
                 "field_declaration_list" | "class_heritage" => {
                     self.extract_inheritance(child, class_row);
+                }
+                // CFML `component extends="Base" implements="IFoo,IBar" { … }`.
+                "component_attribute" if node.kind() == "component" => {
+                    self.cf_component_attribute_inheritance(child, class_row);
                 }
                 _ => {}
             }

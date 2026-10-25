@@ -210,6 +210,16 @@ struct PersistOutcome {
 
 /// Below this many pending references a run stays on one thread: a worker's own connection and
 /// cold caches cost more than it saves.
+/// A CFML call on a construction, `a.b.Batch().init` (#2652); CFML names may hold `$` (`$init`).
+const CFML_CONSTRUCTED_CALL: &str = r"^([A-Za-z_$][\w$.-]*)\(\)\.([A-Za-z_$][\w$]*)$";
+
+/// Whether a CFML `imports` name is the path of a template an include names (rather than a
+/// component `import` path): no `:`, and a separator or a CFML template extension.
+fn is_cfml_template_path(name: &str) -> bool {
+    !name.contains(':')
+        && (name.contains('/') || name.contains('\\') || re!(r"\.(?:cfml?|cfc|cfs)$", "i").is_match(codegraph_types::jscompat::js_trim(name)))
+}
+
 const PARALLEL_MIN_REFS: usize = 100_000;
 const MAX_RESOLVE_WORKERS: usize = 4;
 /// Address space for a worker's stack, as for the parse workers: the matchers recurse.
@@ -756,6 +766,29 @@ impl ReferenceResolver {
             && (r.reference_name.contains('.') || r.reference_name.contains('/'))
         {
             return self.resolve_cfml_component_path(r);
+        }
+        // The component a CFML `createObject("component", "a.b.Batch")` makes, named by its
+        // component path, and a call chained onto a construction (`a.b.Batch().init`): a method
+        // of that component or of nothing — no name match may guess past it (#2652).
+        if matches!(r.language, Language::Cfml | Language::CfScript) {
+            if r.is_kind(EdgeKind::Instantiates) && r.reference_name.contains('.') {
+                return self.resolve_cfml_component_path(r);
+            }
+            if r.is_kind(EdgeKind::Calls) && re!(CFML_CONSTRUCTED_CALL).is_match(&r.reference_name) {
+                return self.resolve_cfml_constructed_call(r);
+            }
+        }
+        // A CFML include names a template by its path from the including file's directory, or
+        // from the web root (#2651); a path no file here matches goes by file name, to a file
+        // only, and never to the including file itself.
+        if matches!(r.language, Language::Cfml | Language::CfScript) && r.is_kind(EdgeKind::Imports) && is_cfml_template_path(&r.reference_name) {
+            let included = self.resolve_cfml_include_path(r).or_else(|| match_by_file_path(r, &self.ctx));
+            if let Some(inc) = &included {
+                if self.node_by_id(&inc.target_node_id).is_some_and(|n| n.file_path == r.file_path) {
+                    return None;
+                }
+            }
+            return self.gate_language(included, r);
         }
 
         let php_qualified = resolve_php_qualified_class_ref(r, ctx);
@@ -1726,33 +1759,168 @@ impl ReferenceResolver {
         let class_name = segments[segments.len() - 1];
         let dir_segments = &segments[..segments.len() - 1];
 
-        let mut best: Option<NodeRef> = None;
-        let mut best_score = 0usize;
-        let mut tie = false;
+        // Production code never names a component in a test suite; a test can name one, by
+        // the path to it.
+        let from_test = is_test_path(&r.file_path);
+        let mut best_score = 0f64;
+        let mut tied: Vec<NodeRef> = Vec::new();
         for cand in cfml_candidates(class_name) {
+            if !from_test && is_test_suite_path(&cand.file_path) {
+                continue;
+            }
             let path = cand.file_path.replace('\\', "/");
             let all: Vec<&str> = path.split('/').collect();
             let dirs = &all[..all.len() - 1];
-            let mut score = 0usize;
-            while score < dir_segments.len()
-                && score < dirs.len()
-                && crate::ctx::js_lower(dir_segments[dir_segments.len() - 1 - score]) == crate::ctx::js_lower(dirs[dirs.len() - 1 - score])
+            let mut matched = 0usize;
+            while matched < dir_segments.len()
+                && matched < dirs.len()
+                && crate::ctx::js_lower(dir_segments[dir_segments.len() - 1 - matched]) == crate::ctx::js_lower(dirs[dirs.len() - 1 - matched])
             {
-                score += 1;
+                matched += 1;
+            }
+            let mut score = matched as f64;
+            if matched == 0
+                && dirs.is_empty()
+                && dir_segments.len() == 1
+                && crate::ctx::js_lower(&re!(r"\.cfc$", "i").replace_first(&cand.file_path, |_| String::new())) == crate::ctx::js_lower(class_name)
+            {
+                score = 0.5; // a root component, named by the mapping onto the root
             }
             if score > best_score {
-                best = Some(cand.clone());
                 best_score = score;
-                tie = false;
-            } else if score == best_score && score > 0 {
-                tie = true;
+                tied = vec![cand.clone()];
+            } else if score == best_score && score > 0.0 {
+                tied.push(cand.clone());
             }
         }
-        let best = best?;
-        if best_score == 0 || tie {
+        // A test's tie between a component and a suite mirroring its path: the path names the
+        // component, as it does from production code.
+        if tied.len() > 1 {
+            tied.retain(|c| !is_test_suite_path(&c.file_path));
+        }
+        if best_score == 0.0 || tied.len() != 1 {
             return None;
         }
-        Some(ResolvedRef::new(r, best.id.clone(), 0.9, ResolvedBy::QualifiedName))
+        let confidence = if best_score >= 1.0 { 0.9 } else { 0.8 };
+        Some(ResolvedRef::new(r, tied[0].id.clone(), confidence, ResolvedBy::QualifiedName))
+    }
+
+    /// A CFML call chained onto a construction (#2652), encoded `a.b.Batch().init`: the method
+    /// of the component the path (or a bare name) reaches, its own or inherited; else nothing.
+    fn resolve_cfml_constructed_call(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
+        let caps = re!(CFML_CONSTRUCTED_CALL).captures(&r.reference_name)?;
+        let component = caps.text(1)?;
+        let method_name = caps.text(2)?;
+        let cls = if component.contains('.') {
+            let mut sub = r.clone();
+            sub.reference_name = component.to_string();
+            sub.reference_kind = ReferenceKind::Edge(EdgeKind::Instantiates);
+            let target = self.resolve_cfml_component_path(&sub)?;
+            self.node_by_id(&target.target_node_id)
+        } else {
+            self.cfml_component_by_name(component, &r.file_path)
+        }?;
+        let mut seen = HashSet::new();
+        let method = self.cfml_method_of(&cls, &crate::ctx::js_lower(method_name), &mut seen)?;
+        Some(ResolvedRef::new(r, method.id.clone(), 0.9, ResolvedBy::InstanceMethod))
+    }
+
+    /// The CFML component a bare name reaches from `from_file`: the one in its directory, else
+    /// the only one so named.
+    fn cfml_component_by_name(&self, name: &str, from_file: &str) -> Option<NodeRef> {
+        let components: Vec<NodeRef> = self
+            .ctx
+            .get_nodes_by_lower_name(&crate::ctx::js_lower(name))
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Interface) && matches!(n.language, Language::Cfml | Language::CfScript))
+            .cloned()
+            .collect();
+        let dir_of = |p: &str| -> String { p[..p.rfind('/').map_or(0, |i| i + 1)].to_string() };
+        let from_dir = dir_of(from_file);
+        let beside: Vec<&NodeRef> = components.iter().filter(|n| dir_of(&n.file_path) == from_dir).collect();
+        if beside.len() == 1 {
+            return Some(beside[0].clone());
+        }
+        if components.len() == 1 {
+            components.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    /// A CFML component's method by its lowercased name (CFML names ignore case): its own, else
+    /// one a supertype has.
+    fn cfml_method_of(&self, cls: &NodeRef, lower_name: &str, seen: &mut HashSet<String>) -> Option<NodeRef> {
+        if seen.contains(&cls.id) || seen.len() >= 8 {
+            return None;
+        }
+        seen.insert(cls.id.clone());
+        let own_prefix = format!("{}::", cls.name);
+        let own = self
+            .ctx
+            .get_nodes_in_file(&cls.file_path)
+            .iter()
+            .find(|n| {
+                n.kind == NodeKind::Method
+                    && crate::ctx::js_lower(&n.name) == lower_name
+                    && crate::ctx::js_lower(&n.qualified_name) == crate::ctx::js_lower(&format!("{}{}", own_prefix, n.name))
+                    && n.start_line >= cls.start_line
+                    && n.end_line <= cls.end_line
+            })
+            .cloned();
+        if own.is_some() {
+            return own;
+        }
+        for supertype in self.ctx.get_supertype_nodes(&cls.id).iter() {
+            if let Some(inherited) = self.cfml_method_of(supertype, lower_name, seen) {
+                return Some(inherited);
+            }
+        }
+        None
+    }
+
+    /// The file a CFML include names (#2651): relative to the including file's directory, or to
+    /// the web root (taken as the project root, less surely) when it starts with `/`. A single
+    /// file that matches ignoring case counts too.
+    fn resolve_cfml_include_path(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
+        let written = codegraph_types::jscompat::js_trim(&r.reference_name).replace('\\', "/");
+        let from_root = written.starts_with('/');
+        let mut parts: Vec<String> = if from_root {
+            Vec::new()
+        } else {
+            let p = r.file_path.replace('\\', "/");
+            let all: Vec<&str> = p.split('/').collect();
+            all[..all.len() - 1].iter().map(|s| s.to_string()).collect()
+        };
+        for seg in written.split('/') {
+            if seg.is_empty() || seg == "." {
+                continue;
+            }
+            if seg == ".." {
+                parts.pop()?; // above the project root
+            } else {
+                parts.push(seg.to_string());
+            }
+        }
+        let file_name = parts.last().filter(|f| !f.is_empty())?;
+        let wanted = parts.join("/");
+        let files: Vec<NodeRef> = self
+            .ctx
+            .get_nodes_by_lower_name(&crate::ctx::js_lower(file_name))
+            .iter()
+            .filter(|n| n.kind == NodeKind::File)
+            .cloned()
+            .collect();
+        if let Some(exact) = files.iter().find(|n| n.file_path == wanted) {
+            return Some(ResolvedRef::new(r, exact.id.clone(), if from_root { 0.85 } else { 0.95 }, ResolvedBy::FilePath));
+        }
+        let wanted_lower = crate::ctx::js_lower(&wanted);
+        let folded: Vec<&NodeRef> = files.iter().filter(|n| crate::ctx::js_lower(&n.file_path) == wanted_lower).collect();
+        if folded.len() == 1 {
+            Some(ResolvedRef::new(r, folded[0].id.clone(), if from_root { 0.8 } else { 0.9 }, ResolvedBy::FilePath))
+        } else {
+            None
+        }
     }
 
     /// `this.method` passed as a value: the method on the enclosing class.

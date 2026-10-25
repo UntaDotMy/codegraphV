@@ -135,7 +135,7 @@ pub mod new_receiver;
 
 pub use gate::gate_language_match;
 pub use std_methods::is_std_method_name;
-pub use visibility::{is_visible_across_files, is_visible_by_language};
+pub use visibility::{is_test_suite_path, is_visible_across_files, is_visible_by_language};
 pub use call_chain::{lookup_callee_return_type, match_dotted_call_chain, match_scoped_call_chain};
 pub use go::*;
 pub use java::is_java_type_visible;

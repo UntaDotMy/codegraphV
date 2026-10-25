@@ -9,6 +9,7 @@
 //! parity gate fails. Positions are emitted in UTF-16 code units (what
 //! web-tree-sitter reports), see util::col16.
 
+mod cfscript;
 mod extractors;
 mod fnref;
 use crate::textutil as util;
@@ -32,6 +33,11 @@ pub enum Variant {
     /// ArkTS (`.ets`): the typescript extractor plus `struct_declaration`, the ArkUI call
     /// shapes and decorator names on nodes (languages/arkts.ts). Outside TS_JS_CHAIN_LANGUAGES.
     Arkts,
+    /// CFScript (`component { … }`, `<cfscript>` bodies and tag expressions of CFML files):
+    /// languages/cfscript.ts over the generic walker. Outside TS_JS_CHAIN_LANGUAGES.
+    Cfscript,
+    /// The `#…#` expressions of a `<cfquery>` body (languages/cfquery.ts): calls only.
+    Cfquery,
 }
 
 impl Variant {
@@ -42,6 +48,8 @@ impl Variant {
             "javascript" => Some(Variant::Javascript),
             "jsx" => Some(Variant::Jsx),
             "arkts" => Some(Variant::Arkts),
+            "cfscript" => Some(Variant::Cfscript),
+            "cfquery" => Some(Variant::Cfquery),
             _ => None,
         }
     }
@@ -53,7 +61,11 @@ impl Variant {
     /// TS_JS_CHAIN_LANGUAGES (tree-sitter.ts) and the gates that spell those four out: every
     /// variant but ArkTS. ArkTS has no function-as-value spec either (FN_REF_SPECS).
     fn is_chain(self) -> bool {
-        !matches!(self, Variant::Arkts)
+        matches!(self, Variant::Typescript | Variant::Tsx | Variant::Javascript | Variant::Jsx)
+    }
+    /// The CFML grammars (cfscript, cfquery): their own config and dispatch (cfscript.rs).
+    fn is_cf(self) -> bool {
+        matches!(self, Variant::Cfscript | Variant::Cfquery)
     }
 }
 
@@ -511,6 +523,10 @@ impl<'t> Walker<'t> {
         let scopes = std::mem::take(&mut self.value_scopes);
         let mut targets = std::mem::take(&mut self.fs_values);
         let counts = std::mem::take(&mut self.fs_value_counts);
+        // VALUE_REF_LANGS has no CFML grammar.
+        if self.variant.is_cf() {
+            return;
+        }
         if std::env::var("CODEGRAPH_VALUE_REFS").as_deref() == Ok("0") {
             return;
         }
@@ -684,6 +700,9 @@ impl<'t> Walker<'t> {
 
     fn visit_node(&mut self, node: Node<'t>) {
         stack_guard!();
+        if self.variant.is_cf() {
+            return self.visit_node_cf(node);
+        }
         let kind = node.kind();
         let mut skip_children = false;
 
@@ -802,6 +821,9 @@ impl<'t> Walker<'t> {
 
     fn visit_for_calls_and_structure(&mut self, node: Node<'t>) {
         stack_guard!();
+        if self.variant.is_cf() {
+            return self.visit_body_cf(node);
+        }
         let kind = node.kind();
         self.maybe_capture_fn_refs(node);
 
@@ -1011,7 +1033,7 @@ impl<'t> Walker<'t> {
     fn extract_name(&self, node: Node) -> String {
         // javascriptExtractor.resolveName: field_definition names its key the
         // `property` field.
-        if !self.variant.is_ts() && node.kind() == "field_definition" {
+        if matches!(self.variant, Variant::Javascript | Variant::Jsx) && node.kind() == "field_definition" {
             if let Some(prop) = node.child_by_field_name("property") {
                 return self.text(prop).to_string();
             }
@@ -1049,6 +1071,9 @@ impl<'t> Walker<'t> {
 
     /// typescriptExtractor.getVisibility (TS only — JS has no hook).
     fn visibility_of(&self, node: Node) -> Option<u8> {
+        if self.variant.is_cf() {
+            return self.cf_visibility(node);
+        }
         if !self.variant.is_ts() {
             return None;
         }
@@ -1100,9 +1125,23 @@ impl<'t> Walker<'t> {
         self.has_keyword_child(node, "async")
     }
 
+    /// The isAsync hook's answer: absent for the CFML grammars.
+    fn async_flag(&self, node: Node) -> Option<bool> {
+        (!self.variant.is_cf()).then(|| self.is_async(node))
+    }
+
+    /// The isExported hook's answer for a declaration that carries it: absent for the CFML
+    /// grammars, which have no hook.
+    fn exported_flag(&self, node: Node) -> Option<bool> {
+        (!self.variant.is_cf()).then(|| self.is_exported(node))
+    }
+
     /// A member's own `static` keyword: the isStatic hook TS and JS share
     /// (hasStaticModifier, #2761).
     fn is_static(&self, node: Node) -> Option<bool> {
+        if self.variant.is_cf() {
+            return None;
+        }
         Some(self.has_keyword_child(node, "static"))
     }
 
