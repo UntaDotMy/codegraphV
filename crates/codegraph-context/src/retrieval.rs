@@ -476,13 +476,18 @@ impl ContextBuilder<'_> {
             }
             if hierarchy_kind(r.node.kind) {
                 let hierarchy = traverser.get_type_hierarchy(&r.node.id)?;
+                // The budget holds per node: a widely implemented interface brings its whole
+                // descendant tree (IDisposable: hundreds of types).
                 for (id, n) in hierarchy.nodes {
-                    if !graph.nodes.contains_key(&id) {
+                    if !graph.nodes.contains_key(&id) && added < max_hierarchy {
                         graph.nodes.insert(id, n);
                         added += 1;
                     }
                 }
-                merge_edges(&mut graph.edges, hierarchy.edges);
+                merge_edges(
+                    &mut graph.edges,
+                    hierarchy.edges.into_iter().filter(|e| graph.nodes.contains_key(&e.source) && graph.nodes.contains_key(&e.target)).collect(),
+                );
             }
         }
         if added > 0 {

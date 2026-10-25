@@ -243,8 +243,11 @@ impl<'a> GraphTraverser<'a> {
             ..Subgraph::default()
         };
         out.nodes.insert(id.to_owned(), focal);
-        let mut visited = HashSet::new();
         for direction in [Direction::Outgoing, Direction::Incoming] {
+            // Each direction keeps its own visited set: the ancestor walk marks the focal node
+            // first, and a shared set ended the descendant walk before it read one incoming
+            // edge, so no type ever had subtypes (#2833).
+            let mut visited = HashSet::new();
             let mut stack = vec![(id.to_owned(), None::<Ref>)];
             while let Some((id, step)) = stack.pop() {
                 if let Some(step) = step {
