@@ -11,12 +11,13 @@ fn main() {
     let language = codegraph_types::Language::parse(lang).expect("language");
     let pre = codegraph_extract::pre_parse(path, &source, language);
     let grammar = codegraph_extract::grammar_for(lang).expect("grammar");
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&grammar).unwrap();
-    let utf8 = parser.parse(&pre, None).unwrap();
-    let units: Vec<u16> = pre.encode_utf16().collect();
-    parser.reset();
-    let utf16 = parser.parse_utf16_le(&units, None).unwrap();
+    let (utf8, utf16) = codegraph_extract::ts::with_parser(&grammar, lang, |parser| {
+        let utf8 = parser.parse(&pre, None).unwrap();
+        let units: Vec<u16> = pre.encode_utf16().collect();
+        parser.reset();
+        (utf8, parser.parse_utf16_le(&units, None).unwrap())
+    })
+    .unwrap();
     let out = std::io::stdout();
     let mut out = out.lock();
     writeln!(out, "utf8 has_error={} sexp_len={}", utf8.root_node().has_error(), utf8.root_node().to_sexp().len()).unwrap();

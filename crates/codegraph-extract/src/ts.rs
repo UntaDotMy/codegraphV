@@ -90,8 +90,36 @@ impl Tree {
 /// is returned is the one the walker uses, and `stack::note_tree_error` is told
 /// whether *it* has errors.
 pub fn parse(grammar: &Language, language: &str, source: &str) -> Result<Tree, String> {
+    with_parser(grammar, language, |parser| parse_with(parser, source))?
+}
+
+thread_local! {
+    /// This thread's wasm store, lent to each parser of a wasm grammar (`crate::wasm_grammars`).
+    static WASM_STORE: std::cell::RefCell<Option<tree_sitter::WasmStore>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with a parser set to `grammar`. A wasm grammar's parser gets this thread's wasm store,
+/// which goes back to the thread afterwards, so its instance of the grammar is reused.
+pub fn with_parser<R>(grammar: &Language, language: &str, f: impl FnOnce(&mut tree_sitter::Parser) -> R) -> Result<R, String> {
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(grammar).map_err(|e| format!("set_language({language}) failed: {e}"))?;
+    let wasm = grammar.is_wasm();
+    if wasm {
+        let store = match WASM_STORE.take() {
+            Some(store) => store,
+            None => tree_sitter::WasmStore::new(crate::wasm_grammars::engine()).map_err(|e| format!("wasm store: {}", e.message))?,
+        };
+        parser.set_wasm_store(store).map_err(|e| format!("set_wasm_store({language}) failed: {e}"))?;
+    }
+    let result = parser.set_language(grammar).map(|_| f(&mut parser)).map_err(|e| format!("set_language({language}) failed: {e}"));
+    if wasm {
+        if let Some(store) = parser.take_wasm_store() {
+            WASM_STORE.set(Some(store));
+        }
+    }
+    result
+}
+
+fn parse_with(parser: &mut tree_sitter::Parser, source: &str) -> Result<Tree, String> {
     let utf8 = parser.parse(source, None).ok_or_else(|| "parser returned null tree".to_string())?;
     if !utf8.root_node().has_error() {
         return Ok(Tree { inner: utf8, offsets: Offsets::Utf8 });

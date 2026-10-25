@@ -59,6 +59,7 @@ pub mod ts;
 mod swift;
 mod textutil;
 mod tsjs;
+mod wasm_grammars;
 
 pub use decode::decode_tables;
 pub use langs::{grammar_for, LANGUAGES as NATIVE_LANGUAGES};

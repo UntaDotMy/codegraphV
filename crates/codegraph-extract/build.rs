@@ -45,4 +45,34 @@ fn main() {
     compile(&root, "nix", false, false);
     // solidity: JoranHonig b239a95 src/ as published (ABI 14) — the commit tree-sitter-wasms 0.1.13 built.
     compile(&root, "solidity", false, false);
+    // objc: amaanq tree-sitter-objc 2.1.0 src/ (ABI 14, no scanner) — the npm release
+    // tree-sitter-wasms 0.1.13 built its objc wasm from; parser.c is sha-identical in the npm and
+    // crates.io tarballs. Native, because that wasm's old `dylink` section can't be loaded.
+    compile(&root, "objc", false, false);
+    deflate_wasm_grammars(&manifest);
+}
+
+/// The grammars the engine loads from the TypeScript engine's own `.wasm` files (see
+/// src/wasm_grammars.rs), deflated into OUT_DIR so the binary embeds them small: COBOL's 16 MB
+/// table is under 1 MB deflated.
+fn deflate_wasm_grammars(manifest: &std::path::Path) {
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let shipped = manifest.join("..").join("..").join("src").join("extraction").join("wasm");
+    for (dir, file) in [
+        (&shipped, "tree-sitter-arkts.wasm"),
+        (&shipped, "tree-sitter-pascal.wasm"),
+        (&shipped, "tree-sitter-vbnet.wasm"),
+        (&shipped, "tree-sitter-cobol.wasm"),
+        (&shipped, "tree-sitter-erlang.wasm"),
+        (&shipped, "tree-sitter-terraform.wasm"),
+        (&shipped, "tree-sitter-cfml.wasm"),
+        (&shipped, "tree-sitter-cfscript.wasm"),
+        (&shipped, "tree-sitter-cfquery.wasm"),
+    ] {
+        let path = dir.join(file);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let packed = miniz_oxide::deflate::compress_to_vec(&bytes, 9);
+        std::fs::write(out.join(format!("{file}.deflate")), packed).unwrap();
+    }
 }

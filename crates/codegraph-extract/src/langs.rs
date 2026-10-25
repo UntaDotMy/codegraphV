@@ -45,6 +45,8 @@ extern "C" {
     fn tree_sitter_nix() -> *const ();
     // JoranHonig/tree-sitter-solidity b239a95, src/ as published (ABI 14).
     fn tree_sitter_solidity() -> *const ();
+    // amaanq/tree-sitter-objc 2.1.0, src/ as published (ABI 14) — what tree-sitter-wasms 0.1.13 built.
+    fn tree_sitter_objc() -> *const ();
 }
 
 /// Languages this kernel binary can extract (reported by contractInfo;
@@ -112,6 +114,9 @@ pub fn grammar_for(language: &str) -> Option<Language> {
         }
         "nix" => Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_nix) }.into()),
         "solidity" => Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_solidity) }.into()),
-        _ => None,
+        "objc" => Some(unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_objc) }.into()),
+        // arkts, pascal, vbnet, cobol, erlang, terraform and the CFML grammars: the
+        // TypeScript engine's own .wasm files (wasm_grammars.rs).
+        other => crate::wasm_grammars::grammar(other),
     }
 }

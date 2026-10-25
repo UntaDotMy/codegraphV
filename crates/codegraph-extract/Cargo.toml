@@ -18,6 +18,8 @@ regex.workspace = true
 pcre2 = "0.2"
 tree-sitter = { version = "0.25", features = ["wasm"] }
 tree-sitter-language = "0.1"
+# Inflates the wasm grammars build.rs embeds deflated (see src/wasm_grammars.rs).
+miniz_oxide = "0.8"
 
 # Grammars — revision-matched with the wasm grammars the TypeScript engine
 # loads (src/extraction/wasm/ and the tree-sitter-wasms package), so the two
@@ -41,3 +43,4 @@ libc = "0.2"
 
 [build-dependencies]
 cc = "1"
+miniz_oxide = "0.8"
