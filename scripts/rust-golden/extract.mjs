@@ -50,7 +50,7 @@ if (!bin || inputs.length === 0) {
 // Languages the Rust crate extracts natively so far.
 const RUST_LANGS = new Set([
   'typescript', 'tsx', 'javascript', 'jsx', 'java', 'python', 'go', 'c', 'cpp', 'rust', 'csharp', 'ruby',
-  'php', 'swift', 'kotlin', 'r', 'lua', 'luau', 'scala', 'dart', 'nix', 'solidity', 'erlang',
+  'php', 'swift', 'kotlin', 'r', 'lua', 'luau', 'scala', 'dart', 'nix', 'solidity', 'erlang', 'terraform',
 ]);
 const { extractFromSource } = await import(dist('extraction/tree-sitter.js'));
 const { initGrammars, loadGrammarsForLanguages, detectLanguage, isSourceFile } = await import(dist('extraction/grammars.js'));
