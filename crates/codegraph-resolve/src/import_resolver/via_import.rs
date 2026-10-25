@@ -269,9 +269,10 @@ pub fn resolve_php_qualified_class_ref(r: &UnresolvedRef, ctx: &Ctx) -> Tri<Reso
     let fqn = if separator == 0 {
         name[1..].to_string()
     } else {
-        let head = &name[..separator];
+        // PHP matches a namespace alias without regard to case.
+        let head = name[..separator].to_lowercase();
         let imports = ctx.get_import_mappings(&r.file_path, r.language);
-        if let Some(imp) = imports.iter().find(|i| i.local_name == head) {
+        if let Some(imp) = imports.iter().find(|i| i.local_name.to_lowercase() == head) {
             format!("{}{}", imp.source.strip_prefix('\\').unwrap_or(&imp.source), &name[separator..])
         } else {
             let mut namespaces: Vec<NodeRef> =
