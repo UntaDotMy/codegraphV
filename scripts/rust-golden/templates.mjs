@@ -27,7 +27,24 @@ for (const source of [
   "{%- assign foo = 1 -%}\n{%- liquid\n\tinclude 'x'\n assign foo = 2\n-%}",
   "{% assign text = \"{% render 'not-a-tag' %}\" %}{% render 'after' %}",
 ]) add('theme/sections/example.liquid', source, 'liquid');
-for (const source of ['null', '{"sections":{"a":{"type":"hero"},"b":{"type":"hero"},"c":{"type":"footer"}}}', '{"sections":[{"type":"hero"},{"type":0},{"type":""}]}', '{"sections":false}', '{"sections":', '{"sections":{"2":{"type":"two"},"1":{"type":"one"}}}']) add('theme/templates/index.json', source, 'liquid');
+for (const source of ['null', '{"sections":{"a":{"type":"hero"},"b":{"type":"hero"},"c":{"type":"footer"}}}', '{"sections":[{"type":"hero"},{"type":0},{"type":""}]}', '{"sections":false}', '{"sections":', '{"sections":{"2":{"type":"two"},"1":{"type":"one"}}}',
+  // Editor-saved JSONC: comments, trailing commas, and the strictness around them (#2812).
+  '/* IMPORTANT: auto-generated */\n{\n  "sections": {\n    "a": { "type": "hero", },\n    "b": {"type":"😀x"},\n  },\n  "order": ["a", "b",],\n}',
+  '// note\n{"sections":{"a":{"type":"x"}}} // after', '{"sections":{"a":{"type":"x"}} "b":{}}', '/* unclosed {"sections":{"a":{"type":"x"}}}',
+  '{"sections":{"a":{"type":"typ\u0065"},"b":{"ty\u0070e":"esc"},"c":{"type":"a\\"b"}}}', '{"sections":{,}}', '{"sections":{"a":{"type":"x"},,"b":{"type":"y"}}}',
+  '{"sections":{"a":{"type":"one","type":"two"}},"sections":{"z":{"type":"three"}}}', '{"n":-0.5e+3,"t":true,"sections":{"a":{"type":"x"}}}',
+  '{"n":01,"sections":{"a":{"type":"x"}}}', '{"n":-,"sections":{}}', '{"sections":{"a":{"type":"x"}}}\n😀', '{"sections":{"a":{"type":"x"}}} {}',
+  '{"sections":{"a":{"type":"line\nbreak"}}}', '{"sections":{"a":"hero","b":{"type":["x"]},"c":{"type":"ok"}}}', '[{"sections":{}}]', '{"sections":{"a":{"type":"x"}},"z":tru}',
+]) add('theme/templates/index.json', source, 'liquid');
+for (const source of [
+  "{% sections 'header-group' %}{%- sections \"footer-group\" -%}{% section 'header-group' %}",
+  "{% liquid\n sections 'overlay-group'\n render 'x'\n%}",
+  "{% comment %}{% schema %}{\"name\":\"no\"}{% endschema %}{% endcomment %}{% schema %}{\"name\":\"yes\"}{% endschema %}",
+  "{% raw %}{% schema %}{\"name\":\"no\"}{% endschema %}",
+  "{% capture title %}x{% endcapture %}{% capture 'q1' %}{% endcapture %}{% capture \"q2\"-%}{%- endcapture %}{% capture bad-name %}{% capture a.b %}",
+  "{% assign v = 1 %}{% capture v %}{% endcapture %}{% capture v %}{% endcapture %}",
+  "{% liquid\r\n capture inner\r\n echo 1\r\n endcapture\r\n capture 'quoted'\r\n%}",
+]) add('theme/sections/more.liquid', source, 'liquid');
 for (const source of [
   '', 'object Form1: TForm1\n  OnCreate = FormCreate\n  object Button1: TButton\n    OnClick = ButtonClick\n  end\nend',
   'inherited Frame1: TFrame\n Items = <\n item\n object Ghost: TButton\n end>\n inline Button1: TButton\n OnClick = Click\n end\nend',
