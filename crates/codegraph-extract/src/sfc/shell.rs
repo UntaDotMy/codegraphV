@@ -140,6 +140,9 @@ pub(super) fn script_blocks<'a>(
                 && re!(r#"context\s*=\s*["']module["']|(?:^|\s)module(?=[\s=]|$)"#).is_match(attrs);
             let typescript = language == Language::Astro
                 || re!(r#"lang\s*=\s*["'](ts|typescript)["']"#).is_match(attrs);
+            // A Vue block can also be `tsx` (#2570): TypeScript with JSX, which only the TSX
+            // grammar reads (sfcScriptLanguage).
+            let tsx = !typescript && language == Language::Vue && re!(r#"lang\s*=\s*["']tsx["']"#).is_match(attrs);
             let per_instance = if language == Language::Vue {
                 re!(r"\bsetup\b").is_match(attrs)
             } else {
@@ -151,6 +154,8 @@ pub(super) fn script_blocks<'a>(
                 per_instance,
                 script_language: if typescript {
                     Language::TypeScript
+                } else if tsx {
+                    Language::Tsx
                 } else {
                     Language::JavaScript
                 },
