@@ -24,6 +24,7 @@ use crate::import_resolver::{
 };
 use crate::js_builtins::JS_BUILT_INS;
 use crate::name_matcher::*;
+use crate::name_matcher::new_receiver::{is_new_receiver_shape, match_new_receiver_call, new_receiver_class};
 use crate::shopify_themes::match_shopify_theme_file;
 use crate::swift_type_visibility::gate_swift_type_target;
 use crate::type_parameters::gate_type_parameter;
@@ -869,7 +870,19 @@ impl ReferenceResolver {
             && re!(r"^(.+)\(\)\.(\w+)$").is_match(&r.reference_name)
             && (is_js_family(r.language) || r.language == Language::Python)
         {
-            return self.gate_language(match_reference(r, ctx), r);
+            let chain_result = self.gate_language(match_reference(r, ctx), r);
+            // `new Sub().inherited()`: the method may live on a supertype of a project class,
+            // resolvable once extends edges exist — deferred to the conformance pass like the
+            // other chained calls.
+            if chain_result.is_none() && is_new_receiver_shape(r) {
+                let cls = new_receiver_class(r, ctx);
+                if cls.is_some_and(|c| {
+                    ctx.get_nodes_by_name(&c).iter().any(|n| n.kind == NodeKind::Class && same_language_family(n.language, r.language))
+                }) {
+                    self.defer_reference(r, &self.deferred_chain_refs);
+                }
+            }
+            return chain_result;
         }
 
         let self_call = r.language == Language::Python
@@ -1157,6 +1170,8 @@ impl ReferenceResolver {
         for r in &deferred {
             let chain_match = if r.language == Language::Php && re!(r"^this->\w+\.\w+$").is_match(&r.reference_name) {
                 match_method_call(r, ctx)
+            } else if is_new_receiver_shape(r) {
+                match_new_receiver_call(r, ctx)
             } else if r.language == Language::Rust {
                 match_scoped_call_chain(r, ctx)
             } else {

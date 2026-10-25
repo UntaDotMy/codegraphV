@@ -131,6 +131,7 @@ pub mod solidity;
 pub mod dart_code;
 pub mod dart;
 pub mod dart_chain;
+pub mod new_receiver;
 
 pub use gate::gate_language_match;
 pub use std_methods::is_std_method_name;

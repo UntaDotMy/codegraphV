@@ -537,6 +537,9 @@ fn match_reference_inner(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 return Some(chained);
             }
         }
+        if r.reference_name.starts_with("new ") {
+            return super::new_receiver::match_new_receiver_call(r, ctx);
+        }
         return match_store_accessor_chain(r, ctx);
     }
     if let Some(result) = match_method_call(r, ctx) {
