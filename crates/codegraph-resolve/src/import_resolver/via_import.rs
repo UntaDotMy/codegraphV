@@ -918,7 +918,9 @@ fn resolve_rust_path_reference(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedR
 fn find_go_package_member(member_name: &str, imp: &ImportMapping, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let pkg_dir = ctx.get_go_package_dir(&imp.source, Some(&r.file_path))?;
     for node in ctx.get_nodes_by_name(member_name).iter() {
-        if node.language != Language::Go || node.is_exported != Some(true) {
+        // A method is no member of its package: `pkg.Infof` is the package's function, never a
+        // method `(*Logger).Infof` declared beside it.
+        if node.language != Language::Go || node.is_exported != Some(true) || node.kind == NodeKind::Method {
             continue;
         }
         if posix::dirname(&node.file_path.replace('\\', "/")) == pkg_dir {
