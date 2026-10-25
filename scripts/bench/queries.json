@@ -38,6 +38,7 @@
     {
       "name": "codegraph",
       "git": "HEAD",
+      "rev": "592b255e",
       "queries": [
         {"id": "cg-01", "q": "CodeGraph indexAll ExtractionOrchestrator", "targets": ["CodeGraph@src/index.ts", "indexAll@src/index.ts", "ExtractionOrchestrator@src/extraction/index.ts"]},
         {"id": "cg-02", "q": "ToolHandler execute handleExplore", "targets": ["ToolHandler@src/mcp/tools.ts", "execute@src/mcp/tools.ts", "handleExplore@src/mcp/tools.ts"]},
