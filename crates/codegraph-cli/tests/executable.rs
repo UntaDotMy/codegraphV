@@ -103,3 +103,52 @@ fn print_config_never_writes_configuration() {
     assert_eq!(config["mcpServers"]["codegraphV"]["args"][1], "--mcp");
     assert!(!dir.path().join(".cursor").exists());
 }
+
+/// BUG-99: the one-shot CLI tool commands answer from the index as it is (like the TypeScript
+/// CLI) instead of reconciling the whole project first; the MCP server still catches up on open.
+#[test]
+fn cli_explore_reads_the_index_as_is_and_the_server_catches_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let sandboxed = |args: &[&str]| {
+        let mut c = binary();
+        c.args(args).current_dir(dir.path());
+        for var in ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "XDG_CONFIG_HOME"] {
+            c.env(var, home.path());
+        }
+        c.env("CODEGRAPHV_NO_UPDATE_CHECK", "1");
+        c
+    };
+    let ok = |c: &mut Command| {
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    std::fs::write(dir.path().join("app.ts"), "export function start(){return 1;}\n").unwrap();
+    ok(sandboxed(&["init", "--yes"]).stdout(Stdio::piped()));
+    std::fs::write(dir.path().join("later.ts"), "export function later(){return 2;}\n").unwrap();
+
+    ok(&mut sandboxed(&["explore", "later start"]));
+    let query = ok(&mut sandboxed(&["query", "later", "--json"]));
+    assert!(!query.contains("later.ts"), "CLI explore synced the project: {query}");
+
+    let mut child = sandboxed(&["serve", "--mcp", "--no-watch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        for request in [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"codegraphV_explore","arguments":{"query":"later"}}}),
+        ] {
+            writeln!(stdin, "{request}").unwrap();
+        }
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let query = ok(&mut sandboxed(&["query", "later", "--json"]));
+    assert!(query.contains("later.ts"), "the MCP server did not catch up on open: {query}");
+}

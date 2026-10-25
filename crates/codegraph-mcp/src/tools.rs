@@ -80,6 +80,10 @@ pub fn tool_definitions(require_project: bool) -> Vec<Value> {
 pub struct ToolHandler {
     pub default_path: Option<String>,
     pub watch: bool,
+    /// Reconcile a project with the files on disk when it opens (the MCP server's catch-up).
+    /// Off for the one-shot CLI commands, which answer from the index as it is, like the
+    /// TypeScript CLI: a full sync before every query cost most of its time (BUG-99).
+    pub catch_up: bool,
     pub(crate) projects: IndexMap<String, CodeGraph>,
     /// When each open project last answered a call.
     pub(crate) used_at: HashMap<String, Instant>,
@@ -110,6 +114,7 @@ impl ToolHandler {
         Self {
             default_path,
             watch,
+            catch_up: true,
             projects: IndexMap::new(),
             used_at: HashMap::new(),
             idle_timeout: project_idle_timeout(),
@@ -218,7 +223,9 @@ impl ToolHandler {
             match CodeGraph::open(&root,OpenOptions::default()){
                 Ok(mut cg)=>{
                     if self.watch{let _=cg.watch(WatchOptions::default());}
-                    catch_up(&mut cg, &root);
+                    if self.catch_up {
+                        catch_up(&mut cg, &root);
+                    }
                     if self.projects.len()>=8{if let Some((old_root,old))=self.projects.shift_remove_index(0){self.used_at.remove(&old_root);old.close();}}
                     self.projects.insert(root.clone(),cg);
                 },Err(error)=>return ToolResult::error(format!("Could not open CodeGraphV: {error}. Retry once; if it persists, report the failure."))

@@ -319,7 +319,9 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 }
 fn tool(project: Project, name: &str, args: Value) -> Result<()> {
     let path = root(project.path.as_deref())?;
-    let result = ToolHandler::new(Some(path), false).call(name, &args);
+    let mut handler = ToolHandler::new(Some(path), false);
+    handler.catch_up = false; // one-shot: answer from the index as it is (BUG-99)
+    let result = handler.call(name, &args);
     if result.is_error {
         return Err(result.message().into());
     }
