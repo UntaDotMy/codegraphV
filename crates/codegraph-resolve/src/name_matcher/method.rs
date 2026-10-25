@@ -286,7 +286,12 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     }
     if matches!(r.language, Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx) {
         if let Some(m) = re!(r"^this\.(#[\w$]+)\.(\w+)$").captures(name) {
-            return match_ts_this_field_call(m.text(1).unwrap_or(""), m.text(2).unwrap_or(""), r, ctx);
+            return match_ts_this_field_call(m.text(1).unwrap_or(""), m.text(2).unwrap_or(""), r, ctx, false);
+        }
+        // An element of a field — `this.listeners[type].push()`, emitted as
+        // `this.listeners[].push`: the element type the field's declaration writes, or nothing.
+        if let Some(m) = re!(r"^this\.(#?[\w$]+)\[\]\.([\w$]+)$").captures(name) {
+            return match_ts_this_field_call(m.text(1).unwrap_or(""), m.text(2).unwrap_or(""), r, ctx, true);
         }
     }
     let (kind, caps) = if let Some(m) = dot_match {
@@ -589,7 +594,7 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         return match_rust_self_field_call(field, &method_name, r, ctx);
     }
     if matches!(r.language, Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx) && dot && object_or_class.starts_with("this.") {
-        return match_ts_this_field_call(&object_or_class["this.".len()..], &method_name, r, ctx);
+        return match_ts_this_field_call(&object_or_class["this.".len()..], &method_name, r, ctx, false);
     }
     if python_attr_receiver && !PY_CHAIN_GUESSING.with(|g| g.borrow().contains(&chain_key(r))) {
         let mut read: std::collections::BTreeSet<String> = Default::default();

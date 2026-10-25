@@ -26,6 +26,8 @@ pub struct TsFieldDecl {
     pub value_type: bool,
     pub ty: String,
     pub array: bool,
+    /// What one of the field's elements holds: `Item` of `Item[]`, `Array<Item>` or `Record<string, Item>`.
+    pub element: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -132,8 +134,10 @@ fn shape_match(shape: &Shape, caps: &codegraph_jsre::Caps, line: &str) -> Option
         caps.text(1)
     }
     .filter(|t| !t.is_empty())?;
+    let rest = &line[g.end()..];
+    let element = if !shape.value_type && !shape.wrapped && !shape.injected { ts_field_element_type(ty, rest) } else { None };
     let mut decl = TsFieldOnLine {
-        decl: TsFieldDecl { value_type: shape.value_type, ty: ty.to_string(), array: ts_array_suffix(&line[g.end()..]) },
+        decl: TsFieldDecl { value_type: shape.value_type, ty: ty.to_string(), array: ts_array_suffix(rest), element },
         via: None,
         injector: None,
         open: 0,
@@ -150,6 +154,52 @@ fn shape_match(shape: &Shape, caps: &codegraph_jsre::Caps, line: &str) -> Option
         decl.open = g.start() + g.as_str().find('(').unwrap_or(0);
     }
     Some(decl)
+}
+
+/// Whether what follows a field's type joins it with another type: `| Other[]`, `& Extra`.
+/// `| null` and `| undefined` do not.
+fn ts_joins_another_type(tail: &str) -> bool {
+    re!(r"^\s*[|&]").is_match(&re!(r"^(?:\s*\|\s*(?:null|undefined)\b)+").replace_first(tail, |_| String::new()))
+}
+
+/// The type an element of a field holds, from the field's written type (`ty`) and what follows
+/// it on the line (`rest`): `Item` of `Item[]`, `Array<Item>` and `Record<string, Item>`. None for
+/// any other type, an array of arrays, an element that is not a plain type name, or a field typed
+/// as a union with another type (`Item[] | Other[]`); `| null` and `| undefined` leave it as it is.
+fn ts_field_element_type(ty: &str, rest: &str) -> Option<String> {
+    let plain = |t: &str| re!(r"^[A-Za-z_$][\w.$]*$").is_match(t).then(|| t.to_string());
+    if let Some(array) = re!(r"^\s*\[\s*\]").find(rest) {
+        let tail = &rest[array.end()..];
+        return if re!(r"^\s*\[").is_match(tail) || ts_joins_another_type(tail) { None } else { Some(ty.to_string()) };
+    }
+    // Container types whose element type is one of their type arguments: how many, and which.
+    let (count, at) = match ty {
+        "Array" | "ReadonlyArray" => (1, 0),
+        "Record" => (2, 1),
+        _ => return None,
+    };
+    let open = re!(r"^\s*<").find(rest)?;
+    let mut depth = 0i32;
+    let mut from = open.end();
+    let mut args: Vec<&str> = Vec::new();
+    for (i, c) in rest.char_indices().filter(|(i, _)| *i >= open.end()) {
+        if matches!(c, '<' | '(' | '[' | '{') {
+            depth += 1;
+        } else if matches!(c, '>' | ')' | ']' | '}') && depth > 0 {
+            depth -= 1;
+        } else if c == ',' && depth == 0 {
+            args.push(js_trim(&rest[from..i]));
+            from = i + 1;
+        } else if c == '>' && depth == 0 {
+            args.push(js_trim(&rest[from..i]));
+            let after = &rest[i + 1..];
+            if re!(r"^\s*\[").is_match(after) || ts_joins_another_type(after) {
+                return None;
+            }
+            return if args.len() == count { plain(args[at]) } else { None };
+        }
+    }
+    None
 }
 
 /// The declaration of `field` on `line`, when one of the shapes matches at a whole-token occurrence.
@@ -253,7 +303,18 @@ pub fn ts_field_declaration(cls: &Node, field: &str, ctx: &Ctx) -> Option<TsFiel
 
 /// A field declared through a wrapper or injector counts only when the call really hands back the instance.
 fn ts_field_read(on_line: Option<TsFieldOnLine>, cls: &Node, lines: &[String], row: usize, ctx: &Ctx) -> Option<TsFieldDecl> {
-    let on_line = on_line?;
+    let mut on_line = on_line?;
+    // A type that goes on below with `| Other[]` holds no one element type.
+    if on_line.decl.element.is_some() {
+        let mut below = String::new();
+        for line in lines.iter().skip(row + 1).take_while(|l| re!(r"^\s*[|&]").is_match(l)) {
+            below.push(' ');
+            below.push_str(line);
+        }
+        if ts_joins_another_type(&below) {
+            on_line.decl.element = None;
+        }
+    }
     if on_line.via.is_none() && on_line.injector.is_none() {
         return Some(on_line.decl);
     }
@@ -569,13 +630,22 @@ pub fn ts_indexed_property_type(indexed: &str, r: &UnresolvedRef, ctx: &Ctx) -> 
     None
 }
 
+/// Lines of a class header the type-parameter reader looks through: decorators, then `class C<…>`
+/// over several lines.
+const TS_CLASS_HEAD_LINES: usize = 24;
+
+/// Is `name` one of the type parameters the head of the TS class, interface or type alias `cls`
+/// declares (`class Emitter<T>`, `type State<T> = …`)? The list is read from the keyword to its own
+/// `>`, over several lines and through constraints and defaults that hold braces. A list whose `>`
+/// is not found reads as declaring `name`: a caller drops the type rather than take a parameter
+/// for a project class.
 fn ts_class_type_parameter(cls: &Node, name: &str, ctx: &Ctx) -> bool {
     let lines = lines_of(ctx, &cls.file_path);
-    let from = (cls.start_line as usize - 1).min(lines.len());
-    let to = (cls.start_line as usize + 2).min(lines.len()).max(from);
-    let joined = lines[from..to].join(" ");
-    let head = joined.split('{').next().unwrap_or("");
-    let Some(open) = Re::cached(&format!(r"\b{}\s*<", escape_regex(&cls.name)), "").find(head) else { return false };
+    let from = (cls.start_line as usize).saturating_sub(1).min(lines.len());
+    let to = (from + TS_CLASS_HEAD_LINES).min(lines.len());
+    let joined = lines[from..to].join("\n");
+    let head = joined.as_str();
+    let Some(open) = Re::cached(&format!(r"\b(?:class|interface|type)\s+{}\s*<", escape_regex(&cls.name)), "").find(head) else { return false };
     let first_of = |s: &str| -> String {
         let t = js_trim(s);
         let t = re!(r"^(?:in|out|const)\s+").replace_first(t, |_| String::new());
@@ -604,11 +674,12 @@ fn ts_class_type_parameter(cls: &Node, name: &str, ctx: &Ctx) -> bool {
             from_b = i + 1;
         }
     }
-    false
+    true
 }
 
-/// `this.field.method(...)` / `this.#field.method(...)`.
-pub fn match_ts_this_field_call(field: &str, method_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+/// `this.field.method(...)` / `this.#field.method(...)`; with `element`, a call on an element of
+/// the field, `this.listeners[type].push()`.
+pub fn match_ts_this_field_call(field: &str, method_name: &str, r: &UnresolvedRef, ctx: &Ctx, element: bool) -> Option<ResolvedRef> {
     if field.is_empty() || field.contains('.') {
         return None;
     }
@@ -621,19 +692,29 @@ pub fn match_ts_this_field_call(field: &str, method_name: &str, r: &UnresolvedRe
         .into_iter()
         .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Component) && same_language_family(n.language, r.language))
         .collect();
+    // `this.<field>[k].<method>()` calls the element's type: what the field's declaration writes
+    // for it, or nothing. A type parameter of the declaring class names no type (`class
+    // Store<Item> { items: Item[] }`), whatever project class shares its name.
+    let held = |decl: TsFieldDecl, cls: &Node| -> Option<TsFieldDecl> {
+        if !element {
+            return Some(decl);
+        }
+        let held_type = decl.element.filter(|e| !decl.value_type && !ts_class_type_parameter(cls, e, ctx))?;
+        Some(TsFieldDecl { value_type: false, ty: held_type, array: false, element: None })
+    };
     for cls in &owners {
         if cls.file_path != r.file_path {
             continue;
         }
         if let Some((decl, holder)) = ts_field_through_bases(cls, field, r, ctx, 0) {
-            return ts_field_call(&decl, Some(&holder), method_name, r, ctx);
+            return held(decl, &holder).and_then(|decl| ts_field_call(&decl, Some(&holder), method_name, r, ctx));
         }
     }
     for cls in &owners {
         if cls.file_path == r.file_path {
             continue;
         }
-        if let Some(decl) = ts_field_declaration(cls, field, ctx) {
+        if let Some(decl) = ts_field_declaration(cls, field, ctx).and_then(|read| held(read, cls)) {
             if ts_type_visible_in(&decl.ty, r, ctx) {
                 return ts_field_call(&decl, None, method_name, r, ctx);
             }
