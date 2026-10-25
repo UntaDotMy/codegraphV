@@ -7,10 +7,10 @@ use crate::ctx::Ctx;
 use crate::types::{NodeRef, UnresolvedRef};
 use codegraph_jsre::re;
 use codegraph_types::{Language, Node, NodeKind};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
-memo_map!(RubyAncestryMemo, String, Rc<HashSet<String>>);
+memo_map!(RubyAncestryMemo, String, Rc<indexmap::IndexSet<String>>);
 
 /// Is the method `method` one a bare call inside the class around the reference can reach?
 pub fn is_ruby_method_in_scope(method: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
@@ -26,9 +26,9 @@ pub fn is_ruby_method_in_scope(method: &Node, r: &UnresolvedRef, ctx: &Ctx) -> b
 }
 
 /// A class or module, its superclass chain and every module it includes, extends or prepends.
-fn ruby_ancestry(qn: &str, ctx: &Ctx) -> Rc<HashSet<String>> {
+pub fn ruby_ancestry(qn: &str, ctx: &Ctx) -> Rc<indexmap::IndexSet<String>> {
     memoized::<RubyAncestryMemo>(ctx, qn.to_string(), || {
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: indexmap::IndexSet<String> = indexmap::IndexSet::new();
         let mut queue: VecDeque<String> = VecDeque::from([qn.to_string()]);
         while let Some(q) = queue.pop_front() {
             if seen.len() >= 60 {

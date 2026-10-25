@@ -721,6 +721,15 @@ impl ReferenceResolver {
             return self.gate_language(php_qualified.value(), r);
         }
 
+        // A Ruby constant written with its namespace (`Billing::ChargeCard`, `::Foo`) and a call
+        // on one are what Ruby's constant lookup finds from where they are written, or nothing
+        // the project declares (ruby_constant_paths). The pre-filter below drops a `::`-rooted
+        // name, and the strategies past it would take a namesake by its last name.
+        let ruby_path = crate::ruby_constant_paths::match_ruby_constant_path_ref(r, ctx);
+        if !ruby_path.is_undefined() {
+            return self.gate_language(ruby_path.value(), r);
+        }
+
         let mut existence_name: String = if r.language == Language::ArkTs && r.reference_name.starts_with('.') {
             r.reference_name[1..].to_string()
         } else {
