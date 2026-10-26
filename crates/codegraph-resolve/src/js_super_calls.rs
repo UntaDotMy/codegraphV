@@ -13,6 +13,7 @@ use codegraph_jsre::{escape_regex, re, Re};
 use codegraph_types::jscompat::{utf16_from, utf16_prefix};
 use codegraph_types::{EdgeKind, Language, Node, NodeKind};
 use std::collections::HashSet;
+use std::rc::Rc;
 
 /// How far up a class's ancestry a `super` call is looked for.
 const MAX_ANCESTRY: usize = 8;
@@ -22,10 +23,13 @@ pub fn is_js_super_call_language(language: Language) -> bool {
     matches!(language, Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx)
 }
 
-fn file_lines(file_path: &str, ctx: &Ctx) -> Option<Vec<String>> {
+/// The file's lines, shared with the resolver's per-file cache (a call site must not copy the file).
+fn file_lines(file_path: &str, ctx: &Ctx) -> Option<Rc<Vec<String>>> {
     match ctx.get_file_lines(file_path) {
-        Some(lines) => Some(lines.as_ref().clone()),
-        None => ctx.read_file(file_path).map(|s| re!(r"\r?\n").split(&s).into_iter().map(String::from).collect()),
+        Some(lines) => Some(lines),
+        None => ctx
+            .read_file(file_path)
+            .map(|s| Rc::new(re!(r"\r?\n").split(&s).into_iter().map(String::from).collect())),
     }
 }
 

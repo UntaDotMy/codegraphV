@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-cli"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "clap",
  "codegraph-context",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-context"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-db",
  "codegraph-graph",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-context",
  "codegraph-db",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-db"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-jsre",
  "codegraph-search",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-extract"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "cc",
  "codegraph-jsre",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graph"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-db",
  "codegraph-extract",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-installer"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-types",
  "jsonc-parser",
@@ -383,14 +383,14 @@ dependencies = [
 
 [[package]]
 name = "codegraph-jsre"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "pcre2-sys",
 ]
 
 [[package]]
 name = "codegraph-mcp"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-context",
  "codegraph-core",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-resolve"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-db",
  "codegraph-extract",
@@ -423,6 +423,7 @@ dependencies = [
  "icu_collator",
  "indexmap",
  "jsonc-parser",
+ "num_cpus",
  "regex",
  "serde_json",
  "sha1",
@@ -431,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-search"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-jsre",
  "codegraph-types",
@@ -445,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-sync"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-extract",
  "codegraph-jsre",
@@ -460,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-text"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-types",
  "regex",
@@ -468,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-types"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "indexmap",
  "serde",
@@ -478,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-ui-server"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "codegraph-core",
  "codegraph-db",
@@ -499,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-viewer"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "js-sys",
  "serde_json",
@@ -885,6 +886,12 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hermit-abi"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "httpdate"
@@ -1340,6 +1347,16 @@ name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
+
+[[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
+]
 
 [[package]]
 name = "objc2"

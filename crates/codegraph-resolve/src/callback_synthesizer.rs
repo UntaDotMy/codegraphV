@@ -177,6 +177,16 @@ pub fn synthesize_callback_edges(store: &Rc<Store>, ctx: &Rc<Ctx>) -> codegraph_
 /// Address space for a pass thread's stack: the passes walk nested code recursively.
 const PASS_STACK_BYTES: usize = 256 * 1024 * 1024;
 
+/// Node-thread products a synthesis run may hold: every pass thread warms its own copy of the
+/// graph's name index, so memory grows with threads x nodes. Up to this many nodes' worth every
+/// core runs; a bigger graph gets fewer threads (never fewer than two) and the same edges.
+const SYNTH_NODE_THREAD_BUDGET: u64 = 4_000_000;
+
+fn synth_threads(cpus: usize, passes: usize, nodes: u64) -> usize {
+    let by_memory = usize::try_from(SYNTH_NODE_THREAD_BUDGET / nodes.max(1)).unwrap_or(usize::MAX).max(2);
+    cpus.min(passes).min(by_memory).max(1)
+}
+
 /// Every pass's edges, in `passes` order. The passes read only the committed database, so they
 /// run on every core at once, each thread with its own read-only connection and context; a pass
 /// whose thread fails runs here on `ctx`. Inside a transaction (a sync's refresh) other
@@ -185,7 +195,8 @@ fn run_passes(store: &Store, ctx: &Ctx, passes: &[SynthPass]) -> Vec<Vec<Edge>> 
     use std::sync::{atomic::{AtomicUsize, Ordering}, Mutex};
     let timed = std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty());
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let threads = if store.in_transaction() { 1 } else { cpus.min(passes.len()) };
+    let nodes = store.get_node_and_edge_count().map_or(0, |(n, _)| n.max(0) as u64);
+    let threads = if store.in_transaction() { 1 } else { synth_threads(cpus, passes.len(), nodes) };
     let db_path = store.path().to_path_buf();
     let slots: Vec<Mutex<Option<(Vec<Edge>, std::time::Duration)>>> = passes.iter().map(|_| Mutex::new(None)).collect();
     if threads > 1 && db_path.is_file() {
@@ -350,4 +361,24 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod synth_thread_tests {
+    use super::synth_threads;
+
+    #[test]
+    fn a_normal_graph_uses_every_core_up_to_the_pass_count() {
+        assert_eq!(synth_threads(12, 20, 50_000), 12);
+        assert_eq!(synth_threads(32, 20, 50_000), 20);
+        assert_eq!(synth_threads(12, 20, 0), 12);
+    }
+
+    #[test]
+    fn a_huge_graph_gets_fewer_threads_but_at_least_two() {
+        assert_eq!(synth_threads(12, 20, 1_000_000), 4);
+        assert_eq!(synth_threads(12, 20, 1_900_000), 2);
+        assert_eq!(synth_threads(12, 20, 50_000_000), 2);
+        assert_eq!(synth_threads(1, 20, 50_000_000), 1);
+    }
 }

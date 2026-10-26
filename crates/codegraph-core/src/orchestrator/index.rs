@@ -11,7 +11,7 @@ use super::git_state::{is_mpeg_ts_bytes, read_source_or_stamp};
 use super::{ExtractionOrchestrator, FileStat, FrameworkGate, IndexPhase, IndexProgress, IndexResult, ProgressFn, UnsupportedExtension, WINDOW_PER_WORKER};
 use crate::errors::{CodeGraphError, Result};
 use crate::extract::{extract_from_source, has_grammar_load_failure};
-use crate::file_limits::{oversize_stamp, read_bounded_source, MAX_SOURCE_FILE_SIZE_BYTES};
+use crate::file_limits::{max_source_file_bytes, oversize_stamp, read_bounded_source};
 use crate::utils::{validate_path_within_root, ValidateOptions};
 use codegraph_extract::languages::{detect_language, is_file_level_only_language, is_language_supported};
 use codegraph_extract::scan::config::load_extension_overrides;
@@ -59,6 +59,34 @@ enum Prepared {
     Parsed { content: String, stat: FileStat, language: Language, result: ExtractionResult },
 }
 
+/// Source bytes the parse window may hold at once: files being parsed plus files parsed and
+/// waiting for the in-order commit. Parsing a file takes tens of times its size in memory (the
+/// syntax tree, the extracted nodes and the buffered result), so a window counted in files alone
+/// lets a handful of multi-megabyte sources fill the machine. A file over the budget still runs,
+/// alone.
+const WINDOW_BYTES: u64 = 12 << 20;
+
+/// What the workers and the committing thread share: how far the commit has come, and how many
+/// source bytes dispatched files hold.
+struct Flow {
+    committed: usize,
+    held: u64,
+}
+
+/// Whether the worker given file `i` (`size` source bytes) may start. The file at the commit
+/// cursor always may, or the window could deadlock: the files holding the budget cannot commit
+/// before it does.
+fn may_start(i: usize, size: u64, flow: &Flow, window: usize, budget: u64) -> bool {
+    i < flow.committed + window && (i == flow.committed || flow.held == 0 || flow.held.saturating_add(size) <= budget)
+}
+
+/// The bytes of source file `i` the parse will hold: its size, or nothing when it is over the
+/// limit (stored as skipped, never read) or cannot be statted (the read reports that).
+fn held_bytes(shared: &Shared<'_>, i: usize) -> u64 {
+    let size = std::fs::metadata(Path::new(shared.root_dir).join(&shared.files[i])).map_or(0, |m| m.len());
+    if size > max_source_file_bytes() { 0 } else { size }
+}
+
 struct Shared<'a> {
     root_dir: &'a str,
     files: &'a [String],
@@ -67,7 +95,7 @@ struct Shared<'a> {
     framework_names: &'a [String],
     next: AtomicUsize,
     stop: AtomicBool,
-    committed: Mutex<usize>,
+    flow: Mutex<Flow>,
     room: Condvar,
     window: usize,
 }
@@ -104,7 +132,7 @@ fn prepare_file(shared: &Shared<'_>, resolvers: &[codegraph_resolve::frameworks:
     Prepared::Parsed { content, stat, language, result }
 }
 
-fn worker_loop(shared: &Shared<'_>, tx: mpsc::Sender<(usize, Prepared)>) {
+fn worker_loop(shared: &Shared<'_>, tx: mpsc::Sender<(usize, Prepared, u64)>) {
     // The registry holds `Rc`s, so each worker builds its own.
     let resolvers = all_framework_resolvers();
     loop {
@@ -112,21 +140,23 @@ fn worker_loop(shared: &Shared<'_>, tx: mpsc::Sender<(usize, Prepared)>) {
         if i >= shared.files.len() || shared.stop.load(Ordering::SeqCst) {
             return;
         }
-        // Backpressure on the dispatched-but-not-yet-committed count: buffered items hold whole
-        // file contents, so this bound is load-bearing for memory. The file at the commit cursor
-        // is never made to wait (its distance is 0), so the window can't deadlock.
+        // Backpressure on the dispatched-but-not-yet-committed files and their bytes: buffered
+        // items hold whole file contents, so these bounds are load-bearing for memory. The file at
+        // the commit cursor is never made to wait, so the window can't deadlock.
+        let size = held_bytes(shared, i);
         {
-            let mut committed = shared.committed.lock().unwrap_or_else(|e| e.into_inner());
-            while i >= *committed + shared.window && !shared.stop.load(Ordering::SeqCst) {
-                committed = shared.room.wait(committed).unwrap_or_else(|e| e.into_inner());
+            let mut flow = shared.flow.lock().unwrap_or_else(|e| e.into_inner());
+            while !may_start(i, size, &flow, shared.window, WINDOW_BYTES) && !shared.stop.load(Ordering::SeqCst) {
+                flow = shared.room.wait(flow).unwrap_or_else(|e| e.into_inner());
             }
+            flow.held = flow.held.saturating_add(size);
         }
         if shared.stop.load(Ordering::SeqCst) {
             return;
         }
         let item = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare_file(shared, &resolvers, &shared.files[i])))
             .unwrap_or_else(|payload| Prepared::ReadError(format!("Worker exited unexpectedly: {}", crate::extract::panic_message(payload.as_ref()))));
-        if tx.send((i, item)).is_err() {
+        if tx.send((i, item, size)).is_err() {
             return;
         }
     }
@@ -147,7 +177,7 @@ struct Tally {
 fn size_exceeded(file_path: &str, size: u64) -> ExtractionResult {
     ExtractionResult {
         errors: vec![ExtractionError {
-            message: format!("File exceeds max size ({size} > {MAX_SOURCE_FILE_SIZE_BYTES})"),
+            message: format!("File exceeds max size ({size} > {})", max_source_file_bytes()),
             file_path: Some(file_path.to_string()),
             line: None,
             column: None,
@@ -251,7 +281,7 @@ impl ExtractionOrchestrator {
             framework_names: &framework_names,
             next: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
-            committed: Mutex::new(0),
+            flow: Mutex::new(Flow { committed: 0, held: 0 }),
             room: Condvar::new(),
             window: (workers * WINDOW_PER_WORKER).max(4),
         };
@@ -261,7 +291,7 @@ impl ExtractionOrchestrator {
         let mut failure: Option<CodeGraphError> = None;
 
         std::thread::scope(|scope| {
-            let (tx, rx) = mpsc::channel::<(usize, Prepared)>();
+            let (tx, rx) = mpsc::channel::<(usize, Prepared, u64)>();
             for n in 0..workers {
                 let tx = tx.clone();
                 let shared = &shared;
@@ -273,7 +303,7 @@ impl ExtractionOrchestrator {
             }
             drop(tx);
 
-            let mut pending: BTreeMap<usize, Prepared> = BTreeMap::new();
+            let mut pending: BTreeMap<usize, (Prepared, u64)> = BTreeMap::new();
             let mut next_to_store = 0usize;
             let (mut wait, mut commit) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
             // Files are stored in groups, one transaction each (every file still atomic): a commit
@@ -289,10 +319,10 @@ impl ExtractionOrchestrator {
                     in_group = 0;
                 }
                 let waited = Instant::now();
-                let Ok((i, item)) = rx.recv() else { break };
+                let Ok((i, item, size)) = rx.recv() else { break };
                 wait += waited.elapsed();
-                pending.insert(i, item);
-                while let Some(item) = pending.remove(&next_to_store) {
+                pending.insert(i, (item, size));
+                while let Some((item, size)) = pending.remove(&next_to_store) {
                     let committing = Instant::now();
                     if aborted_flag() {
                         aborted = true;
@@ -320,7 +350,11 @@ impl ExtractionOrchestrator {
                         in_group = 0;
                     }
                     next_to_store += 1;
-                    *shared.committed.lock().unwrap_or_else(|e| e.into_inner()) = next_to_store;
+                    {
+                        let mut flow = shared.flow.lock().unwrap_or_else(|e| e.into_inner());
+                        flow.committed = next_to_store;
+                        flow.held = flow.held.saturating_sub(size);
+                    }
                     shared.room.notify_all();
                     commit += committing.elapsed();
                 }
@@ -493,7 +527,7 @@ impl ExtractionOrchestrator {
                 emit(IndexProgress::new(IndexPhase::Parsing, tally.processed, total));
             }
             Prepared::Oversize { content, stat, language } => {
-                // Honour MAX_SOURCE_FILE_SIZE_BYTES. Without this, vendored generated headers,
+                // Honour the source-size limit (`max_source_file_bytes`). Without this, vendored generated headers,
                 // minified bundles, and other multi-MB files get indexed, wasting the parser on
                 // inputs with no useful symbols.
                 let result = size_exceeded(file_path, stat.size);
@@ -619,7 +653,7 @@ impl ExtractionOrchestrator {
         let language = detect_language(relative_path, Some(content), Some(&load_extension_overrides(root)), Some(root));
 
         // Check file size
-        if stats.size > MAX_SOURCE_FILE_SIZE_BYTES {
+        if stats.size > max_source_file_bytes() {
             let result = size_exceeded(relative_path, stats.size);
             self.store_extraction_result(relative_path, content, language, stats, result.clone())?;
             return Ok(result);
@@ -698,5 +732,41 @@ mod pool_size_tests {
         assert_eq!(resolve_parse_pool_size(Some("32"), 12), 32);
         assert_eq!(resolve_parse_pool_size(Some("0"), 12), 1);
         assert_eq!(resolve_parse_pool_size(Some("lots"), 12), 11);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::{may_start, Flow};
+
+    const MB: u64 = 1 << 20;
+
+    #[test]
+    fn small_files_fit_beside_each_other_up_to_the_window() {
+        let flow = Flow { committed: 10, held: 4 * MB };
+        assert!(may_start(11, MB, &flow, 88, 12 * MB));
+        assert!(!may_start(10 + 88, MB, &flow, 88, 12 * MB), "past the file window");
+    }
+
+    #[test]
+    fn a_big_file_waits_while_others_hold_the_budget() {
+        let flow = Flow { committed: 10, held: 5 * MB };
+        assert!(!may_start(12, 8 * MB, &flow, 88, 12 * MB));
+        assert!(may_start(12, 7 * MB, &flow, 88, 12 * MB), "exactly the budget fits");
+    }
+
+    #[test]
+    fn a_file_over_the_budget_runs_alone() {
+        let idle = Flow { committed: 10, held: 0 };
+        assert!(may_start(12, 30 * MB, &idle, 88, 12 * MB));
+        let busy = Flow { committed: 10, held: 1 };
+        assert!(!may_start(12, 30 * MB, &busy, 88, 12 * MB));
+    }
+
+    #[test]
+    fn the_file_at_the_commit_cursor_never_waits() {
+        // The files holding the budget cannot commit before it does: waiting would deadlock.
+        let flow = Flow { committed: 10, held: 40 * MB };
+        assert!(may_start(10, 8 * MB, &flow, 88, 12 * MB));
     }
 }

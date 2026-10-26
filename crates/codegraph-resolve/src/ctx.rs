@@ -66,8 +66,8 @@ fn without_mocks(nodes: NodeList) -> NodeList {
     }
 }
 
-/// Largest source file the resolver reads (`MAX_SOURCE_FILE_SIZE_BYTES`).
-pub const MAX_SOURCE_FILE_SIZE_BYTES: u64 = 1024 * 1024;
+/// Largest source file the resolver reads: the same limit the indexer applies.
+use codegraph_types::limits::max_source_file_bytes;
 
 const DEFAULT_CACHE_LIMIT: usize = 5_000;
 
@@ -80,15 +80,45 @@ fn cache_limit() -> usize {
         .unwrap_or(DEFAULT_CACHE_LIMIT)
 }
 
-/// A size-bounded memo: when full it starts over.
+/// Bytes of file text one worker's content memos may hold (each of the text and the lines memo);
+/// `CODEGRAPHV_RESOLVER_CACHE_MB` overrides. A memo only: a smaller bound re-reads files, never
+/// changes what the resolver finds.
+fn content_byte_limit() -> usize {
+    std::env::var("CODEGRAPHV_RESOLVER_CACHE_MB")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .map_or(DEFAULT_CONTENT_MB, |n| n)
+        .saturating_mul(1024 * 1024)
+}
+
+const DEFAULT_CONTENT_MB: usize = 8;
+
+/// A size-bounded memo: when full it starts over. A memo of file content is also bounded by the
+/// bytes it holds (`set_weighted`).
 struct Bounded<K, V> {
     map: HashMap<K, V>,
     limit: usize,
+    bytes: usize,
+    byte_limit: usize,
 }
 
 impl<K: Hash + Eq, V: Clone> Bounded<K, V> {
     fn new(limit: usize) -> Self {
-        Bounded { map: HashMap::new(), limit }
+        Bounded { map: HashMap::new(), limit, bytes: 0, byte_limit: usize::MAX }
+    }
+    fn with_byte_limit(limit: usize, byte_limit: usize) -> Self {
+        Bounded { map: HashMap::new(), limit, bytes: 0, byte_limit }
+    }
+    /// `set` of an entry that holds `weight` bytes: the memo also starts over when they would pass its bound.
+    fn set_weighted(&mut self, k: K, v: V, weight: usize) {
+        let full = self.map.len() >= self.limit && !self.map.contains_key(&k);
+        if (full || self.bytes.saturating_add(weight) > self.byte_limit) && !self.map.is_empty() {
+            self.map.clear();
+            self.bytes = 0;
+        }
+        self.bytes = self.bytes.saturating_add(weight);
+        self.map.insert(k, v);
     }
     fn get(&self, k: &K) -> Option<V> {
         self.map.get(k).cloned()
@@ -104,6 +134,7 @@ impl<K: Hash + Eq, V: Clone> Bounded<K, V> {
     }
     fn clear(&mut self) {
         self.map.clear();
+        self.bytes = 0;
     }
 }
 
@@ -230,17 +261,18 @@ impl Ctx {
     pub fn new(project_root: impl Into<String>, store: Rc<Store>) -> Rc<Ctx> {
         let limit = cache_limit();
         let content_limit = std::cmp::max(64, limit / 5);
+        let content_bytes = content_byte_limit();
         Rc::new(Ctx {
             store,
             project_root: project_root.into(),
             node_cache: RefCell::new(Bounded::new(limit)),
-            file_cache: RefCell::new(Bounded::new(content_limit)),
+            file_cache: RefCell::new(Bounded::with_byte_limit(content_limit, content_bytes)),
             import_mapping_cache: RefCell::new(Bounded::new(limit)),
             re_export_cache: RefCell::new(Bounded::new(limit)),
             name_cache: RefCell::new(Bounded::new(limit)),
             lower_name_cache: RefCell::new(Bounded::new(limit)),
             qualified_name_cache: RefCell::new(Bounded::new(limit)),
-            file_lines_cache: RefCell::new(Bounded::new(content_limit)),
+            file_lines_cache: RefCell::new(Bounded::with_byte_limit(content_limit, content_bytes)),
             node_by_id_cache: RefCell::new(Bounded::new(std::cmp::max(limit * 4, 20_000))),
             method_match_cache: RefCell::new(Bounded::new(limit)),
             method_owner_index_cache: RefCell::new(HashMap::new()),
@@ -825,13 +857,14 @@ impl Ctx {
             // Reject anything extraction would not accept before decoding can multiply a
             // large binary blob into gigabytes of heap.
             let meta = std::fs::metadata(&full).ok()?;
-            if !meta.is_file() || meta.len() > MAX_SOURCE_FILE_SIZE_BYTES {
+            if !meta.is_file() || meta.len() > max_source_file_bytes() {
                 return None;
             }
             let bytes = std::fs::read(&full).ok()?;
             Some(Rc::<str>::from(String::from_utf8_lossy(&bytes).as_ref()))
         })();
-        self.file_cache.borrow_mut().set(file_path.to_string(), content.clone());
+        let weight = content.as_ref().map_or(0, |c| c.len());
+        self.file_cache.borrow_mut().set_weighted(file_path.to_string(), content.clone(), weight);
         content
     }
 
@@ -842,7 +875,7 @@ impl Ctx {
         }
         let full = nodepath::join(&[&self.project_root, file_path]);
         let Ok(meta) = std::fs::metadata(&full) else { return false };
-        if !meta.is_file() || meta.len() > MAX_SOURCE_FILE_SIZE_BYTES {
+        if !meta.is_file() || meta.len() > max_source_file_bytes() {
             return false;
         }
         match std::fs::read(&full) {
@@ -860,7 +893,9 @@ impl Ctx {
             return self.file_lines_cache.borrow().get(&file_path.to_string()).flatten();
         }
         let lines = self.read_file(file_path).map(|s| Rc::new(split_lines(&s)));
-        self.file_lines_cache.borrow_mut().set(file_path.to_string(), lines.clone());
+        // The lines hold the text again, plus a String header and its allocation per line.
+        let weight = lines.as_ref().map_or(0, |l| l.iter().map(|x| x.len() + 48).sum());
+        self.file_lines_cache.borrow_mut().set_weighted(file_path.to_string(), lines.clone(), weight);
         lines
     }
 

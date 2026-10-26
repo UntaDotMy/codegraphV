@@ -137,7 +137,7 @@ impl CaptureLocations {
             assert!(!data.is_null(), "failed to allocate a PCRE2 match data block");
             let mut stack = ptr::null_mut();
             if re.jit {
-                stack = pcre2_jit_stack_create_8(max_jit_stack.min(32 << 10), max_jit_stack, ptr::null_mut());
+                stack = pcre2_jit_stack_create_8(max_jit_stack.min(4 << 10), max_jit_stack, ptr::null_mut());
                 assert!(!stack.is_null(), "failed to allocate a PCRE2 JIT stack");
                 pcre2_jit_stack_assign_8(ctx, None, stack as *mut c_void);
             }
