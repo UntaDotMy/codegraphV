@@ -167,3 +167,38 @@ fn idle_daemon_exits_and_leaves_no_state() {
     assert!(!path.exists());
     assert!(!dir.path().join(".codegraphV/native-daemon.lock").exists());
 }
+
+/// BUG-125: the 3 s auth timeout stayed on the socket clone the daemon reads from (Windows keeps
+/// socket timeouts per handle), so a client idle for 3 s was dropped.
+#[test]
+fn an_idle_client_keeps_its_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.ts"), "export function start(){return 1;}\n").unwrap();
+    let cg = codegraph_core::CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
+    cg.close();
+    let _daemon = Daemon {
+        child: Command::new(env!("CARGO_BIN_EXE_codegraphV"))
+            .args(["__daemon", "--path", dir.path().to_str().unwrap(), "--idle-timeout", "20"])
+            .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    };
+    let path = dir.path().join(".codegraphV/native-daemon.json");
+    let begin = Instant::now();
+    let endpoint: Value = loop {
+        if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+            break v;
+        }
+        assert!(begin.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut client = connect(&endpoint);
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+    assert!(send(&mut client, init).get("result").is_some());
+    std::thread::sleep(Duration::from_secs(6));
+    let ping = send(&mut client, json!({"jsonrpc":"2.0","id":2,"method":"ping"}));
+    assert_eq!(ping["id"], 2, "{ping}");
+}

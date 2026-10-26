@@ -175,3 +175,45 @@ fn a_live_older_daemon_does_not_keep_a_new_session_from_starting() {
     assert!(text(reply.last().unwrap()).contains("return 42"), "{reply:?}");
     assert_eq!(endpoint(root.path()).unwrap(), old, "served in-process; the older daemon's endpoint is untouched");
 }
+
+fn initialized(exe: &Path, root: &Path) -> Server {
+    let mut server = Server::start(exe, root);
+    server.send(json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}));
+    server.read_until(Duration::from_secs(20), answered(0));
+    server.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    server
+}
+
+/// BUG-125: an agent session that sits idle keeps its connection.
+#[test]
+fn an_idle_session_stays_connected() {
+    let root = project();
+    let (_install, exe) = install();
+    let mut server = initialized(&exe, root.path());
+    server.explore(1);
+    server.read_until(Duration::from_secs(20), answered(1));
+    std::thread::sleep(Duration::from_secs(20));
+    assert!(server.child.try_wait().unwrap().is_none(), "the proxy exited while idle");
+    server.explore(2);
+    let reply = server.read_until(Duration::from_secs(20), answered(2));
+    // The same session already received the source, so this answer names the symbols only.
+    assert!(text(reply.last().unwrap()).contains("finish (function)"), "{reply:?}");
+}
+
+/// BUG-125: a dropped connection to a daemon that is still alive is re-made to that daemon.
+#[test]
+fn a_dropped_connection_returns_to_the_live_daemon() {
+    let root = project();
+    let (_install, exe) = install();
+    let mut server = initialized(&exe, root.path());
+    server.explore(1);
+    server.read_until(Duration::from_secs(20), answered(1));
+    let pid = endpoint(root.path()).unwrap()["pid"].clone();
+    // The daemon closes this client's connection on `exit` and keeps running for others.
+    server.send(json!({"jsonrpc":"2.0","method":"exit"}));
+    server.read_until(Duration::from_secs(20), |v| v["method"] == "notifications/tools/list_changed");
+    server.explore(2);
+    let reply = server.read_until(Duration::from_secs(20), answered(2));
+    assert!(text(reply.last().unwrap()).contains("return 42"), "{reply:?}");
+    assert_eq!(endpoint(root.path()).unwrap()["pid"], pid, "the same daemon still serves the project");
+}
