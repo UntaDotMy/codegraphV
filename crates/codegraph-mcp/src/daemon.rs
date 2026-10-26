@@ -130,19 +130,21 @@ fn spawn_daemon(root: &str, executable: &Path) -> io::Result<Child> {
     command.spawn()
 }
 
-/// Connect to the project's daemon, starting `executable`'s when none is usable. `leaving` is
-/// the daemon a hand-off moves away from. `Ok(None)`: a live daemon of an older version holds
-/// the project; it predates hand-offs and keeps its lock, so the caller serves in-process.
-fn open_daemon(root: &str, executable: &Path, leaving: Option<u32>) -> Result<Option<(TcpStream, u32)>> {
+/// Connect to the daemon that serves the project, starting `executable`'s when none is usable.
+/// A daemon that leaves for an upgrade removes its endpoint before closing its clients, so the
+/// endpoint found here is a live daemon or a crashed one's leftover. `Ok(None)`: a live daemon of
+/// an older version holds the project; it predates hand-offs and keeps its lock, so the caller
+/// serves in-process.
+fn open_daemon(root: &str, executable: &Path) -> Result<Option<TcpStream>> {
     let own = env!("CARGO_PKG_VERSION");
     let deadline = Instant::now() + DAEMON_READY_TIMEOUT;
     let mut child: Option<Child> = None;
     let mut spawned_at: Option<Instant> = None;
     let opened = loop {
-        if let Some(endpoint) = read_endpoint(root).filter(|e| Some(e.pid) != leaving) {
+        if let Some(endpoint) = read_endpoint(root) {
             if handoff::proxy_uses_daemon(own, &endpoint.version) {
                 if let Ok(stream) = connect(&endpoint) {
-                    break Some((stream, endpoint.pid));
+                    break Some(stream);
                 }
             } else if codegraph_core::utils::is_process_alive(endpoint.pid) {
                 break None;
@@ -179,11 +181,12 @@ struct Link {
 }
 
 /// Relay stdio to the project's daemon, preserving half-close: EOF from the client drains
-/// responses before returning. When the daemon leaves while the client is still connected (its
-/// binary was upgraded), the session moves to the successor on the same stdio connection.
+/// responses before returning. When the daemon connection drops while the client is still
+/// connected (the daemon left for an upgrade, or the link broke), the session is replayed on
+/// whichever daemon now serves the project, on the same stdio connection.
 /// Returns false, having read nothing, when an older daemon holds the project (serve in-process).
 pub fn proxy(root: &str, executable: &Path) -> Result<bool> {
-    let Some((stream, mut pid)) = open_daemon(root, executable, None)? else {
+    let Some(stream) = open_daemon(root, executable)? else {
         return Ok(false);
     };
     let link = Arc::new(Mutex::new(Link { relay: Relay::new(), to_daemon: stream.try_clone()?, client_closed: false }));
@@ -229,7 +232,7 @@ pub fn proxy(root: &str, executable: &Path) -> Result<bool> {
         if fruitless >= MAX_FRUITLESS_HANDOFFS {
             return Err("The CodeGraphV daemon keeps exiting before it answers; reconnect the MCP server.".into());
         }
-        let Some((next, next_pid)) = open_daemon(root, executable, Some(pid))? else {
+        let Some(next) = open_daemon(root, executable)? else {
             return Err("An older CodeGraphV daemon took over this project; reconnect the MCP server.".into());
         };
         {
@@ -245,7 +248,6 @@ pub fn proxy(root: &str, executable: &Path) -> Result<bool> {
         writeln!(stdout, "{}", handoff::TOOLS_CHANGED)?;
         stdout.flush()?;
         from_daemon = BufReader::new(next);
-        pid = next_pid;
     }
 }
 enum Event {
@@ -352,7 +354,10 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
                 if stream.write_all(b"ok\n").is_err() {
                     return;
                 }
+                // Windows keeps socket timeouts per handle: clear the auth timeout on the clone
+                // this thread reads from too, or an idle client is dropped after 3 s (BUG-125).
                 let _ = stream.set_read_timeout(None);
+                let _ = reader.get_ref().set_read_timeout(None);
                 let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
                 if sender.send(Event::Connected(id, stream)).is_err() {
                     return;
