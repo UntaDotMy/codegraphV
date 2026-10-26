@@ -86,7 +86,7 @@ pub fn escape_reg_exp(text: &str) -> String {
 }
 
 /// Is a process with this PID still running?
-pub(crate) fn is_process_alive(pid: u32) -> bool {
+pub fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: signal 0 only probes for existence.
