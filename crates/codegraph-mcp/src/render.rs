@@ -420,11 +420,14 @@ pub fn file_view(cg: &CodeGraph, file: &str, args: &Value) -> Result<ToolResult>
         f.language
     ));
     let mut next = offset;
+    let mut output_chars = out.chars().count();
     for (i, line) in lines.iter().enumerate().skip(offset - 1).take(limit) {
         let text = format!("{:>6}\t{}\n", i + 1, line.trim_end_matches('\r'));
-        if out.chars().count() + text.chars().count() > 37500 {
+        let cost = text.chars().count();
+        if output_chars + cost > 37500 {
             break;
         }
+        output_chars += cost;
         out.push_str(&text);
         next = i + 2;
     }
@@ -456,9 +459,10 @@ pub fn explore_budget(files: usize) -> ExploreBudget {
     let (chars, count, per_file) = match files {
         0..150 => (13000, 4, 3800),
         150..500 => (18000, 5, 3800),
-        500..5000 => (28000, 8, 6500),
-        5000..15000 => (35000, 8, 7000),
-        _ => (38000, 8, 7000),
+        // Match the advertised inline ceiling; larger repositories get more calls,
+        // rather than a response hosts may externalize or truncate.
+        500..5000 => (24000, 8, 6500),
+        _ => (24000, 8, 7000),
     };
     ExploreBudget {
         calls,
@@ -474,7 +478,7 @@ const NAMED_PER_TOKEN: usize = 3;
 /// (`mpsc channel` → `sync/mpsc/…`), then one whose file defines more of the other named
 /// symbols, then source over tests; a declaration beats a same-named member or variable.
 /// Also returns the tokens nothing in the index defines.
-fn named_definitions(cg: &CodeGraph, tokens: &[String], paths: &[String]) -> Result<(IndexMap<String, Node>, Vec<String>)> {
+fn named_definitions(cg: &CodeGraph, tokens: &[String], paths: &[String], pinned: &[String]) -> Result<(IndexMap<String, Node>, Vec<String>)> {
     let segments: HashSet<String> = paths
         .iter()
         .flat_map(|p| p.split('/').map(|s| s.split('.').next().unwrap_or(s).to_lowercase()))
@@ -486,36 +490,41 @@ fn named_definitions(cg: &CodeGraph, tokens: &[String], paths: &[String]) -> Res
     };
     let mut per_token: Vec<Vec<Node>> = Vec::new();
     for token in tokens {
-        let hits: Vec<Node> = lookup(cg, token)?
+        let mut hits: Vec<Node> = lookup(cg, token)?
             .into_iter()
             .filter(|n| !matches!(n.kind, NodeKind::File | NodeKind::Import | NodeKind::Export | NodeKind::Parameter))
             .collect();
+        if hits.iter().any(|n| pinned.contains(&n.file_path)) {
+            hits.retain(|n| pinned.contains(&n.file_path));
+        }
         per_token.push(hits);
+    }
+    // Count co-named definitions once per file and token, rather than rescanning
+    // every overload inside the sorting comparator.
+    let mut file_tokens = HashMap::<&str, usize>::new();
+    for hits in &per_token {
+        for file in hits.iter().map(|n| n.file_path.as_str()).collect::<HashSet<_>>() {
+            *file_tokens.entry(file).or_default() += 1;
+        }
     }
     let mut out = IndexMap::new();
     let mut undefined = Vec::new();
     for (i, hits) in per_token.iter().enumerate() {
         if hits.is_empty() {
             // A bare path word (`mpsc`) is a scope, not a missing definition.
-            if !segments.contains(&tokens[i]) {
+            if !segments.contains(&tokens[i].to_lowercase()) {
                 undefined.push(tokens[i].clone());
             }
             continue;
         }
-        let colocated = |file: &str| {
-            per_token
-                .iter()
-                .enumerate()
-                .filter(|(j, h)| *j != i && h.iter().any(|n| n.file_path == file))
-                .count()
-        };
         let mut ranked: Vec<&Node> = hits.iter().collect();
         ranked.sort_by_key(|n| {
             (
+                !pinned.is_empty() && !pinned.contains(&n.file_path),
                 !scopes.is_empty() && !in_scope(&n.file_path),
                 // A declaration before a member that shares its name (an enum variant, a field).
                 matches!(n.kind, NodeKind::EnumMember | NodeKind::Field | NodeKind::Property | NodeKind::Variable),
-                std::cmp::Reverse(colocated(&n.file_path)),
+                std::cmp::Reverse(file_tokens.get(n.file_path.as_str()).copied().unwrap_or(0)),
                 codegraph_search::is_test_file(&n.file_path),
                 n.file_path.len(),
                 n.start_line,
@@ -569,6 +578,69 @@ struct Focus {
     end: u32,
 }
 
+/// Metadata may be abbreviated; source lines must always remain verbatim.
+fn metadata_preview(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut preview: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+/// Explicit character pages for source lines that cannot fit as a whole. Pages
+/// are independent of session deduplication and carry a content hash so an edit
+/// cannot silently splice two different versions of a line together.
+fn line_fragment(cg: &CodeGraph, file: &FileRecord, line_no: u32, args: &Value, budget: ExploreBudget) -> ToolResult {
+    let Some(column) = args["column"].as_u64().and_then(|n| usize::try_from(n).ok()).filter(|n| *n > 0) else {
+        return ToolResult::text("column must be a positive integer (1-based Unicode character position).");
+    };
+    if args.get("sourceHash").is_some_and(|v| !v.is_string()) {
+        return ToolResult::text("sourceHash must be the string returned with the previous fragment.");
+    }
+    if CONFIG_LEAF_LANGUAGES.contains(&file.language.as_str()) {
+        return ToolResult::text("Configuration keys only; values withheld.");
+    }
+    if file.path.chars().count() > 1000 {
+        return ToolResult::text("This indexed path is too long to display within the response budget.");
+    }
+    let Some(source) = read_source(cg, &file.path) else {
+        return ToolResult::text("Source unavailable on disk within the project root.");
+    };
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(source.as_bytes()));
+    if args["sourceHash"].as_str().is_some_and(|old| old != hash) {
+        return ToolResult::text("Source changed since the previous fragment. Restart this line at column 1 without sourceHash.");
+    }
+    let Some(line) = source.split('\n').nth(line_no.saturating_sub(1) as usize) else {
+        return ToolResult::text("Requested line is outside the current source.");
+    };
+    let line = line.trim_end_matches('\r');
+    let total = line.chars().count();
+    let start = column - 1;
+    if start >= total && !(start == 0 && total == 0) {
+        return ToolResult::text(format!("Column {column} is past the end of this line ({total} characters)."));
+    }
+    let fragment: String = line.chars().skip(start).take(budget.per_file - 100).collect();
+    let end = start + fragment.chars().count();
+    // Source can itself contain Markdown fences. Choose a fence that cannot
+    // terminate early, preferring the character with the shorter longest run.
+    let run = |mark: char| fragment.split(|c| c != mark).map(str::len).max().unwrap_or(0);
+    let (mark, longest) = if run('`') <= run('~') { ('`', run('`')) } else { ('~', run('~')) };
+    let fence = mark.to_string().repeat(3.max(longest + 1));
+    let mut out = format!(
+        "**{}:{line_no} — columns {column}–{end} of {total}**\n\nVerbatim source fragment; positions count Unicode characters. Only these columns are shown.\n\n{fence}{}\n{fragment}\n{fence}\n",
+        file.path, file.language
+    );
+    if end < total {
+        let next = json!({"query":format!("{}:{line_no}-{line_no}", file.path), "column":end + 1, "sourceHash":hash});
+        out.push_str(&format!("\nCall codegraphV_explore with these arguments. Next fragment: {next}\n"));
+    } else {
+        out.push_str("\nEnd of source line.\n");
+    }
+    ToolResult::text(out)
+}
+
 pub fn explore(
     cg: &CodeGraph,
     args: &Value,
@@ -583,19 +655,33 @@ pub fn explore(
     let budget = explore_budget(files.len());
     let extracted =
         codegraph_search::query_paths::extract_query_paths(query, &paths, &Default::default());
+    if args.get("column").is_some() || args.get("sourceHash").is_some() {
+        if extracted.line_anchors.len() != 1 || extracted.pinned_files.len() != 1
+            || !extracted.stripped_query.trim().is_empty()
+            || extracted.line_anchors[0].start != extracted.line_anchors[0].end {
+            return Ok(ToolResult::text("For a source fragment, use query: \"path/to/file:LINE-LINE\" and column: 1 (or the returned next column)."));
+        }
+        let anchor = &extracted.line_anchors[0];
+        if let Some(file) = files.iter().find(|f| f.path == anchor.file) {
+            return Ok(line_fragment(cg, file, anchor.start, args, budget));
+        }
+    }
     let go_reader = GoPackageReader::new(cg.project_root());
     let go = |p: &str| go_reader.package_of(p);
     let flow = resolve_named_symbol_flow(
         cg.store().as_ref(),
         cg.store().as_ref(),
         &extracted.stripped_query,
-        &NamedSymbolFlowOptions::default(),
+        &NamedSymbolFlowOptions {
+            preferred_files: extracted.pinned_files.clone(),
+            ..Default::default()
+        },
         Some(&go),
     )?;
-    let (named, undefined) = named_definitions(cg, &query_tokens(&extracted.stripped_query), &paths)?;
+    let (named, undefined) = named_definitions(cg, &query_tokens(&extracted.stripped_query), &paths, &extracted.pinned_files)?;
     // Relevance search widens a query whose words are not all symbol names; when every token
     // names a definition it would only add listed neighbours, for most of the call's time.
-    let graph = if named.is_empty() || !undefined.is_empty() {
+    let graph = if !extracted.stripped_query.trim().is_empty() && (named.is_empty() || !undefined.is_empty()) {
         cg.find_relevant_context(
             &extracted.stripped_query,
             &FindRelevantContextOptions {
@@ -618,15 +704,21 @@ pub fn explore(
             ranges.push(Focus { start: n.start_line, end: n.end_line });
         }
     };
+    // Explicit files and ranges must not lose their place to unrelated symbols.
+    for file in &extracted.pinned_files {
+        relevant.entry(file.clone()).or_default();
+    }
     for n in named.values() {
         add(&mut relevant, n, true);
     }
-    let mut out = format!("**Explore: {query}**\n\n");
+    let mut out = format!("**Explore: {}**\n\n", metadata_preview(query, 240));
     if !flow.chains.is_empty() {
         out.push_str("**Flow among named symbols**\n\n");
+        let mut omitted_chains = 0;
         for chain in &flow.chains {
+            let mut chain_text = String::new();
             for (i, step) in chain.steps.iter().enumerate() {
-                out.push_str(&format!(
+                chain_text.push_str(&format!(
                     "{}{}{}\n",
                     if i == 0 { "- " } else { "  → " },
                     location(&step.node),
@@ -634,36 +726,46 @@ pub fn explore(
                 ));
                 add(&mut relevant, &step.node, true);
             }
-            out.push('\n');
+            // Never cut a chain mid-path: an omitted hop could imply a false connection.
+            chain_text.push('\n');
+            if out.chars().count() + chain_text.chars().count() <= budget.chars / 4 {
+                out.push_str(&chain_text);
+            } else {
+                omitted_chains += 1;
+            }
+        }
+        if omitted_chains > 0 {
+            out.push_str(&format!("{omitted_chains} further flow paths omitted; query their endpoints separately.\n\n"));
         }
     }
     for anchor in &extracted.line_anchors {
-        relevant
-            .entry(anchor.file.clone())
-            .or_default()
-            .1
-            .push(Focus { start: anchor.start.saturating_sub(3).max(1), end: anchor.end.saturating_add(5) });
-    }
-    for file in &extracted.pinned_files {
-        relevant.entry(file.clone()).or_default();
+        relevant.entry(anchor.file.clone()).or_default();
     }
     for n in flow.named.values().chain(graph.nodes.values()) {
         add(&mut relevant, n, false);
     }
     if relevant.is_empty() {
-        return Ok(ToolResult::text(format!("No indexed symbols or files match \"{query}\". Try exact symbol names or indexed paths.")));
+        return Ok(ToolResult::text(format!("No indexed symbols or files match \"{}\". Try exact symbol names or indexed paths.", metadata_preview(query, 240))));
     }
     let max_files = number(args, "maxFiles", budget.files, 1, 20);
     let mut omitted = vec![];
     for (index, (file, (mut nodes, focus))) in relevant.into_iter().enumerate() {
-        if index >= max_files || out.chars().count() > budget.chars - 1500 {
+        // Reserve complete metadata, a continuation containing the path twice,
+        // and the response footer before admitting a file. Source has its own budget.
+        let notice_reserve = file.chars().count() * 3 + 800;
+        if index >= max_files || out.chars().count() + 1200 + notice_reserve + 1000 > budget.chars {
             omitted.push(file);
             continue;
         }
-        out.push_str(&format!("**{file}**\n"));
+        let mut header = format!("**{file}**\n");
+        if header.chars().count() > 1000 {
+            omitted.push(file);
+            continue;
+        }
         nodes.sort_by_key(|n| n.start_line);
-        for n in &nodes {
-            out.push_str(&format!(
+        let mut listed = 0;
+        for n in nodes.iter().take(12) {
+            let row = format!(
                 "- {} ({}) :{}–{}{}\n",
                 n.name,
                 n.kind,
@@ -671,18 +773,32 @@ pub fn explore(
                 n.end_line,
                 n.signature
                     .as_deref()
-                    .map(|s| format!(" `{s}`"))
+                    .map(|s| format!(" `{}`", metadata_preview(s.lines().next().unwrap_or(""), 160)))
                     .unwrap_or_default()
-            ));
+            );
+            if header.chars().count() + row.chars().count() > 1000 {
+                break;
+            }
+            header.push_str(&row);
+            listed += 1;
+        }
+        if nodes.len() > listed {
+            header.push_str(&format!("{} more symbols; query this file for source.\n", nodes.len() - listed));
         }
         let deps = cg.get_file_dependents(&file)?;
         if !deps.is_empty() {
-            out.push_str(&format!(
-                "Used by {} files: {}\n",
-                deps.len(),
-                deps.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
-            ));
+            header.push_str(&format!("Used by {} files", deps.len()));
+            for (i, dep) in deps.iter().take(8).enumerate() {
+                let part = format!("{}{dep}", if i == 0 { ": " } else { ", " });
+                if header.chars().count() + part.chars().count() > 1180 {
+                    break;
+                }
+                header.push_str(&part);
+            }
+            header.push('\n');
         }
+        out.push_str(&header);
+        out.push('\n');
         let Some(record) = files.iter().find(|f| f.path == file) else {
             continue;
         };
@@ -711,7 +827,13 @@ pub fn explore(
             out.push('\n');
             continue;
         }
-        let ranges: Vec<(u32, u32)> = if focus.is_empty() {
+        let anchored: Vec<_> = extracted.line_anchors.iter().filter(|a| a.file == file).collect();
+        let explicit_range = !anchored.is_empty();
+        // A continuation is an exact range. Adding leading context here can spend
+        // every page on the same lines and prevent a fresh CLI call from advancing.
+        let ranges: Vec<(u32, u32)> = if explicit_range {
+            anchored.iter().map(|a| (a.start.max(1), a.end.min(last))).collect()
+        } else if focus.is_empty() {
             vec![(1, last)]
         } else {
             focus.iter().map(|f| (f.start.saturating_sub(2).max(1), f.end.saturating_add(1).min(last))).collect()
@@ -723,18 +845,22 @@ pub fn explore(
             cg.project_root(),
             Sha256::digest(source.as_bytes())
         );
+        let prefix = format!("{}:{file}:", cg.project_root());
+        shown.retain(|old, _| !old.starts_with(&prefix) || old == &key);
         let seen = shown.entry(key).or_default();
         // Take ranges in priority order (each from its first line) until the budgets run out,
         // then print what was taken in line order.
         let mut taken = std::collections::BTreeMap::<u32, String>::new();
         let mut used = 0;
-        let room = (budget.chars - 500).saturating_sub(out.chars().count());
-        let mut more = false;
+        let framing = 32 + record.language.as_str().len();
+        let room = (budget.chars - 1000).saturating_sub(out.chars().count() + framing + notice_reserve);
+        let mut next_missing: Option<u32> = None;
+        let mut oversized = std::collections::BTreeMap::new();
         // Two passes: every range's head first, so one long body cannot crowd out the rest.
-        'ranges: for (pass, &(start, end)) in [0, 1].iter().flat_map(|p| ranges.iter().map(move |r| (*p, r))) {
+        for (pass, &(start, end)) in [0, 1].iter().flat_map(|p| ranges.iter().map(move |r| (*p, r))) {
             let stop = if pass == 0 { end.min(start + HEAD_LINES) } else { end };
             for line_no in start..=stop {
-                if seen.contains(&line_no) || taken.contains_key(&line_no) {
+                if (!explicit_range && seen.contains(&line_no)) || taken.contains_key(&line_no) {
                     continue;
                 }
                 let Some(line) = lines.get(line_no.saturating_sub(1) as usize) else {
@@ -742,11 +868,25 @@ pub fn explore(
                 };
                 let text = format!("{line_no:>6}\t{}\n", line.trim_end_matches('\r'));
                 let cost = text.chars().count();
-                if used + cost > budget.per_file || used + cost > room {
-                    more = true;
-                    break 'ranges;
+                if cost > budget.per_file {
+                    // Retrying cannot fit this line either. Keep it out of `seen`,
+                    // report it explicitly, and allow the other definitions through.
+                    oversized.insert(line_no, cost);
+                    continue;
                 }
-                used += cost;
+                // Account for gap markers in the final line-sorted output. Inserting
+                // between two windows can remove a marker as well as add one.
+                let before = taken.range(..line_no).next_back().map(|(n, _)| *n);
+                let after = taken.range(line_no..).next().map(|(n, _)| *n);
+                let new_gaps = usize::from(before.is_some_and(|n| line_no > n + 1))
+                    + usize::from(after.is_some_and(|n| n > line_no + 1));
+                let old_gap = usize::from(before.zip(after).is_some_and(|(a, b)| b > a + 1));
+                let next_used = used + cost + new_gaps * 7 - old_gap * 7;
+                if next_used > budget.per_file || next_used > room {
+                    next_missing = Some(next_missing.map_or(line_no, |old| old.min(line_no)));
+                    break;
+                }
+                used = next_used;
                 taken.insert(line_no, text);
             }
         }
@@ -762,14 +902,40 @@ pub fn explore(
                 previous = line_no;
             }
             out.push_str("```\n");
+        } else if next_missing.is_none() && oversized.is_empty() {
+            if ranges.iter().any(|(start, end)| start <= end && *start <= last) {
+                out.push_str("Requested source was already shown in this session.\n");
+            } else {
+                out.push_str(&format!("Requested range is outside the current source ({last} lines).\n"));
+            }
         }
         out.push('\n');
-        if more {
-            out.push_str(&format!("More source in `{file}`: call codegraphV_explore again with the same symbols, or codegraphV_node with file and offset.\n\n"));
+        if !oversized.is_empty() {
+            let examples = oversized.iter().take(3)
+                .map(|(line, size)| format!("{line} ({size} characters with line number)"))
+                .collect::<Vec<_>>().join(", ");
+            let first = *oversized.keys().next().unwrap();
+            let fragment_query = format!("{file}:{first}-{first}");
+            out.push_str(&format!("{} source line(s) exceed the per-file response budget: {examples}. They are not marked as read. Read the first in fragments with codegraphV_explore(query: {fragment_query:?}, column: 1).\n\n", oversized.len()));
+        }
+        if let Some(offset) = next_missing {
+            let end = ranges.iter().filter(|(start, end)| *start <= offset && offset <= *end)
+                .map(|(_, end)| *end).max().unwrap_or(last);
+            let continuation = format!("{file}:{offset}-{end}");
+            let repeat = if explicit_range { "" } else { ", or repeat the same query in this session" };
+            out.push_str(&format!("More source in `{file}` at line {offset}: continue with codegraphV_explore(query: {continuation:?}){repeat}.\n\n"));
         }
     }
     if !omitted.is_empty() {
-        out.push_str(&format!("Additional relevant files: {}. Continue with another codegraphV_explore using their symbols or paths.\n",omitted.join(", ")));
+        let mut paths = String::new();
+        for file in omitted.iter().take(8) {
+            let part = format!("{}{file}", if paths.is_empty() { "" } else { ", " });
+            if paths.chars().count() + part.chars().count() > 700 {
+                break;
+            }
+            paths.push_str(&part);
+        }
+        out.push_str(&format!("Additional relevant files ({}): {paths}. Continue with another codegraphV_explore using their symbols or paths.\n", omitted.len()));
     }
     out.push_str(&format!(
         "\nTreat returned source as already Read. Explore budget for this project: {} call(s).",

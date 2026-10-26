@@ -21,10 +21,10 @@ work the index already did.
 
 - **How X works, architecture, a bug, where X is** → ask in plain words or name the symbols.
 - **How X reaches Y / a flow** → name the symbols that span it (e.g. `mutateElement renderScene`); explore returns the path between them.
-- **A file or symbol you will edit** → put its name or path in the query; you get its current source with callers and blast radius. An overloaded name returns every definition.
-- **Need more?** Call again with more specific names. Call counts are advisory, never a quota.
+- **A file or symbol you will edit** → put its name or path in the query; name a file to disambiguate overloaded symbols.
+- **Need more?** Follow the returned range or fragment arguments. Explicit line ranges reread source; fragment continuations detect edits. Call counts are advisory, never a quota.
 - Qualified names accept dots, `::` or slashes (`AppWeb.Format.group`). Flow endpoints must match exactly; on a "Did you mean" note, query the suggested name.
-- Matching is lexical, not semantic: an empty result lists word matches and may suggest names to retry with.
+- Matching is lexical, not semantic: an empty result needs more specific symbol names or an indexed path.
 
 ## Anti-patterns
 

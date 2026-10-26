@@ -92,6 +92,22 @@ fn executable_indexes_queries_syncs_and_serves_jsonrpc_without_node() {
     assert!(!dir.path().join(".codegraphV").exists());
     assert!(dir.path().join("app.ts").exists());
 }
+
+#[test]
+fn executable_continues_long_source_lines_with_columns_and_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = format!("// {}tail_marker\npub fn after() {{}}\n", "x".repeat(5000));
+    std::fs::write(dir.path().join("long source.rs"), source).unwrap();
+    run(dir.path(), &["init", "--yes"]);
+    let first = run(dir.path(), &["explore", "long source.rs:1-1", "--column", "1"]);
+    let next: Value = serde_json::from_str(first.split("Next fragment: ").nth(1)
+        .and_then(|s| s.lines().next()).unwrap()).unwrap();
+    let column = next["column"].as_u64().unwrap().to_string();
+    let second = run(dir.path(), &["explore", next["query"].as_str().unwrap(),
+        "--column", &column, "--source-hash", next["sourceHash"].as_str().unwrap()]);
+    assert!(second.contains("tail_marker"), "{second}");
+    assert!(second.contains("End of source line."), "{second}");
+}
 #[test]
 fn print_config_never_writes_configuration() {
     let dir = tempfile::tempdir().unwrap();

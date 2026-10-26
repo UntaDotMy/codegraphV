@@ -39,6 +39,10 @@ pub struct NamedSymbolFlowOptions {
     pub max_hops: Option<usize>,
     pub max_bridge: Option<u32>,
     pub max_chains: Option<usize>,
+    /// Prefer definitions in explicitly requested files when a token has a match
+    /// there. Other tokens may still resolve across files to complete the flow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,7 +209,11 @@ pub fn resolve_named_tokens(
         );
     }
     for token in &out.tokens {
-        let hits = find_all_symbols(host, token, go)?.nodes;
+        let mut hits = find_all_symbols(host, token, go)?.nodes;
+        if hits.iter().any(|n| opts.preferred_files.contains(&n.file_path)
+            && (is_flow_callable(n.kind) || is_dynamic_kind(n.kind))) {
+            hits.retain(|n| opts.preferred_files.contains(&n.file_path));
+        }
         let candidates: Vec<_> = hits
             .iter()
             .filter(|n| is_flow_callable(n.kind))

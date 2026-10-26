@@ -317,10 +317,12 @@ impl Store {
             .map(|c| format!("nodes.{}", c.trim()))
             .collect::<Vec<_>>()
             .join(", ");
-        let mut sql = format!("SELECT {columns}, bm25(nodes_fts, 0, 20, 5, 1, 2) AS score FROM nodes_fts JOIN nodes ON nodes_fts.id = nodes.id WHERE nodes_fts MATCH ?");
+        // Sorting by FTS5's rank column lets SQLite use its ranked iterator,
+        // especially with LIMIT, while keeping the same weighted BM25 scores.
+        let mut sql = format!("SELECT {columns}, nodes_fts.rank AS score FROM nodes_fts JOIN nodes ON nodes_fts.id = nodes.id WHERE nodes_fts MATCH ? AND nodes_fts.rank MATCH 'bm25(0, 20, 5, 1, 2)'");
         let mut params = vec![Value::Text(terms.join(" OR "))];
         append_filters(&mut sql, &mut params, kinds, languages, "nodes.");
-        sql.push_str(" ORDER BY score LIMIT ? OFFSET ?");
+        sql.push_str(" ORDER BY nodes_fts.rank LIMIT ? OFFSET ?");
         params.extend([integer(limit.saturating_mul(5).max(100)), integer(offset)]);
         let mut results = self.search_rows(&sql, params)?;
         for r in &mut results {

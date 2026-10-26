@@ -117,6 +117,12 @@ enum Command {
         project: Project,
         #[arg(long)]
         max_files: Option<usize>,
+        /// Unicode character column for a single-line source fragment.
+        #[arg(long)]
+        column: Option<usize>,
+        /// Content hash from the previous source fragment.
+        #[arg(long, requires = "column")]
+        source_hash: Option<String>,
     },
     /// Read a symbol or indexed file.
     Node {
@@ -505,10 +511,18 @@ fn run() -> Result<()> {
             query,
             project,
             max_files,
+            column,
+            source_hash,
         } => {
             let mut args = json!({"query":query.join(" ")});
             if let Some(n) = max_files {
                 args["maxFiles"] = json!(n);
+            }
+            if let Some(n) = column {
+                args["column"] = json!(n);
+            }
+            if let Some(hash) = source_hash {
+                args["sourceHash"] = json!(hash);
             }
             tool(project, "codegraphV_explore", args)?;
         }
