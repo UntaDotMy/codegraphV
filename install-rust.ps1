@@ -47,11 +47,14 @@ try {
 
     New-Item -ItemType Directory -Force $dir | Out-Null
     $target = Join-Path $dir 'codegraphV.exe'
-    Remove-Item "$target.old" -Force -ErrorAction SilentlyContinue
+    # Copies earlier upgrades moved aside; one still in use by an open session stays.
+    Get-ChildItem $dir -Filter 'codegraphV.exe.old*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     # A running codegraphV (an MCP server) locks its exe; Windows still lets it be renamed.
-    if (Test-Path $target) { Move-Item $target "$target.old" -Force }
+    $aside = "$target.old"
+    if (Test-Path $aside) { $aside = "$target.old-$([DateTime]::UtcNow.Ticks)" }
+    if (Test-Path $target) { Move-Item $target $aside -Force }
     Copy-Item "$tmp\$name\codegraphV.exe" $target
-    Remove-Item "$target.old" -Force -ErrorAction SilentlyContinue
+    Remove-Item $aside -Force -ErrorAction SilentlyContinue
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
