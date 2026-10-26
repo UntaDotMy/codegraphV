@@ -656,12 +656,13 @@ fn run() -> Result<()> {
             let path = project.path.map(|path| nodepath::resolve(&[&path]));
             let from = path.clone().unwrap_or_else(|| nodepath::resolve(&["."]));
             let shared = directory::resolve_server_root(&from, true).root;
-            if !no_watch
-                && std::env::var("CODEGRAPHV_DAEMON").as_deref() != Ok("0")
-                && shared.is_some()
-            {
-                codegraph_mcp::daemon::proxy(&shared.unwrap(), &std::env::current_exe()?)?;
-            } else {
+            let proxied = match shared {
+                Some(shared) if !no_watch && std::env::var("CODEGRAPHV_DAEMON").as_deref() != Ok("0") => {
+                    codegraph_mcp::daemon::proxy(&shared, &std::env::current_exe()?)?
+                }
+                _ => false,
+            };
+            if !proxied {
                 codegraph_mcp::session::serve(
                     io::BufReader::new(io::stdin()),
                     io::stdout().lock(),

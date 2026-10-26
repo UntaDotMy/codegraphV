@@ -1,6 +1,10 @@
 //! Authenticated loopback transport for a shared native engine. SQLite stays
 //! on one owning thread; each client keeps its own retrieval emission state.
-use crate::{session::Session, ToolHandler};
+use crate::{
+    handoff::{self, ExeWatch, Relay},
+    session::Session,
+    ToolHandler,
+};
 use codegraph_core::{directory, utils::FileLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -8,14 +12,23 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+/// How long a proxy waits for a daemon to start or take over the project.
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Shortest gap between two daemon starts while the lock is still held by another.
+const DAEMON_RESPAWN_GAP: Duration = Duration::from_millis(250);
+/// Hand-offs in a row with no request answered before a proxy gives up: a request that makes
+/// every new daemon exit must not restart daemons forever.
+const MAX_FRUITLESS_HANDOFFS: u32 = 3;
+/// How often a daemon looks at its own binary for an upgrade.
+const UPGRADE_POLL: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Endpoint {
@@ -100,58 +113,140 @@ fn keep_stdio_from_children() {
     }
 }
 
-/// Proxy stdio, preserving half-close: EOF from the client drains responses
-/// before returning. The daemon stays alive for other clients.
-pub fn proxy(root: &str, executable: &Path) -> Result<()> {
-    let mut stream = read_endpoint(root)
-        .filter(|e| e.version == env!("CARGO_PKG_VERSION"))
-        .and_then(|e| connect(&e).ok());
-    if stream.is_none() {
-        #[cfg(windows)]
-        keep_stdio_from_children();
-        let mut command = Command::new(executable);
-        command
-            .args(["__daemon", "--path", root])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let mut child = command.spawn()?;
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(10) {
-            if let Some(connection) = read_endpoint(root).and_then(|e| connect(&e).ok()) {
-                stream = Some(connection);
-                break;
-            }
-            if let Some(exit) = child.try_wait()? {
-                if !exit.success() {
-                    // Another client may have won the daemon lock.
-                    if let Some(connection) = read_endpoint(root).and_then(|e| connect(&e).ok()) {
-                        stream = Some(connection);
-                        break;
-                    }
-                    return Err(format!("Native daemon exited with {exit}").into());
+fn spawn_daemon(root: &str, executable: &Path) -> io::Result<Child> {
+    #[cfg(windows)]
+    keep_stdio_from_children();
+    let mut command = Command::new(executable);
+    command
+        .args(["__daemon", "--path", root])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command.spawn()
+}
+
+/// Connect to the project's daemon, starting `executable`'s when none is usable. `leaving` is
+/// the daemon a hand-off moves away from. `Ok(None)`: a live daemon of an older version holds
+/// the project; it predates hand-offs and keeps its lock, so the caller serves in-process.
+fn open_daemon(root: &str, executable: &Path, leaving: Option<u32>) -> Result<Option<(TcpStream, u32)>> {
+    let own = env!("CARGO_PKG_VERSION");
+    let deadline = Instant::now() + DAEMON_READY_TIMEOUT;
+    let mut child: Option<Child> = None;
+    let mut spawned_at: Option<Instant> = None;
+    let opened = loop {
+        if let Some(endpoint) = read_endpoint(root).filter(|e| Some(e.pid) != leaving) {
+            if handoff::proxy_uses_daemon(own, &endpoint.version) {
+                if let Ok(stream) = connect(&endpoint) {
+                    break Some((stream, endpoint.pid));
                 }
+            } else if codegraph_core::utils::is_process_alive(endpoint.pid) {
+                break None;
             }
-            std::thread::sleep(Duration::from_millis(40));
         }
+        // Start a daemon, or another once ours lost the lock to a winner not yet published or
+        // to a predecessor still leaving.
+        let running = match child.as_mut() {
+            Some(c) => c.try_wait()?.is_none(),
+            None => false,
+        };
+        if !running && spawned_at.is_none_or(|at| at.elapsed() >= DAEMON_RESPAWN_GAP) {
+            child = Some(spawn_daemon(root, executable)?);
+            spawned_at = Some(Instant::now());
+        }
+        if Instant::now() >= deadline {
+            return Err("Native daemon did not become ready".into());
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    };
+    if let Some(mut child) = child {
         // Reap the helper when it eventually leaves, while this proxy lives.
         std::thread::spawn(move || {
             let _ = child.wait();
         });
     }
-    let mut stream = stream.ok_or("Native daemon did not become ready")?;
-    let mut outgoing = stream.try_clone()?;
+    Ok(opened)
+}
+
+struct Link {
+    relay: Relay,
+    to_daemon: TcpStream,
+    client_closed: bool,
+}
+
+/// Relay stdio to the project's daemon, preserving half-close: EOF from the client drains
+/// responses before returning. When the daemon leaves while the client is still connected (its
+/// binary was upgraded), the session moves to the successor on the same stdio connection.
+/// Returns false, having read nothing, when an older daemon holds the project (serve in-process).
+pub fn proxy(root: &str, executable: &Path) -> Result<bool> {
+    let Some((stream, mut pid)) = open_daemon(root, executable, None)? else {
+        return Ok(false);
+    };
+    let link = Arc::new(Mutex::new(Link { relay: Relay::new(), to_daemon: stream.try_clone()?, client_closed: false }));
+    let input = link.clone();
     std::thread::spawn(move || {
-        let _ = io::copy(&mut io::stdin().lock(), &mut outgoing);
-        let _ = outgoing.shutdown(Shutdown::Write);
+        let mut stdin = io::stdin().lock();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if matches!(stdin.read_line(&mut line), Ok(0) | Err(_)) {
+                break;
+            }
+            // Written under the lock, so a hand-off replays this line or it reaches the
+            // successor, never both.
+            let mut link = input.lock().unwrap();
+            link.relay.from_client(&line);
+            let _ = link.to_daemon.write_all(line.as_bytes());
+        }
+        let mut link = input.lock().unwrap();
+        link.client_closed = true;
+        let _ = link.to_daemon.shutdown(Shutdown::Write);
     });
-    io::copy(&mut stream, &mut io::stdout().lock())?;
-    Ok(())
+    let mut from_daemon = BufReader::new(stream);
+    let mut stdout = io::stdout().lock();
+    let (mut fruitless, mut answered) = (0, 0);
+    loop {
+        let mut line = String::new();
+        if from_daemon.read_line(&mut line).unwrap_or(0) > 0 {
+            if link.lock().unwrap().relay.from_daemon(&line) {
+                stdout.write_all(line.as_bytes())?;
+                stdout.flush()?;
+            }
+            continue;
+        }
+        {
+            let link = link.lock().unwrap();
+            if link.client_closed {
+                return Ok(true);
+            }
+            fruitless = if link.relay.answered() == answered { fruitless + 1 } else { 0 };
+            answered = link.relay.answered();
+        }
+        if fruitless >= MAX_FRUITLESS_HANDOFFS {
+            return Err("The CodeGraphV daemon keeps exiting before it answers; reconnect the MCP server.".into());
+        }
+        let Some((next, next_pid)) = open_daemon(root, executable, Some(pid))? else {
+            return Err("An older CodeGraphV daemon took over this project; reconnect the MCP server.".into());
+        };
+        {
+            let mut link = link.lock().unwrap();
+            link.to_daemon = next.try_clone()?;
+            for replayed in link.relay.replay() {
+                writeln!(link.to_daemon, "{replayed}")?;
+            }
+            if link.client_closed {
+                let _ = link.to_daemon.shutdown(Shutdown::Write);
+            }
+        }
+        writeln!(stdout, "{}", handoff::TOOLS_CHANGED)?;
+        stdout.flush()?;
+        from_daemon = BufReader::new(next);
+        pid = next_pid;
+    }
 }
 enum Event {
     Connected(usize, TcpStream),
@@ -220,7 +315,7 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
             }
         }
     }
-    let _cleanup = Cleanup {
+    let cleanup = Cleanup {
         path,
         token: token.clone(),
     };
@@ -229,6 +324,8 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
     let mut pool = ToolHandler::new(Some(root.clone()), true);
     let mut idle = Instant::now();
     let mut quitting = false;
+    let mut binary = std::env::current_exe().ok().map(ExeWatch::new);
+    let mut next_upgrade_poll = Instant::now() + UPGRADE_POLL;
     while !stop.load(Ordering::Relaxed) && !quitting {
         while let Ok((mut stream, _)) = listener.accept() {
             let sender = sender.clone();
@@ -246,7 +343,8 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
                     return;
                 }
                 let valid = serde_json::from_str::<Value>(&auth).ok().is_some_and(|v| {
-                    v["token"] == token && v["version"] == env!("CARGO_PKG_VERSION")
+                    v["token"] == token
+                        && handoff::daemon_accepts_client(env!("CARGO_PKG_VERSION"), v["version"].as_str().unwrap_or_default())
                 });
                 if !valid {
                     return;
@@ -335,10 +433,21 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
         if clients.is_empty() && idle.elapsed() >= idle_timeout {
             break;
         }
+        // Replaced by an upgrade: leave, and each client's proxy hands its session to the new
+        // binary's daemon.
+        if next_upgrade_poll <= Instant::now() {
+            next_upgrade_poll = Instant::now() + UPGRADE_POLL;
+            if binary.as_mut().is_some_and(|b| b.poll(handoff::binary_runs)) {
+                break;
+            }
+        }
     }
+    // Free the project before the clients hear we left, so their successor can take it at once.
+    drop(pool);
+    drop(cleanup);
+    drop(lock);
     for (_, client) in clients {
         let _ = client.stream.shutdown(Shutdown::Both);
     }
-    drop(pool);
     Ok(())
 }
