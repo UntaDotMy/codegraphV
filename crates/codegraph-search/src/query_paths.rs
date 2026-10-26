@@ -262,6 +262,17 @@ pub fn extract_query_paths(
     for p in paths {
         index.insert(p.to_lowercase(), p.clone());
     }
+    // Resolve a whole indexed path before splitting on whitespace. Besides being
+    // precise, this makes returned continuation queries usable for paths with spaces.
+    let (whole, lines) = strip_wrapping(js_trim(query));
+    if let Some(file) = index.get(&normalize_span(whole).to_lowercase()) {
+        out.stripped_query.clear();
+        out.pinned_files.push(file.clone());
+        if let Some((start, end)) = lines {
+            out.line_anchors.push(QueryLineAnchor { file: file.clone(), start, end });
+        }
+        return out;
+    }
     let tokens: Vec<_> = query.split(is_js_space).filter(|s| !s.is_empty()).collect();
     let mut consumed = HashSet::new();
     let mut pinned_seen = HashSet::new();
