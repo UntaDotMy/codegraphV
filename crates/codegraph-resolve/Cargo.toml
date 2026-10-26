@@ -20,3 +20,4 @@ jsonc-parser.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 icu_collator = "2.3"
+num_cpus = "1"

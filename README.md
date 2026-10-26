@@ -247,12 +247,25 @@ byte-identical graph. v0.0.2 resolves references and runs the synthesis passes o
 and reads SQLite inside one transaction per unit of work instead of re-taking its lock for
 every statement.
 
+**Against v0.0.2:** on this repo (pinned to commit 014ac5c0, files over 1 MB skipped so both
+builds index the same files) v0.0.3 indexes in 30.2 s against 30.7 s, uses 88.7 CPU-seconds
+against 118.6 (-25%) and peaks at 1.8 GB of memory against 3.4 GB (-47%), with an identical
+graph (median of 3 interleaved runs, [`scripts/bench/efficiency_gate.py`](scripts/bench/efficiency_gate.py)).
+The gains come from no longer copying each file once per `super` call while resolving, a JIT
+stack that starts at one page instead of 32 KB for each of the thousands of compiled regular
+expressions, a byte limit on the resolver's file caches, and one resolve worker per physical
+core instead of per hardware thread (a second thread on a core added CPU time and memory, not
+speed).
+
 ### Where Rust is not better
 
-- **Indexing a large repo uses more memory than v0.0.1 did.** Every core now resolves at
-  once, each worker with its own caches: on this repo the peak is 2.1 GB, against 1.1 GB for
-  v0.0.1 (and 4.0 GB for TypeScript). To trade speed for memory, set
-  `CODEGRAPHV_RESOLVE_WORKERS` and `CODEGRAPHV_PARSE_WORKERS` to a lower number.
+- **Indexing a large repo uses more memory than v0.0.1 did.** On this repo the peak is
+  1.8 GB, against 1.1 GB for v0.0.1 (and 4.0 GB for TypeScript). To trade speed for memory,
+  set `CODEGRAPHV_RESOLVE_WORKERS` and `CODEGRAPHV_PARSE_WORKERS` to a lower number.
+- **A tree of very large generated sources still needs a lot of memory.** Parsing now holds at
+  most about 12 MB of source at a time, but a graph of two million symbols (12 generated 8 MB
+  files) peaks near 1.5 GB while the synthesis passes run, and those files parse one after the
+  other. Set `CODEGRAPHV_MAX_FILE_MB` lower to skip such files.
 - **The binary is large:** about 74 MB, because tree-sitter grammars for every language are
   compiled in, plus a WebAssembly runtime that loads the original's grammar files for some
   languages. The npm package downloads a full Node.js runtime instead, but that is no
@@ -311,7 +324,9 @@ codegraphV migrate              move over from the original codegraph
 | `CODEGRAPHV_DAEMON=0` | each session runs its own server instead of the shared one |
 | `CODEGRAPHV_PPID_POLL_MS` | how often (ms) a server checks that its agent is still there (default 5000, `0` = never) |
 | `CODEGRAPHV_DIR` | the per-project folder name (default `.codegraphV`) |
-| `CODEGRAPHV_PARSE_WORKERS` / `CODEGRAPHV_RESOLVE_WORKERS` | thread counts for indexing (default: every core) |
+| `CODEGRAPHV_PARSE_WORKERS` / `CODEGRAPHV_RESOLVE_WORKERS` | thread counts for indexing (default: parsing uses every hardware thread, resolving one per physical core) |
+| `CODEGRAPHV_MAX_FILE_MB` | largest source file indexed, in MB (default 10, `0` = no limit) |
+| `CODEGRAPHV_RESOLVER_CACHE_MB` | file text each resolve worker may cache, in MB (default 8) |
 | `CODEGRAPHV_INSTALL_DIR`, `CODEGRAPHV_VERSION` | install-script / upgrade location and version |
 
 ## Privacy

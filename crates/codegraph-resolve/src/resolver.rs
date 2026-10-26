@@ -233,21 +233,24 @@ const RESOLVE_CHUNK: usize = 128;
 /// every worker's caches, and larger ones, which leave one worker finishing a batch alone.)
 const RESOLVE_CHUNK_MAX: usize = 256;
 
-/// `CODEGRAPHV_RESOLVE_WORKERS` sets the count (1 = single-threaded); unset, a big run takes
-/// every core.
+/// `CODEGRAPHV_RESOLVE_WORKERS` sets the count (1 = single-threaded); unset, a big run takes one
+/// worker per physical core. A second hardware thread on a core adds no resolve throughput (the
+/// workers contend for the same caches and memory bandwidth), only CPU time and per-worker memory:
+/// on a 6-core/12-thread machine 12 workers took 25% more CPU-seconds and 40% more memory than 6
+/// for the same wall time.
 fn resolve_worker_count(total: usize) -> usize {
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    worker_count_for(std::env::var("CODEGRAPHV_RESOLVE_WORKERS").ok().as_deref(), total, cpus)
+    worker_count_for(std::env::var("CODEGRAPHV_RESOLVE_WORKERS").ok().as_deref(), total, cpus.min(num_cpus::get_physical()))
 }
 
-fn worker_count_for(env: Option<&str>, total: usize, cpus: usize) -> usize {
+fn worker_count_for(env: Option<&str>, total: usize, cores: usize) -> usize {
     if let Some(n) = env.and_then(|v| v.trim().parse::<usize>().ok()) {
         return n.max(1);
     }
     if total < PARALLEL_MIN_REFS {
         return 1;
     }
-    cpus.max(1)
+    cores.max(1)
 }
 
 /// One batch for the pool: workers take chunk indexes from `next` until none are left.
@@ -2412,8 +2415,8 @@ mod worker_count_tests {
     }
 
     #[test]
-    fn a_big_run_uses_every_core_and_the_variable_overrides() {
-        assert_eq!(worker_count_for(None, PARALLEL_MIN_REFS, 12), 12);
+    fn a_big_run_uses_a_worker_per_core_and_the_variable_overrides() {
+        assert_eq!(worker_count_for(None, PARALLEL_MIN_REFS, 6), 6);
         assert_eq!(worker_count_for(None, PARALLEL_MIN_REFS, 64), 64);
         assert_eq!(worker_count_for(None, PARALLEL_MIN_REFS - 1, 12), 1, "a small run stays on one thread");
         assert_eq!(worker_count_for(Some("24"), 10, 12), 24);
