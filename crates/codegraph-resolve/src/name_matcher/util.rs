@@ -249,6 +249,7 @@ pub fn compute_path_proximity(file_path1: &str, file_path2: &str) -> i64 {
 pub fn find_best_match(r: &UnresolvedRef, candidates: &[NodeRef], ctx: &Ctx) -> Option<NodeRef> {
     let mut best_score = -1.0f64;
     let mut best: Option<NodeRef> = None;
+    let mut tied: Vec<NodeRef> = Vec::new();
     let mut ref_dirs: Vec<&str> = r.file_path.split('/').collect();
     ref_dirs.pop();
     let has_same_language = candidates.iter().any(|c| c.language == r.language);
@@ -297,9 +298,61 @@ pub fn find_best_match(r: &UnresolvedRef, candidates: &[NodeRef], ctx: &Ctx) -> 
         if score > best_score {
             best_score = score;
             best = Some(candidate.clone());
+            tied = vec![candidate.clone()];
+        } else if score == best_score {
+            tied.push(candidate.clone());
+        }
+    }
+    // Proximity is capped, so on a deep tree two copies of one symbol in sibling modules can tie;
+    // the caller's own copy, if uniquely closest, wins.
+    if tied.len() > 1 {
+        if let Some(copy) = closest_copy(r, &tied) {
+            return Some(copy);
         }
     }
     best
+}
+
+/// Leading directory segments two file paths share, uncapped.
+fn shared_dir_depth(file_path1: &str, file_path2: &str) -> usize {
+    let mut a: Vec<&str> = file_path1.split('/').collect();
+    let mut b: Vec<&str> = file_path2.split('/').collect();
+    a.pop();
+    b.pop();
+    a.iter().zip(&b).take_while(|(x, y)| x == y).count()
+}
+
+fn file_basename(file_path: &str) -> &str {
+    file_path.rsplit('/').next().unwrap_or(file_path)
+}
+
+/// When every candidate is a copy of one symbol — same qualified name, kind and file basename, as
+/// when a module is duplicated under another source root (`rc2/flymod/src/…` vs
+/// `rcpro2/flymod/src/…`) — the copy whose file shares the longest directory prefix with the
+/// reference, i.e. the one in the caller's own module. `None` when the candidates are not all
+/// copies or no copy is uniquely closest, so callers keep their existing choice.
+pub fn closest_copy(r: &UnresolvedRef, candidates: &[NodeRef]) -> Option<NodeRef> {
+    let first = candidates.first().filter(|_| candidates.len() >= 2)?;
+    let base = file_basename(&first.file_path);
+    let mut best: Option<&NodeRef> = None;
+    let mut best_depth = None;
+    let mut unique = false;
+    for c in candidates {
+        if c.qualified_name != first.qualified_name || c.kind != first.kind || file_basename(&c.file_path) != base {
+            return None;
+        }
+        let depth = shared_dir_depth(&r.file_path, &c.file_path);
+        match best_depth {
+            Some(d) if depth < d => {}
+            Some(d) if depth == d => unique = false,
+            _ => {
+                best_depth = Some(depth);
+                best = Some(c);
+                unique = true;
+            }
+        }
+    }
+    best.filter(|_| unique).cloned()
 }
 
 /// `/^[A-Za-z_$][\w$]*$/` — a plain identifier (JS flavor).

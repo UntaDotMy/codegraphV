@@ -3,7 +3,8 @@
 
 use super::js_imports::*;
 use super::js_store::{enclosing_scope_start_line, has_parameter_binding, import_shadowed_at};
-use super::go::{go_asserted_local_type, go_local_decl_type, go_named_type, go_written_type, GoProjectType};
+use super::go::chain::{go_call_value_type, GoTypeText};
+use super::go::{go_asserted_local_type, go_local_decl, go_named_type, go_written_type, GoProjectType};
 use super::reach::is_lexically_reachable;
 use super::util::*;
 use crate::ambient_modules::is_merged_ambient_declaration;
@@ -24,7 +25,7 @@ pub const TYPE_ARGS: &str = r"(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?
 /// A Swift call with balanced parentheses that is not chained on, or an unterminated one.
 const SWIFT_UNCHAINED_CALL: &str = r"(?:\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)(?!\s*\??\.)|\([^)]*$)";
 
-const NON_TYPE_RECEIVER_TOKENS: [&str; 16] =
+pub(super) const NON_TYPE_RECEIVER_TOKENS: [&str; 16] =
     ["this", "self", "super", "new", "return", "await", "yield", "typeof", "null", "nil", "None", "true", "false", "True", "False", "undefined"];
 
 /// The type name an inferred type reads as (`Foo<T>*` → `Foo`, `a.b.Foo` → `Foo`), or none for a keyword.
@@ -103,8 +104,10 @@ fn build_local_receiver_type_patterns(language: Language, r: &str) -> Vec<Arc<Re
         Language::Java => pats(
             &[
                 s(r"\b@R@\b\s*=\s*new\s+([A-Za-z_][\w.]*)"),
-                format!(r"\b([A-Z][\w.]*)\s*{ta}\s+{r}\b\s*[=;,)]"),
-                format!(r"\bfor\s*\(\s*(?:final\s+)?([A-Z][\w.]*)\s*{ta}\s+{r}\s*:"),
+                // A package written before the type is kept (`org.app.Message message`): it, not a
+                // same-named import, says which type the local is.
+                format!(r"\b((?:[a-z_$][\w$]*\.)*[A-Z][\w.]*)\s*{ta}\s+{r}\b\s*[=;,)]"),
+                format!(r"\bfor\s*\(\s*(?:final\s+)?((?:[a-z_$][\w$]*\.)*[A-Z][\w.]*)\s*{ta}\s+{r}\s*:"),
             ],
             "",
         ),
@@ -220,6 +223,12 @@ pub struct GoReceiverDecl {
     pub declared: Tri<String>,
     /// The line the inference read the declaration on.
     pub line: Option<u32>,
+    /// The file `raw` is written in, when it is not the call's: a callee's signature spells a
+    /// result's type.
+    pub file: Option<String>,
+    /// The type of the call's or conversion's value a Go local's declaration gives it; `Null` for
+    /// one with no project method.
+    pub valued: Tri<GoTypeText>,
 }
 
 /// Infer a receiver's type from its local declaration or initializer in the enclosing function.
@@ -254,7 +263,8 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
                 d.asserted = asserted;
                 return Some(normalize_inferred_type_name(&written).unwrap_or(written));
             }
-            let ty = if re!(r"^[A-Za-z_]\w*$").is_match(&scan_receiver) { go_local_decl_type(&scan_receiver, r, ctx) } else { None };
+            let local = if re!(r"^[A-Za-z_]\w*$").is_match(&scan_receiver) { go_local_decl(&scan_receiver, r, ctx) } else { None };
+            let ty = local.as_ref().and_then(|l| l.ty.clone());
             if let Some(ty) = ty {
                 let named = go_named_type(&ty);
                 match named {
@@ -267,6 +277,28 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
                         d.raw = Some(named.clone());
                         return Some(named[named.find('.').map_or(0, |i| i + 1)..].to_string());
                     }
+                }
+            }
+            // A local its declaration in scope gives the result of a call or a conversion —
+            // `r := newRing()`, `e, err := NewEngine(1)`, `v1 := router.Group(…)`,
+            // `list := web.Users(names)` — has the type of that value, read as the indexed and
+            // chained calls read it (#2782): what the function or method returns (the k-th result
+            // of several), or the type converted to. The patterns below read none of these. A
+            // value of a type from outside the project has no project method, whether an outside
+            // package hands it out (`c, _ := net.Dial(…)`) or a project function returns it
+            // (`*os.File`, `http.RoundTripper`, a `reflect.Value`): a guess by the method's name
+            // took a namesake's (#1954).
+            if let Some(valued) = local.as_ref().and_then(|l| go_call_value_type(l, &r.file_path, ctx)) {
+                if !valued.is_undefined() {
+                    let named = valued.as_value().and_then(|v| go_named_type(&v.text));
+                    let Some(named) = named else {
+                        d.valued = Tri::Null;
+                        return None;
+                    };
+                    d.file = valued.as_value().map(|v| v.file.clone());
+                    d.valued = valued;
+                    d.raw = Some(named.clone());
+                    return Some(named[named.find('.').map_or(0, |i| i + 1)..].to_string());
                 }
             }
         }
@@ -291,7 +323,8 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
         for re in patterns.iter() {
             if let Some(m) = re.captures(line) {
                 if let Some(t) = m.text(1).filter(|t| !t.is_empty()) {
-                    if let Some(ty) = normalize_inferred_type_name(t) {
+                    let ty = if r.language == Language::Java { super::java_receiver::java_type_name(t) } else { normalize_inferred_type_name(t) };
+                    if let Some(ty) = ty {
                         *last_raw.borrow_mut() = Some(t.to_string());
                         return Some(ty);
                     }
@@ -461,6 +494,9 @@ pub fn infer_java_field_receiver_type(receiver_name: &str, r: &UnresolvedRef, ct
     if in_file.is_empty() {
         return None;
     }
+    if r.language == Language::Java {
+        return super::java_receiver::java_enclosing_field_type(receiver_name, r, &in_file);
+    }
     let mut enclosing: Option<&NodeRef> = None;
     for n in in_file.iter() {
         if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) || n.language != r.language {
@@ -471,14 +507,37 @@ pub fn infer_java_field_receiver_type(receiver_name: &str, r: &UnresolvedRef, ct
         }
     }
     let enclosing = enclosing?;
+    // Kotlin indexes a `val` property as a `constant`, a `var` as a `field`, and a
+    // companion-object property as a `variable`.
     let field = in_file.iter().find(|n| {
-        n.kind == NodeKind::Field && n.name == receiver_name && n.language == r.language && n.start_line >= enclosing.start_line && n.end_line <= enclosing.end_line
-    })?;
+        (n.kind == NodeKind::Field || (r.language == Language::Kotlin && matches!(n.kind, NodeKind::Constant | NodeKind::Variable)))
+            && n.name == receiver_name
+            && n.language == r.language
+            && n.start_line >= enclosing.start_line
+            && n.end_line <= enclosing.end_line
+    });
+    // Kotlin keeps no signature on a property, and a primary-constructor property (`class A(private
+    // val repo: Repo)`) is no node at all, so the declared type has to be read from the declaration
+    // itself.
+    if r.language == Language::Kotlin {
+        return super::kotlin_receiver::infer_kotlin_property_type(receiver_name, field.map(|f| &**f), enclosing, &in_file, r, ctx);
+    }
+    field_signature_type(field?)
+}
+
+/// The declared type of a Java/Kotlin field node, read from its signature ("<TypeName> <fieldName>",
+/// set by the extractor): generics, a dotted package and array/varargs markers stripped — for Java,
+/// in `java_type_name`'s form, which keeps a written package and outer class. `None` for a primitive
+/// or a field without a signature.
+pub fn field_signature_type(field: &Node) -> Option<String> {
     let sig = field.signature.as_ref()?;
     let before = &sig[..sig.rfind(&field.name).unwrap_or(sig.len())];
     let type_raw = codegraph_types::jscompat::js_trim(before);
     if type_raw.is_empty() {
         return None;
+    }
+    if field.language == Language::Java {
+        return super::java_receiver::java_type_name(type_raw);
     }
     let no_generics = codegraph_types::jscompat::js_trim(&re!(r"<[^>]*>", "g").replace_all_str(type_raw, "")).to_string();
     let no_array = re!(r"\.\.\.$").replace_first(&re!(r"\[\s*\]", "g").replace_all_str(&no_generics, ""), |_| String::new());

@@ -44,12 +44,32 @@ static WHEN_GUARD: LazyLock<Re> =
     LazyLock::new(|| Re::multiline(r#"^([ \t]*!?(?:is|in)[ \t]+(?:(?!->)[^\n])*?[\w>?)\]'"])([ \t]+)if(?=[ \t(])"#));
 static MULTI_DOLLAR_STRING: LazyLock<Re> = LazyLock::new(|| Re::new(r#"(?<![\w$"])\$\$+(?=")"#));
 static NULLABLE_RECEIVER_FN: LazyLock<Re> = LazyLock::new(|| Re::new(r"([\w>])\?\.\(\)(?=\s*->)"));
+static FUN_INTERFACE: LazyLock<Re> = LazyLock::new(|| {
+    Re::multiline(r"^([ \t]*(?:(?:public|private|internal|protected|expect|actual)[ \t]+)*)fun([ \t]+interface\b)")
+});
 
 fn blank_kotlin_qualified_receivers(source: &str) -> String {
     if !source.contains(".(") {
         return source.to_string();
     }
     QUALIFIED_RECEIVER.replace_all(source, |c| Some(spaces(c.get(0).unwrap().as_str().len())))
+}
+
+/// The grammar predates functional interfaces (Kotlin 1.4): `fun interface Reply { … }` parses as
+/// a broken function declaration whose error recovery swallows the NEXT declaration too, so that
+/// interface and its methods go missing. Blanking the `fun` of a `fun interface` declaration (three
+/// spaces for three letters, so every offset holds) lets it parse as the plain interface it is.
+/// Only a declaration position is touched: the start of a line, after optional visibility or
+/// multiplatform modifiers.
+fn blank_kotlin_fun_interface(source: &str) -> String {
+    if !source.contains("interface") {
+        return source.to_string();
+    }
+    FUN_INTERFACE.replace_all(source, |c| {
+        let before = c.get(1).unwrap().as_str();
+        let after = c.get(2).unwrap().as_str();
+        Some(format!("{before}   {after}"))
+    })
 }
 
 fn join_kotlin_split_constructors(source: &str) -> String {
@@ -85,7 +105,7 @@ fn rewrite_newer_kotlin_syntax(source: &str) -> String {
 }
 
 pub(crate) fn pre_parse_kotlin(source: &str) -> String {
-    rewrite_newer_kotlin_syntax(&join_kotlin_split_constructors(&blank_kotlin_qualified_receivers(source)))
+    rewrite_newer_kotlin_syntax(&join_kotlin_split_constructors(&blank_kotlin_qualified_receivers(&blank_kotlin_fun_interface(source))))
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +246,10 @@ mod tests {
         assert_eq!(rewrite_newer_kotlin_syntax("x: Op<Boolean>?.() -> Unit"), "x: Op<Boolean>.( ) -> Unit");
         assert_eq!(rewrite_newer_kotlin_syntax(r#"val s = $$"a""#), r#"val s =   "a""#);
         assert_eq!(blank_kotlin_qualified_receivers("f: (A.Builder.() -> Unit)"), "f: (  Builder.() -> Unit)");
+        assert_eq!(
+            blank_kotlin_fun_interface("internal fun interface Reply {\n    fun send(): Boolean\n}\nval fun_interface = 1\n"),
+            "internal     interface Reply {\n    fun send(): Boolean\n}\nval fun_interface = 1\n"
+        );
         assert_eq!(
             join_kotlin_split_constructors("class A\ninternal constructor(x: Int) : B {"),
             "class A\n                    (x: Int) : B {"

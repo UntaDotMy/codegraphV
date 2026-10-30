@@ -15,7 +15,7 @@ pub mod watch_policy;
 mod watch;
 pub use codegraph_sync::watcher::{FileWatcher,WatchOptions,PendingFile,WatchSyncResult,SyncError};
 
-pub use codegraph::{CodeGraph, IndexOptions, IndexState, OpenOptions};
+pub use codegraph::{CodeGraph, FrameworkChanges, IndexOptions, IndexState, OpenOptions};
 pub use codegraph_context::{BuildOutput, ContextBuilder};
 pub use codegraph_sync as sync;
 pub use codegraph_types::*;

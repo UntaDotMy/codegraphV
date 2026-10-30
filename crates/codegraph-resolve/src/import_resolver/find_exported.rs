@@ -9,7 +9,6 @@ use super::python::python_star_allows;
 use super::{is_esm_import_language, resolve_import_path};
 use crate::ctx::Ctx;
 use crate::types::{NodeRef, ReExport, UnresolvedRef};
-use codegraph_jsre::re;
 use codegraph_types::{EdgeKind, Language, NodeKind};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -249,68 +248,4 @@ pub fn resolve_static_member(container: &NodeRef, r: &UnresolvedRef, local_name:
         }
     }
     candidates.into_iter().next()
-}
-
-/// `local → full::path` for every Rust `use` in `content`: braces expand, `as` renames, globs drop.
-pub fn collect_rust_use_bindings(content: &str) -> indexmap::IndexMap<String, String> {
-    let mut out = indexmap::IndexMap::new();
-    let use_re = re!(r"(^|\n)\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);", "g");
-    for m in use_re.captures_iter(content) {
-        let spec = re!(r"\s+", "g").replace_all_str(m.text(2).unwrap_or(""), " ");
-        for spec in expand_rust_use(&spec) {
-            let alias = re!(r"^(.*?)\s+as\s+([A-Za-z_]\w*)$").captures(&spec);
-            let raw_path = alias.as_ref().and_then(|a| a.text(1)).unwrap_or(&spec).trim().to_string();
-            if raw_path.is_empty() || raw_path.ends_with('*') {
-                continue;
-            }
-            let segments: Vec<&str> = raw_path.split("::").map(str::trim).filter(|s| !s.is_empty()).collect();
-            let Some(leaf) = segments.last() else { continue };
-            let local = alias.as_ref().and_then(|a| a.text(2)).map(String::from).unwrap_or_else(|| leaf.to_string());
-            out.insert(local, segments.join("::"));
-        }
-    }
-    out
-}
-
-/// Expand `a::{b, c::{d, e}}` into the flat list of leaf paths.
-fn expand_rust_use(spec: &str) -> Vec<String> {
-    let Some(open) = spec.find('{') else { return vec![spec.trim().to_string()] };
-    let prefix = &spec[..open];
-    let bytes = spec.as_bytes();
-    let mut depth = 0i32;
-    let mut close = None;
-    for (i, &b) in bytes.iter().enumerate().skip(open) {
-        if b == b'{' {
-            depth += 1;
-        } else if b == b'}' {
-            depth -= 1;
-            if depth == 0 {
-                close = Some(i);
-                break;
-            }
-        }
-    }
-    let Some(close) = close else { return Vec::new() };
-    let suffix = &spec[close + 1..];
-    let inner = &spec[open + 1..close];
-    let mut parts: Vec<String> = Vec::new();
-    let mut depth2 = 0i32;
-    let mut start = 0usize;
-    let inner_bytes = inner.as_bytes();
-    for i in 0..=inner.len() {
-        let ch = inner_bytes.get(i).copied();
-        match ch {
-            Some(b'{') => depth2 += 1,
-            Some(b'}') => depth2 -= 1,
-            _ => {}
-        }
-        if i == inner.len() || (ch == Some(b',') && depth2 == 0) {
-            let seg = inner[start..i].trim();
-            if !seg.is_empty() {
-                parts.push(seg.to_string());
-            }
-            start = i + 1;
-        }
-    }
-    parts.into_iter().flat_map(|p| expand_rust_use(&format!("{prefix}{p}{suffix}"))).collect()
 }

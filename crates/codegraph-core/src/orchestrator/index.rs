@@ -12,7 +12,7 @@ use super::{ExtractionOrchestrator, FileStat, FrameworkGate, IndexPhase, IndexPr
 use crate::errors::{CodeGraphError, Result};
 use crate::extract::{extract_from_source, has_grammar_load_failure};
 use crate::file_limits::{max_source_file_bytes, oversize_stamp, read_bounded_source};
-use crate::utils::{validate_path_within_root, ValidateOptions};
+use crate::utils::{is_missing_path_error, validate_path_within_root, ValidateOptions};
 use codegraph_extract::languages::{detect_language, is_file_level_only_language, is_language_supported};
 use codegraph_extract::scan::config::load_extension_overrides;
 use codegraph_extract::scan::{scan_directory, ScanSkipStats};
@@ -51,7 +51,8 @@ pub fn resolve_parse_pool_size(env_val: Option<&str>, cpu_count: usize) -> usize
 
 /// One file's read-and-parse outcome, produced on a worker and committed in file order.
 enum Prepared {
-    /// Not a source file after all (an MPEG transport stream named `.ts`, #1910).
+    /// Nothing to index and nothing wrong, counted as skipped: an MPEG transport stream named
+    /// `.ts` (#1910), or a path the scan listed that nothing is at any more (#2904).
     Skipped,
     ReadError(String),
     /// Over the size limit: stored as skipped, its bytes never read (#1910). `content` is the stamp.
@@ -111,6 +112,11 @@ fn prepare_file(shared: &Shared<'_>, resolvers: &[codegraph_resolve::frameworks:
     // decoded (#1910).
     let read = match read_bounded_source(Path::new(&full_path)) {
         Ok(r) => r,
+        // Nothing at the path is not a file that could not be read (#2904): git keeps listing a
+        // tracked file deleted from the working tree until the deletion is staged, a symlink can
+        // point at nothing, and a file can go between the scan and this read. EACCES, EIO and the
+        // like still report.
+        Err(e) if is_missing_path_error(&e) => return Prepared::Skipped,
         Err(e) => return Prepared::ReadError(e.to_string()),
     };
     let stat = FileStat::from_metadata(&read.metadata);
@@ -509,8 +515,10 @@ impl ExtractionOrchestrator {
     fn commit_prepared(&self, tally: &mut Tally, file_path: &str, item: Prepared, total: usize, emit: &mut dyn FnMut(IndexProgress)) -> Result<()> {
         match item {
             Prepared::Skipped => {
-                // Not a source file after all — counted as done, stored as nothing.
+                // Stored as nothing, but every file the scan found lands in indexed, skipped or
+                // errored, or the run would read as PARTIAL (#2943).
                 tally.processed += 1;
+                tally.files_skipped += 1;
                 emit(IndexProgress::new(IndexPhase::Parsing, tally.processed, total));
             }
             Prepared::ReadError(error) => {
@@ -618,6 +626,8 @@ impl ExtractionOrchestrator {
         // needed (#1910).
         let read = match read_bounded_source(Path::new(&full_path)) {
             Ok(r) => r,
+            // Nothing at the path: nothing to index, and not a read failure (#2904).
+            Err(error) if is_missing_path_error(&error) => return Ok(ExtractionResult::default()),
             Err(error) => {
                 return Ok(ExtractionResult {
                     errors: vec![ExtractionError {

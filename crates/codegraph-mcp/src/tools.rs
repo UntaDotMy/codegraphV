@@ -1,6 +1,6 @@
 use codegraph_core::{
     directory::{is_initialized, resolve_server_root},
-    utils::validate_project_path,
+    utils::{sensitive_directory_refusal, validate_project_path},
     CodeGraph, OpenOptions, WatchOptions,
 };
 use codegraph_types::nodepath;
@@ -84,6 +84,10 @@ pub struct ToolHandler {
     /// Off for the one-shot CLI commands, which answer from the index as it is, like the
     /// TypeScript CLI: a full sync before every query cost most of its time (BUG-99).
     pub catch_up: bool,
+    /// Open every project read-only, for the one-shot CLI commands: migrations, bulk-load repair
+    /// and WAL maintenance stay with the writer, so a command never disturbs a full index that is
+    /// running (upstream 475e56b2). Such a handler neither watches nor catches up.
+    pub read_only: bool,
     pub(crate) projects: IndexMap<String, CodeGraph>,
     /// When each open project last answered a call.
     pub(crate) used_at: HashMap<String, Instant>,
@@ -115,11 +119,17 @@ impl ToolHandler {
             default_path,
             watch,
             catch_up: true,
+            read_only: false,
             projects: IndexMap::new(),
             used_at: HashMap::new(),
             idle_timeout: project_idle_timeout(),
             shown: Default::default(),
         }
+    }
+
+    /// Whether another live process is rebuilding any project this handler has open.
+    pub fn rebuild_in_progress(&self) -> bool {
+        self.projects.values().any(CodeGraph::is_rebuild_in_progress)
     }
 
     /// The open projects' table, swapped with another handler's (the daemon lends its pool to
@@ -202,6 +212,17 @@ impl ToolHandler {
                     .into_owned()
             });
         let input = nodepath::resolve(&[&input]);
+        if explicit.is_none() {
+            // A default project in a sensitive folder gets the refusal a projectPath gets, but as
+            // the usual success-shaped "pass projectPath" guidance: the agent can still query
+            // every other project, and an error here would teach it to stop calling.
+            let refusal = sensitive_directory_refusal(&input).or_else(|| resolve_server_root(&input, true).refusal);
+            if let Some(refusal) = refusal {
+                return ToolResult::text(format!(
+                    "{refusal}. CodeGraphV never uses a credential, config or system folder as a project, so this session has no default project. Pass projectPath to an indexed project outside such folders (one containing .codegraphV/)."
+                ));
+            }
+        }
         if let Some(reason) = validate_project_path(&input) {
             return if reason.starts_with("Refusing") {
                 ToolResult::error(reason)
@@ -210,6 +231,11 @@ impl ToolHandler {
             };
         }
         let resolution = resolve_server_root(&input, true);
+        // The root the walk landed on gets the same refusal: a path that doesn't exist skips the
+        // check above, so `~/.config/no-such-dir` would otherwise walk up into `~/.config` (#1930).
+        if let Some(refusal) = resolution.refusal {
+            return ToolResult::error(refusal);
+        }
         let Some(root) = resolution.root else {
             return ToolResult::text(format!("No CodeGraphV index is available for {input}. Pass projectPath to an indexed project (one containing .codegraphV/). Indexing is the user's decision; do not initialize a project automatically."));
         };
@@ -220,10 +246,10 @@ impl ToolHandler {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(root);
         if !self.projects.contains_key(&root) {
-            match CodeGraph::open(&root,OpenOptions::default()){
+            match CodeGraph::open(&root,OpenOptions{read_only:self.read_only,..OpenOptions::default()}){
                 Ok(mut cg)=>{
-                    if self.watch{let _=cg.watch(WatchOptions::default());}
-                    if self.catch_up {
+                    if self.watch&&!self.read_only{let _=cg.watch(WatchOptions::default());}
+                    if self.catch_up&&!self.read_only {
                         catch_up(&mut cg, &root);
                     }
                     if self.projects.len()>=8{if let Some((old_root,old))=self.projects.shift_remove_index(0){self.used_at.remove(&old_root);old.close();}}

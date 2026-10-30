@@ -10,7 +10,7 @@ publish.workspace = true
 codegraph-types.workspace = true
 codegraph-search.workspace = true
 codegraph-jsre.workspace = true
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true

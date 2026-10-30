@@ -15,6 +15,7 @@ use codegraph_db::{FileBundle, NodeIdentity, Store};
 use codegraph_extract::scan::config::PROJECT_CONFIG_FILENAME;
 use codegraph_extract::scan::{build_default_ignore, build_scope_ignore, ScopeIgnore};
 use codegraph_resolve::ctx::Ctx;
+use codegraph_resolve::detection_inputs::{disk_inputs_changed, disk_signature, recorded_path, DetectionInputs};
 use codegraph_resolve::frameworks::package_deps::declared_dependencies;
 use codegraph_resolve::frameworks::detect_frameworks;
 use codegraph_resolve::resolver::to_db_reference;
@@ -23,7 +24,7 @@ use codegraph_types::{Edge, ExtractionError, ExtractionResult, FileRecord, Langu
 use indexmap::IndexMap;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
@@ -132,6 +133,10 @@ pub struct SyncResult {
     /// Tracked files this sync found gone and deleted from the index.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_file_paths: Option<Vec<String>>,
+    /// The frameworks extraction detected, when this sync had to detect them again because what
+    /// detection read had changed (#2516). `None` when the cached detection still held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_frameworks: Option<Vec<String>>,
 }
 
 /// SHA-256 of file contents, hex.
@@ -248,11 +253,25 @@ pub struct FrameworkGate {
     app_memo: Mutex<HashMap<String, bool>>,
     /// Directory → the dependency names its package.json declares, `None` without one.
     manifests: Mutex<HashMap<String, Option<Arc<HashSet<String>>>>>,
+    /// Every manifest read so far, by project-relative path, with what was there when it was read:
+    /// the memos above are kept until the next detection, so an edit of one must bring one about.
+    read_manifests: Mutex<HashMap<String, String>>,
 }
 
 impl FrameworkGate {
     fn new(root_dir: &str, gated: HashMap<String, Vec<&'static str>>) -> FrameworkGate {
-        FrameworkGate { root_dir: root_dir.to_string(), gated, app_memo: Mutex::new(HashMap::new()), manifests: Mutex::new(HashMap::new()) }
+        FrameworkGate {
+            root_dir: root_dir.to_string(),
+            gated,
+            app_memo: Mutex::new(HashMap::new()),
+            manifests: Mutex::new(HashMap::new()),
+            read_manifests: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether a manifest this gate read is different on disk now.
+    fn manifests_changed(&self) -> bool {
+        self.read_manifests.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(rel, recorded)| disk_signature(&recorded_path(&self.root_dir, rel), false) != *recorded)
     }
 
     /// The detected frameworks whose extractors apply to `file_path`: all of `names`, except one
@@ -306,8 +325,11 @@ impl FrameworkGate {
         if let Some(hit) = self.manifests.lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
             return hit.clone();
         }
+        let manifest = Path::new(&self.root_dir).join(dir).join("package.json");
+        let relative = if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") };
+        self.read_manifests.lock().unwrap_or_else(|e| e.into_inner()).entry(relative).or_insert_with(|| disk_signature(&manifest, false));
         let declared = (|| {
-            let text = std::fs::read_to_string(Path::new(&self.root_dir).join(dir).join("package.json")).ok()?;
+            let text = std::fs::read_to_string(&manifest).ok()?;
             let pkg: serde_json::Value = serde_json::from_str(&text).ok()?;
             let mut names = HashSet::new();
             for field in ["dependencies", "devDependencies", "peerDependencies"] {
@@ -332,6 +354,14 @@ pub struct ExtractionOrchestrator {
     /// detection hasn't run yet so single-file re-index paths can detect on the spot.
     detected_framework_names: RefCell<Option<Vec<String>>>,
     gate: RefCell<Arc<FrameworkGate>>,
+    /// How often framework detection ran, and how often it had to scan the project for its file list.
+    detection_runs: Cell<usize>,
+    detection_scans: Cell<usize>,
+    /// What the last detection read, so a sync can tell when it went stale (#2516). `None` until
+    /// detection runs.
+    detection_inputs: RefCell<Option<DetectionInputs>>,
+    /// Files were added or removed since the last detection: the file list it read is out of date.
+    detection_file_list_changed: Cell<bool>,
     /// Scope matcher for SCOPED syncs, memoized on the mtimes of the files it is derived from.
     scoped_matcher: RefCell<Option<(String, Rc<ScopeIgnore>)>>,
     scratch: RefCell<Option<Rc<Store>>>,
@@ -344,6 +374,10 @@ impl ExtractionOrchestrator {
             store,
             detected_framework_names: RefCell::new(None),
             gate: RefCell::new(Arc::new(FrameworkGate::new(root_dir, HashMap::new()))),
+            detection_runs: Cell::new(0),
+            detection_scans: Cell::new(0),
+            detection_inputs: RefCell::new(None),
+            detection_file_list_changed: Cell::new(false),
             scoped_matcher: RefCell::new(None),
             scratch: RefCell::new(None),
         }
@@ -412,12 +446,19 @@ impl ExtractionOrchestrator {
         if let Some(names) = self.detected_framework_names.borrow().as_ref() {
             return names.clone();
         }
-        let file_list = files.unwrap_or_else(|| codegraph_extract::scan::scan_directory(Path::new(&self.root_dir), None, None).unwrap_or_default());
+        self.detection_runs.set(self.detection_runs.get() + 1);
+        let file_list = files.unwrap_or_else(|| {
+            self.detection_scans.set(self.detection_scans.get() + 1);
+            codegraph_extract::scan::scan_directory(Path::new(&self.root_dir), None, None).unwrap_or_default()
+        });
         let Ok(scratch) = self.scratch_store() else { return Vec::new() };
         let ctx = Ctx::with_file_list(self.root_dir.clone(), scratch, file_list);
+        ctx.record_detection_inputs();
         let detected = detect_frameworks(&ctx);
         let names: Vec<String> = detected.iter().map(|r| r.name().to_string()).collect();
         let declared = declared_dependencies(&ctx);
+        *self.detection_inputs.borrow_mut() = Some(ctx.take_detection_inputs());
+        self.detection_file_list_changed.set(false);
         let mut gated: HashMap<String, Vec<&'static str>> = HashMap::new();
         for resolver in &detected {
             // Gated only when some manifest names the framework: otherwise detection found it by
@@ -431,6 +472,52 @@ impl ExtractionOrchestrator {
         *self.gate.borrow_mut() = Arc::new(FrameworkGate::new(&self.root_dir, gated));
         *self.detected_framework_names.borrow_mut() = Some(names.clone());
         names
+    }
+
+    /// The frameworks extraction last detected, or `None` before any detection.
+    pub fn detected_framework_names(&self) -> Option<Vec<String>> {
+        self.detected_framework_names.borrow().clone()
+    }
+
+    /// `(runs, scans)`: how often detection ran, and how often it walked the project for its file list.
+    pub fn detection_stats(&self) -> (usize, usize) {
+        (self.detection_runs.get(), self.detection_scans.get())
+    }
+
+    /// Bring framework detection up to date before a sync extracts `files_to_index` (#2516).
+    /// Detection is cached for the life of this orchestrator, so in a long-lived process (the MCP
+    /// server's watcher) a framework that arrives mid-session, like Express in a new
+    /// `package.json`, would otherwise be missing from every file synced after it. It runs again
+    /// only when what it read changed: files were added or removed since, a source file it read is
+    /// among those changed, or a manifest it read or probed changed on disk.
+    ///
+    /// `scanned_files` is a full reconcile's scan. A scoped sync never walks the project: the file
+    /// list is the index's, which already holds this sync's removals, plus the files it adds.
+    /// Returns the frameworks detected when detection ran.
+    pub(crate) fn refresh_framework_detection(&self, scanned_files: Option<&[String]>, files_to_index: &[String], added_files: &[String]) -> Option<Vec<String>> {
+        let stale = match self.detection_inputs.borrow().as_ref() {
+            None => true,
+            Some(inputs) => {
+                self.detected_framework_names.borrow().is_none()
+                    || self.detection_file_list_changed.get()
+                    || files_to_index.iter().any(|f| inputs.source_files.contains(f))
+                    || disk_inputs_changed(&self.root_dir, inputs)
+                    || self.gate.borrow().manifests_changed()
+            }
+        };
+        if !stale {
+            return None;
+        }
+        self.reset_detected_frameworks();
+        let files = match scanned_files {
+            Some(files) => files.to_vec(),
+            None => {
+                let mut files = self.store.get_all_file_paths().unwrap_or_default();
+                files.extend(added_files.iter().cloned());
+                files
+            }
+        };
+        Some(self.ensure_detected_frameworks(Some(files)))
     }
 
     pub(crate) fn reset_detected_frameworks(&self) {

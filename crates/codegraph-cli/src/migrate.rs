@@ -215,7 +215,7 @@ fn print_plan(plan: &Plan) {
             match i.step {
                 IndexStep::Move => println!("  {}: {ORIGINAL_CODEGRAPH_DIR}/ -> {}/", i.root.display(), codegraph_dir_name()),
                 IndexStep::RemoveOld => println!(
-                    "  {}: remove the original's {ORIGINAL_CODEGRAPH_DIR}/ (it already has {}/)",
+                    "  {}: remove the original's {ORIGINAL_CODEGRAPH_DIR}/ only after checking that {}/ is a healthy, complete index",
                     i.root.display(),
                     codegraph_dir_name()
                 ),
@@ -239,9 +239,20 @@ fn print_plan(plan: &Plan) {
 /// Copies of `files` under `~/.codegraphV/migrate-backup/<time>/`, with `index.txt` naming where
 /// each came from.
 fn backup(files: &[PathBuf], home: &Path) -> std::io::Result<PathBuf> {
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let dir = home.join(".codegraphV").join("migrate-backup").join(stamp.to_string());
-    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let base = home.join(".codegraphV").join("migrate-backup");
+    std::fs::create_dir_all(&base)?;
+    // Exclusive creation matters even with a high-resolution clock: retries and concurrent
+    // invocations must never overwrite the original configuration saved by an earlier run.
+    let mut attempt = 0u64;
+    let dir = loop {
+        let dir = base.join(format!("{stamp}-{}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => break dir,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+            Err(e) => return Err(e),
+        }
+    };
     let mut index = String::new();
     for (n, file) in files.iter().filter(|f| f.is_file()).enumerate() {
         let name = format!("{n}-{}", file.file_name().unwrap_or_default().to_string_lossy());
@@ -254,6 +265,24 @@ fn backup(files: &[PathBuf], home: &Path) -> std::io::Result<PathBuf> {
 
 const IN_USE: &str = "in use: close the agent sessions using it, then run `codegraphV migrate` again";
 
+/// A pre-existing folder can be an interrupted migration, an unindexed database, or an alias
+/// of the original. None of those is a safe reason to discard the only working index.
+fn check_existing_index(dir: &Path) -> crate::Result<()> {
+    if dir.is_symlink() || dir.join("codegraph.db").is_symlink() {
+        return Err("the destination is a link, not an independent index".into());
+    }
+    let store = codegraph_db::Store::open(dir.join("codegraph.db"), codegraph_db::OpenOptions { read_only: true })?;
+    let check: String = store.conn().query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+    if check != "ok" {
+        return Err(format!("database integrity check failed: {check}").into());
+    }
+    store.get_stats()?;
+    if store.get_metadata("index_state")?.as_deref() != Some("complete") {
+        return Err("the destination has no completed index".into());
+    }
+    Ok(())
+}
+
 /// Move one index. Windows cannot rename a folder whose database another process (the
 /// original's MCP server) has open: then the database is copied consistently and the old
 /// folder removed once nothing holds it.
@@ -261,6 +290,12 @@ fn migrate_index(index: &Index) -> Result<String, String> {
     let old = index.root.join(ORIGINAL_CODEGRAPH_DIR);
     let new = index.root.join(codegraph_dir_name());
     if index.step == IndexStep::RemoveOld {
+        if let Err(e) = check_existing_index(&new) {
+            return Err(format!(
+                "kept {}: {} is not a verified replacement ({e}). Both folders were kept; move {} aside and run `codegraphV migrate` again to use the original index.",
+                old.display(), new.display(), new.display()
+            ));
+        }
         return match std::fs::remove_dir_all(&old) {
             Ok(()) => Ok(format!("removed the original's {}", old.display())),
             Err(_) => Err(format!("could not remove {} ({IN_USE})", old.display())),
@@ -269,7 +304,9 @@ fn migrate_index(index: &Index) -> Result<String, String> {
     if std::fs::rename(&old, &new).is_ok() {
         return Ok(format!("moved {} -> {}", old.display(), new.display()));
     }
-    std::fs::create_dir_all(&new).map_err(|e| format!("could not create {}: {e}", new.display()))?;
+    // Own this directory before copying or cleaning up a failed copy. A concurrent migration
+    // may have created it since planning; never overwrite or remove that process's index.
+    std::fs::create_dir(&new).map_err(|e| format!("could not create {}: {e}; the original index was kept", new.display()))?;
     if let Err(e) = codegraph_db::copy_database(&old.join("codegraph.db"), &new.join("codegraph.db")) {
         let _ = std::fs::remove_dir_all(&new);
         return Err(format!("could not copy {} ({e}); it was left as it was", old.display()));
@@ -324,6 +361,10 @@ pub fn run(options: Options) -> crate::Result<i32> {
         eprintln!("Warning: {w}");
     }
     if plan.is_empty() {
+        if !plan.warnings.is_empty() {
+            println!("Could not inspect all agent configuration. Resolve the warnings and run `codegraphV migrate` again; the original program and settings were kept.");
+            return Ok(1);
+        }
         println!("Nothing to migrate: no configuration, index or install of the original codegraph was found.");
         return Ok(0);
     }
@@ -335,7 +376,7 @@ pub fn run(options: Options) -> crate::Result<i32> {
     if !options.yes && !crate::confirm("Migrate now? Each config file is backed up first.")? {
         return Ok(0);
     }
-    let mut failed = false;
+    let mut failed = !plan.warnings.is_empty();
     let files: Vec<PathBuf> = plan.agents.iter().flat_map(|a| a.files.iter().cloned()).collect();
     if !files.is_empty() {
         let dir = backup(&files, &env.home)?;
@@ -346,11 +387,15 @@ pub fn run(options: Options) -> crate::Result<i32> {
         // whether or not the original had one, as `install --yes` does (BUG-95).
         let (permission, _) =
             if agent.id == "claude" { env.claude_settings_as(&ORIGINAL, agent.loc) } else { (true, false) };
-        let step = env.remove_as(&ORIGINAL, &agent.id, agent.loc, false).and_then(|_| {
+        let install = InstallOptions { auto_allow: permission, prompt_hook: Some(true), dry_run: false };
+        // Check the replacement before removing the working entry. Parsing failures must not
+        // leave an agent disconnected from both programs.
+        let step = env.apply(&agent.id, agent.loc, InstallOptions { dry_run: true, ..install }, false)
+            .and_then(|_| env.remove_as(&ORIGINAL, &agent.id, agent.loc, false)).and_then(|_| {
             env.apply(
                 &agent.id,
                 agent.loc,
-                InstallOptions { auto_allow: permission, prompt_hook: Some(true), dry_run: false },
+                install,
                 false,
             )
         });
@@ -370,6 +415,10 @@ pub fn run(options: Options) -> crate::Result<i32> {
                 println!("{line}");
             }
         }
+    }
+    if failed {
+        println!("Migration is incomplete. The original program and settings were kept. Resolve the warnings or failures above, then run `codegraphV migrate` again.");
+        return Ok(1);
     }
     if plan.npm {
         let ok = npm().args(["rm", "-g", original::NPM_PACKAGE]).status().is_ok_and(|s| s.success());
@@ -421,5 +470,35 @@ mod tests {
         assert_eq!(plan_index(dir.path()).unwrap().step, IndexStep::Move);
         std::fs::create_dir(dir.path().join(".codegraphV")).unwrap();
         assert_eq!(plan_index(dir.path()).unwrap().step, IndexStep::RemoveOld);
+    }
+
+    #[test]
+    fn backup_retries_never_overwrite_the_first_saved_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.json");
+        std::fs::write(&file, "original").unwrap();
+        let first = backup(&[file.clone()], dir.path()).unwrap();
+        std::fs::write(&file, "partially migrated").unwrap();
+        let second = backup(&[file], dir.path()).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(first.join("0-config.json")).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(second.join("0-config.json")).unwrap(), "partially migrated");
+    }
+
+    #[test]
+    fn copy_fallback_preserves_a_destination_created_since_planning() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join(".codegraph");
+        let new = dir.path().join(".codegraphV");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("codegraph.db"), "copy would fail").unwrap();
+        let index = plan_index(dir.path()).unwrap();
+        assert_eq!(index.step, IndexStep::Move);
+        // Another invocation owns this directory by the time the first one starts copying.
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(new.join("keep.txt"), "owned by another invocation").unwrap();
+        assert!(migrate_index(&index).is_err());
+        assert_eq!(std::fs::read_to_string(new.join("keep.txt")).unwrap(), "owned by another invocation");
+        assert!(old.join("codegraph.db").exists());
     }
 }

@@ -18,7 +18,7 @@ use codegraph_types::Language;
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 type Res<T> = Result<T, String>;
@@ -881,21 +881,49 @@ pub fn get_git_visible_files(root_dir: &Path) -> Option<IndexSet<String>> {
     }
 }
 
+/// Whether the repository `root_dir` sits in gitignores `root_dir` itself. Git then lists nothing
+/// inside it, so the git-backed scan and change detection both step aside for the directory walk.
+/// Asked only of a folder below its repository's root.
+fn is_ignored_by_enclosing_repo(root_dir: &Path) -> bool {
+    // `git check-ignore -q` exits 0 if the path IS ignored, 1 if not.
+    git5(root_dir, &["check-ignore", "-q", &resolve_path(root_dir).to_string_lossy()]).is_ok()
+}
+
+/// Where each folder sits in its git repository, by [`git_repo_prefix`].
+static GIT_REPO_PREFIXES: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+
+/// Where `dir` sits in its git repository: empty at the repository's root, else the path from the
+/// root with a trailing slash (`app/`). Errors when `dir` is in no repository. `git status
+/// --porcelain` prints every path from the repository's root, whichever folder it runs in, so a
+/// project below the root takes this off (#1636). A folder with its own `.git` is a repository or
+/// worktree root and costs no git call; any other answer is kept, since a folder's place in its
+/// repository does not move under a running process.
+fn git_repo_prefix(dir: &Path) -> Res<String> {
+    if dir.join(".git").exists() {
+        return Ok(String::new());
+    }
+    let key = resolve_path(dir);
+    let prefixes = GIT_REPO_PREFIXES.get_or_init(Default::default);
+    if let Some(known) = prefixes.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(known.clone());
+    }
+    let out = git5(dir, &["rev-parse", "--show-prefix"])?;
+    let prefix = normalize_path(codegraph_types::jscompat::js_trim(&out));
+    prefixes.lock().unwrap_or_else(|e| e.into_inner()).insert(key, prefix.clone());
+    Ok(prefix)
+}
+
 fn git_visible_files(root_dir: &Path) -> Res<Option<IndexSet<String>>> {
     // When rootDir lives inside a parent git repo that ignores it, `git ls-files`
     // returns nothing — fall back to a filesystem walk.
     let git_root = git5(root_dir, &["rev-parse", "--show-toplevel"])?;
     let git_root = codegraph_types::jscompat::js_trim(&git_root).to_string();
-    if resolve_path(&git_root).to_string_lossy() != resolve_path(root_dir).to_string_lossy() {
-        let abs = resolve_path(root_dir);
-        // `git check-ignore -q` exits 0 if the path IS ignored, 1 if not.
-        if git5(root_dir, &["check-ignore", "-q", &abs.to_string_lossy()]).is_ok() {
-            log_debug(
-                "project root is gitignored by a parent repo — falling back to filesystem walk",
-                &[("rootDir", root_dir.display().to_string()), ("gitRoot", git_root)],
-            );
-            return Ok(None);
-        }
+    if resolve_path(&git_root).to_string_lossy() != resolve_path(root_dir).to_string_lossy() && is_ignored_by_enclosing_repo(root_dir) {
+        log_debug(
+            "project root is gitignored by a parent repo — falling back to filesystem walk",
+            &[("rootDir", root_dir.display().to_string()), ("gitRoot", git_root)],
+        );
+        return Ok(None);
     }
     let mut files = IndexSet::new();
     let mut embedded_roots = IndexSet::new();
@@ -978,6 +1006,13 @@ pub fn get_git_changed_files(root_dir: &Path, since_commit: Option<&str>) -> Opt
     // custom-extension files the full index does.
     let overrides = load_extension_overrides(root_dir);
     let is_source = |file_path: &str| is_source_file(file_path, Some(&overrides), Some(root_dir));
+    // A project in a folder below its repository's root (#1636). Git can say nothing about a
+    // folder its repository ignores: decline, as the scan does, so callers take the full scan that
+    // indexed the project.
+    let repo_prefix = git_repo_prefix(root_dir).ok()?;
+    if !repo_prefix.is_empty() && is_ignored_by_enclosing_repo(root_dir) {
+        return None;
+    }
     collect_git_status(
         root_dir,
         "",
@@ -986,11 +1021,16 @@ pub fn get_git_changed_files(root_dir: &Path, since_commit: Option<&str>) -> Opt
         load_include_ignored_matcher(root_dir).as_ref(),
         load_exclude_matcher(root_dir).as_ref(),
         since_commit.filter(|s| !s.is_empty()),
+        &repo_prefix,
     )
     .ok()?;
     Some(changes)
 }
 
+/// `repo_prefix` is where `repo_dir` sits in its repository ([`git_repo_prefix`]): empty for a
+/// repository root, which every embedded repo below is, and the folder's path from the root
+/// (`app/`) for a project below it (#1636).
+#[allow(clippy::too_many_arguments)]
 fn collect_git_status(
     repo_dir: &Path,
     prefix: &str,
@@ -999,13 +1039,22 @@ fn collect_git_status(
     include_ignored: Option<&Ignore>,
     exclude: Option<&Ignore>,
     since_commit: Option<&str>,
+    repo_prefix: &str,
 ) -> Res<()> {
     // `-uall` lists individual untracked files instead of collapsing an
-    // entirely-untracked directory into one `?? dir/` entry (#1213).
-    let output = run_git(repo_dir, &["status", "--porcelain", "--no-renames", "-z", "-uall"], Duration::from_secs(10), MAX_BUFFER)?;
+    // entirely-untracked directory into one `?? dir/` entry (#1213). Below the repository's
+    // root, `-- .` keeps the report to this folder: git reports the whole repository otherwise.
+    // A root runs the command it always did.
+    let mut args = vec!["status", "--porcelain", "--no-renames", "-z", "-uall"];
+    if !repo_prefix.is_empty() {
+        args.extend(["--", "."]);
+    }
+    let output = run_git(repo_dir, &args, Duration::from_secs(10), MAX_BUFFER)?;
 
-    // This repo's own ignore rules — built-in defaults (#407) plus its .gitignore:
-    // change detection must exclude the SAME files the full index does (#766).
+    // This repo's own ignore rules — built-in defaults (#407) plus its .gitignore: change
+    // detection must exclude the SAME files the full index does (#766). Every embedded repo is
+    // judged by its own rules, never the parent's, and a project below its repository's root by
+    // its own, matched against project-relative paths.
     let ig = build_default_ignore(repo_dir);
 
     let classify = |out: &mut GitChanges, status_code: &str, rel: &str| -> Res<()> {
@@ -1044,7 +1093,15 @@ fn collect_git_status(
             continue; // Minimum: "XY file"
         }
         let status_code = &line[..2.min(line.len())];
-        let rel = normalize_path(line.get(3..).unwrap_or(""));
+        let mut rel = normalize_path(line.get(3..).unwrap_or(""));
+        // Porcelain paths run from the repository's root, whatever the cwd: take them back to
+        // this folder, and leave out anything outside it.
+        if !repo_prefix.is_empty() {
+            match rel.strip_prefix(repo_prefix) {
+                Some(inside) if !inside.is_empty() => rel = inside.to_string(),
+                _ => continue,
+            }
+        }
         // Untracked directory entries may hide an embedded repo — recurse below.
         if status_code == "??" && rel.ends_with('/') {
             untracked_dirs.push(rel);
@@ -1069,11 +1126,11 @@ fn collect_git_status(
     // project opted in via `includeIgnored`.
     for rel in &untracked_dirs {
         for repo_rel in find_nested_git_repos(&repo_dir.join(rel), rel) {
-            collect_git_status(&repo_dir.join(&repo_rel), &format!("{prefix}{repo_rel}"), out, is_source, include_ignored, exclude, None)?;
+            collect_git_status(&repo_dir.join(&repo_rel), &format!("{prefix}{repo_rel}"), out, is_source, include_ignored, exclude, None, "")?;
         }
     }
     for rel in find_ignored_embedded_repos(repo_dir, include_ignored, prefix)? {
-        collect_git_status(&repo_dir.join(&rel), &format!("{prefix}{rel}"), out, is_source, include_ignored, exclude, None)?;
+        collect_git_status(&repo_dir.join(&rel), &format!("{prefix}{rel}"), out, is_source, include_ignored, exclude, None, "")?;
     }
     Ok(())
 }

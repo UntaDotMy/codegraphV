@@ -1,7 +1,7 @@
 //! Methods of Go types: finding the type a name was written as, following aliases and embedded
 //! fields, and the calls whose receiver is a local, a package-level variable or a struct field.
 
-use super::chain::{go_asserted_type, go_chain_links, GoChainKind};
+use super::chain::{go_asserted_type, go_chain_links, go_valued_has_no_project_methods, GoChainKind};
 use super::qualify::*;
 use super::scope::{go_local_decl, go_scope_index, GoDecl, GoDeclKind};
 use crate::ctx::Ctx;
@@ -570,6 +570,12 @@ pub fn match_go_field_chain_call(receiver_chain: &str, method_name: &str, r: &Un
             return None;
         }
     }
+    // Nor one a call gives a value of a type from outside the project.
+    if let Tri::Value(valued) = &decl.valued {
+        if go_valued_has_no_project_methods(valued, ctx) {
+            return None;
+        }
+    }
     let field_type = Re::cached(&format!(r"\b{}\s+\*?\[?\]?([A-Za-z_][\w.]*)", escape_regex(field)), "");
     let asserted = decl.asserted.as_value();
     let mut structs: Vec<NodeRef> = ctx
@@ -581,7 +587,7 @@ pub fn match_go_field_chain_call(receiver_chain: &str, method_name: &str, r: &Un
     // The struct the declaring package has is the one the base's type means (a method receiver's
     // type is always the call site's own package's): Go type names repeat across packages, and
     // another package's same-named struct with a same-named field is not this one (#2323).
-    let base_pkg = asserted.map(|a| a.dir.clone()).or_else(|| go_declared_type_package(decl.raw.as_deref(), &r.file_path, ctx));
+    let base_pkg = asserted.map(|a| a.dir.clone()).or_else(|| go_declared_type_package(decl.raw.as_deref(), decl.file.as_deref().unwrap_or(&r.file_path), ctx));
     let declared: Vec<NodeRef> = structs.iter().filter(|n| Some(go_package_dir(&n.file_path)) == base_pkg).cloned().collect();
     if !declared.is_empty() || asserted.is_some() {
         structs = declared;

@@ -75,14 +75,29 @@ pub fn resolve_path(p: impl AsRef<Path>) -> PathBuf {
     out
 }
 
+/// Whether `child` is `parent` or lies under it, compared exactly as given.
+///
+/// A root (`C:\`, `\\server\share\`, `/`) already ends with its separator, so none is added to
+/// it. Adding one made `C:\\` the prefix, which no path under the root starts with, so a project
+/// at a drive root indexed nothing (#415).
+pub fn is_same_or_under(child: &str, parent: &str) -> bool {
+    if child == parent {
+        return true;
+    }
+    if parent.ends_with(crate::nodepath::SEP) {
+        child.starts_with(parent)
+    } else {
+        child.starts_with(&format!("{parent}{}", crate::nodepath::SEP))
+    }
+}
+
 /// Whether `child` is `parent` itself or sits underneath it. Case-insensitive on
 /// Windows (NTFS is, and realpath can hand back a different case than the lexical root).
 pub fn is_within_dir(child: &str, parent: &str) -> bool {
     if cfg!(windows) {
-        let (c, p) = (child.to_lowercase(), parent.to_lowercase());
-        c == p || c.starts_with(&format!("{p}{}", crate::nodepath::SEP))
+        is_same_or_under(&child.to_lowercase(), &parent.to_lowercase())
     } else {
-        child == parent || child.starts_with(&format!("{parent}{}", crate::nodepath::SEP))
+        is_same_or_under(child, parent)
     }
 }
 
@@ -98,6 +113,12 @@ pub fn lexical_path_within_root(project_root: &str, file_path: &str) -> Option<S
 pub fn real_path(p: &Path) -> std::io::Result<PathBuf> {
     let canonical = std::fs::canonicalize(p)?;
     Ok(strip_verbatim(canonical))
+}
+
+/// Whether an I/O error means nothing is at the path: `NotFound`, or `NotADirectory`, which POSIX
+/// reports instead when a folder on the way is a file (Windows reports `NotFound` for both).
+pub fn is_missing_path_error(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
 }
 
 /// `\\?\C:\x` → `C:\x`, `\\?\UNC\server\share` → `\\server\share`.
@@ -192,8 +213,9 @@ pub fn validate_path_within_root(project_root: &str, file_path: &str, options: V
             }
             return is_within_dir(&resolved_real, &real_root).then_some(resolved_real);
         }
-        // Any resolution failure other than ENOENT (ELOOP, EACCES, …) is treated as unsafe.
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return None,
+        // Any resolution failure other than a missing path (ELOOP, EACCES, …) is treated as unsafe.
+        // A path under a file (ENOTDIR on POSIX) is a missing leaf too (#2904).
+        Err(e) if !is_missing_path_error(&e) => return None,
         Err(_) => {}
     }
     // A missing leaf (a file about to be written, an index entry for a since-deleted file) may
@@ -206,7 +228,7 @@ pub fn validate_path_within_root(project_root: &str, file_path: &str, options: V
                 let inside = options.allow_symlink_escape || is_within_dir(&real.to_string_lossy(), &real_root);
                 return inside.then_some(resolved);
             }
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return None,
+            Err(e) if !is_missing_path_error(&e) => return None,
             Err(_) => ancestor = ancestor.parent()?.to_path_buf(),
         }
     }
@@ -234,6 +256,71 @@ mod tests {
         assert!(!is_codegraph_data_dir(".codegraphx"));
         assert!(!is_codegraph_data_dir(".codegraphVx"));
         assert!(!is_codegraph_data_dir("codegraphV"));
+    }
+
+    /// A project at a drive root, a subst drive or a share root: the root already ends with its
+    /// separator, so a file under it is not found under `root + separator` (#415).
+    #[cfg(windows)]
+    #[test]
+    fn a_root_that_ends_in_a_separator_contains_its_files() {
+        for root in [r"Q:\", r"\\server\share\"] {
+            let file = format!("{root}src{}a.ts", crate::nodepath::SEP);
+            assert!(is_within_dir(&file, root), "{file} is under {root}");
+            assert!(is_within_dir(root, root), "{root} is {root}");
+            assert_eq!(lexical_path_within_root(root, "src/a.ts"), Some(file), "{root}");
+            // `..` cannot climb above a root, so this stays inside it (as Node's path.win32 does).
+            assert_eq!(lexical_path_within_root(root, r"..\..\elsewhere"), Some(format!("{root}elsewhere")), "{root}");
+        }
+        // The case folding NTFS needs still holds, and a sibling that merely shares the prefix is
+        // not inside.
+        assert!(is_within_dir(r"Q:\SRC\a.ts", r"q:\"));
+        assert!(!is_within_dir(r"C:\foobar", r"C:\foo"));
+        assert!(is_within_dir(r"C:\foo\bar", r"C:\foo"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_root_that_ends_in_a_separator_contains_its_files() {
+        assert!(is_within_dir("/src/a.ts", "/"));
+        assert!(is_within_dir("/", "/"));
+        assert_eq!(lexical_path_within_root("/", "src/a.ts"), Some("/src/a.ts".to_string()));
+        assert!(!is_within_dir("/foobar", "/foo"));
+        assert!(is_within_dir("/foo/bar", "/foo"));
+    }
+
+    #[test]
+    fn a_file_under_the_filesystem_root_is_within_it() {
+        let root = crate::nodepath::resolve(&[if cfg!(windows) { r"C:\" } else { "/" }]);
+        let file = format!("{root}{}a.ts", if root.ends_with(crate::nodepath::SEP) { "" } else { "\\" });
+        assert!(is_within_dir(&file, &root), "{file} under {root}");
+        assert!(lexical_path_within_root(&root, "a.ts").is_some());
+    }
+
+    #[test]
+    fn only_a_missing_path_counts_as_missing() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::NotFound, ErrorKind::NotADirectory] {
+            assert!(is_missing_path_error(&Error::from(kind)), "{kind:?}");
+        }
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::IsADirectory, ErrorKind::Other, ErrorKind::InvalidInput, ErrorKind::TimedOut] {
+            assert!(!is_missing_path_error(&Error::from(kind)), "{kind:?}");
+        }
+    }
+
+    /// A path under an existing file is a missing leaf, judged by its nearest existing ancestor:
+    /// inside the root it validates, so the reader can report nothing there (#2904).
+    #[test]
+    fn a_path_under_an_existing_file_is_judged_like_any_missing_leaf() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = real_path(&std::env::temp_dir()).unwrap().join(format!("cgv-paths-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), "x").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let judged = validate_path_within_root(&root, "file/child.ts", ValidateOptions::default());
+        let escaped = validate_path_within_root(&root, "../file/child.ts", ValidateOptions::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(judged.is_some(), "a path under a file inside the root was refused");
+        assert!(escaped.is_none(), "a lexical escape must still be refused");
     }
 
     #[test]

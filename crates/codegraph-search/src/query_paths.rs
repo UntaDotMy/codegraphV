@@ -258,14 +258,32 @@ pub fn extract_query_paths(
     }
     let max_pins = opts.max_pins.unwrap_or(8).max(1);
     let max_matches = opts.max_matches_per_span.unwrap_or(3).max(1);
-    let mut index = IndexMap::new();
-    for p in paths {
-        index.insert(p.to_lowercase(), p.clone());
-    }
     // Resolve a whole indexed path before splitting on whitespace. Besides being
     // precise, this makes returned continuation queries usable for paths with spaces.
+    // A scan avoids allocating a copy of the entire path index for every source page.
+    // Search backwards to preserve the index's last-value-wins case-collision rule.
     let (whole, lines) = strip_wrapping(js_trim(query));
-    if let Some(file) = index.get(&normalize_span(whole).to_lowercase()) {
+    let normalized = normalize_span(whole).to_lowercase();
+    let build_index = || {
+        let mut index = IndexMap::new();
+        for p in paths {
+            index.insert(p.to_lowercase(), p.clone());
+        }
+        index
+    };
+    // A multi-word path-shaped query usually needs suffix resolution anyway.
+    // Build its index once instead of adding an unsuccessful full scan first;
+    // this also preserves whole paths whose filenames contain whitespace.
+    let index = (query.contains(['/', '\\', '.', '-']) && normalized.chars().any(is_js_space))
+        .then(build_index);
+    let whole_file = if let Some(index) = &index {
+        index.get(&normalized)
+    } else {
+        paths.iter().rev().find(|p| {
+            p.eq_ignore_ascii_case(&normalized) || (!p.is_ascii() && p.to_lowercase() == normalized)
+        })
+    };
+    if let Some(file) = whole_file {
         out.stripped_query.clear();
         out.pinned_files.push(file.clone());
         if let Some((start, end)) = lines {
@@ -273,6 +291,13 @@ pub fn extract_query_paths(
         }
         return out;
     }
+    // Every remaining recognition rule needs a slash, dot or hyphen. Plain symbol
+    // queries cannot consume a path or invoke the narrowing callbacks. Extensionless
+    // whole-file names were checked above, including names containing whitespace.
+    if !query.contains(['/', '\\', '.', '-']) {
+        return out;
+    }
+    let index = index.unwrap_or_else(build_index);
     let tokens: Vec<_> = query.split(is_js_space).filter(|s| !s.is_empty()).collect();
     let mut consumed = HashSet::new();
     let mut pinned_seen = HashSet::new();

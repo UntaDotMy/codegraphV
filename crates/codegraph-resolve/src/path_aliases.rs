@@ -280,12 +280,15 @@ pub fn apply_aliases(import_path: &str, aliases: &AliasMap, project_root: &str) 
         }
         let mut captured = "";
         if pat.has_wildcard {
+            // The prefix and the suffix may not share characters: `@x/*/index` both starts and ends
+            // `@x/index` only by counting its one `/` twice, which leaves nothing for `*` to stand
+            // on. tsc's `isPatternMatch` wants the specifier at least as long as the two together,
+            // so this pattern is skipped and a less specific one may still match.
+            if import_path.len() < pat.prefix.len() + pat.suffix.len() {
+                continue;
+            }
             // JS slices by UTF-16 index; prefix and suffix are prefix/suffix of the path, so bytes agree.
-            captured = if import_path.len() >= pat.prefix.len() + pat.suffix.len() {
-                &import_path[pat.prefix.len()..import_path.len() - pat.suffix.len()]
-            } else {
-                ""
-            };
+            captured = &import_path[pat.prefix.len()..import_path.len() - pat.suffix.len()];
         } else if import_path != pat.prefix {
             continue;
         }

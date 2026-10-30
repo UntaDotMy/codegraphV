@@ -863,7 +863,9 @@ fn ts_field_call(decl: &TsFieldDecl, declaring: Option<&NodeRef>, method_name: &
             dirs.iter().zip(call_dirs.iter()).take_while(|(a, b)| a == b).count()
         };
         let mut sorted = declared.clone();
-        sorted.sort_by(|a, b| shared(&b.file_path).cmp(&shared(&a.file_path)).then_with(|| locale_compare(&a.file_path, &b.file_path)));
+        // Ties break by code-unit order, not collation: a locale decides how `Beta/` and `alpha/`
+        // order, and two hosts could link different declarations.
+        sorted.sort_by(|a, b| shared(&b.file_path).cmp(&shared(&a.file_path)).then_with(|| a.file_path.encode_utf16().cmp(b.file_path.encode_utf16())));
         return Some(ResolvedRef::new(r, sorted[0].id.clone(), 0.85, ResolvedBy::InstanceMethod));
     }
     resolve_method_on_type(&type_name, method_name, r, ctx, 0.85, ResolvedBy::InstanceMethod, imported.as_deref(), 0)

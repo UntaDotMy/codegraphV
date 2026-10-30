@@ -479,6 +479,11 @@ const NAMED_PER_TOKEN: usize = 3;
 /// symbols, then source over tests; a declaration beats a same-named member or variable.
 /// Also returns the tokens nothing in the index defines.
 fn named_definitions(cg: &CodeGraph, tokens: &[String], paths: &[String], pinned: &[String]) -> Result<(IndexMap<String, Node>, Vec<String>)> {
+    // Exact file/range requests have no symbol tokens. Building every path's
+    // scope segments here would do repository-wide work for a source continuation.
+    if tokens.is_empty() {
+        return Ok((IndexMap::new(), Vec::new()));
+    }
     let segments: HashSet<String> = paths
         .iter()
         .flat_map(|p| p.split('/').map(|s| s.split('.').next().unwrap_or(s).to_lowercase()))
@@ -712,6 +717,12 @@ pub fn explore(
         add(&mut relevant, n, true);
     }
     let mut out = format!("**Explore: {}**\n\n", metadata_preview(query, 240));
+    if !extracted.unresolved_path_spans.is_empty() {
+        let missing = extracted.unresolved_path_spans.iter()
+            .map(|path| format!("`{}`", metadata_preview(path, 160)))
+            .collect::<Vec<_>>().join(", ");
+        out.push_str(&format!("No indexed file matches requested path(s): {missing}. Check the indexed path; any results below match the remaining query terms.\n\n"));
+    }
     if !flow.chains.is_empty() {
         out.push_str("**Flow among named symbols**\n\n");
         let mut omitted_chains = 0;
@@ -745,6 +756,9 @@ pub fn explore(
         add(&mut relevant, n, false);
     }
     if relevant.is_empty() {
+        if !extracted.unresolved_path_spans.is_empty() {
+            return Ok(ToolResult::text(out));
+        }
         return Ok(ToolResult::text(format!("No indexed symbols or files match \"{}\". Try exact symbol names or indexed paths.", metadata_preview(query, 240))));
     }
     let max_files = number(args, "maxFiles", budget.files, 1, 20);
@@ -785,7 +799,11 @@ pub fn explore(
         if nodes.len() > listed {
             header.push_str(&format!("{} more symbols; query this file for source.\n", nodes.len() - listed));
         }
-        let deps = cg.get_file_dependents(&file)?;
+        // A precise continuation needs source, not a repeated dependency listing.
+        // Symbol/whole-file queries still return the relationship summary.
+        let source_only = extracted.stripped_query.trim().is_empty()
+            && extracted.line_anchors.iter().any(|a| a.file == file);
+        let deps = if source_only { Vec::new() } else { cg.get_file_dependents(&file)? };
         if !deps.is_empty() {
             header.push_str(&format!("Used by {} files", deps.len()));
             for (i, dep) in deps.iter().take(8).enumerate() {
@@ -1005,6 +1023,15 @@ pub fn status(cg: &CodeGraph) -> Result<Value> {
     if let Some(notice) = codegraph_installer::upgrade::get_update_notice(env!("CARGO_PKG_VERSION")) {
         data["updateAvailable"] = json!(notice);
     }
-    data["index"] = json!({"builtWithVersion":build.version,"builtWithExtractionVersion":build.extraction_version,"currentExtractionVersion":codegraph_core::codegraph::EXTRACTION_VERSION,"reindexRecommended":cg.is_index_stale(),"state":cg.get_index_state().map(|s|s.as_str()),"pendingRefs":cg.get_pending_reference_count()?,"filesNeedingReindex":health.needs_reindex,"filesWithParseErrors":health.parse_errors});
+    // Frameworks a sync detected since the last full index (#2516): files indexed before then were
+    // extracted without the change, so a re-index is recommended while they differ.
+    // While another process rebuilds the index, the advice meant for an index at rest does not
+    // fit: the interrupted-run state, the re-index and the framework note all describe the live run.
+    let rebuilding = cg.is_rebuild_in_progress();
+    let framework_changes = if rebuilding { None } else { cg.get_framework_changes_since_index() };
+    if rebuilding {
+        data["rebuildInProgress"] = json!(true);
+    }
+    data["index"] = json!({"builtWithVersion":build.version,"builtWithExtractionVersion":build.extraction_version,"currentExtractionVersion":codegraph_core::codegraph::EXTRACTION_VERSION,"reindexRecommended":!rebuilding && (cg.is_index_stale() || framework_changes.is_some()),"frameworksChangedSinceIndex":framework_changes.map(|c| json!({"added":c.added,"removed":c.removed})),"state":cg.get_index_state().map(|s|s.as_str()),"pendingRefs":cg.get_pending_reference_count()?,"filesNeedingReindex":health.needs_reindex,"filesWithParseErrors":health.parse_errors});
     Ok(data)
 }

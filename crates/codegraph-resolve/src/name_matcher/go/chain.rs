@@ -558,6 +558,14 @@ pub fn go_receiver_chain_type(
     if depth > GO_VALUE_DEPTH {
         return Tri::Undefined;
     }
+    // `….(T)` is a T, whatever the expression before it: prometheus's
+    // `rw.converterPool.Get().(*otlptranslator.PrometheusConverter)` asserts what an outside
+    // `sync.Pool` hands back.
+    if let Some(last) = links.last().filter(|l| l.kind == GoChainKind::Assert && l.text != "type") {
+        if result == 0 && links.len() > 1 {
+            return Tri::Value(go_type_text_at(&last.text, file_path, at, index, ctx));
+        }
+    }
     let result_of = |k: usize| if k + 1 == links.len() { result } else { 0 };
     let mut t: GoTyped;
     let mut i = 1usize;
@@ -669,6 +677,17 @@ fn go_called_type(name: &str, dir: &str, written: &str, from_file: &str, importe
         })
         .cloned()
         .collect();
+    // A bare call the file's own package doesn't declare may be a package's the file dot-imports:
+    // kubernetes' `package watch_test` calls `NewStreamWatcher(…)` through
+    // `. "k8s.io/apimachinery/pkg/watch"`, the package of its own directory.
+    if fns.is_empty() && !imported && go_package_types(name, dir, ctx).is_empty() {
+        for d in go_dot_imports(from_file, ctx).dirs.iter() {
+            let t = go_called_type(name, d, written, from_file, true, at, index, ctx, depth + 1, result);
+            if !t.is_undefined() {
+                return t;
+            }
+        }
+    }
     if fns.is_empty() {
         // A conversion `T(x)`: the type itself.
         return if result == 0 && !go_package_types(name, dir, ctx).is_empty() { Tri::Value(go_type_text_at(written, from_file, at, index, ctx)) } else { Tri::Undefined };
@@ -703,19 +722,55 @@ fn go_method_result_type(t: &GoTypeText, name: &str, file_path: &str, ctx: &Ctx,
         row_id: None,
         name_tail: None,
     };
-    match go_method_on_element(t, &probe, ctx) {
-        Tri::Value(method) => match ctx.node_by_id(&method.target_node_id) {
+    let method = go_method_on_element(t, &probe, ctx);
+    if let Tri::Value(method) = &method {
+        return match ctx.node_by_id(&method.target_node_id) {
             Some(node) => go_signature_result_type(&node, ctx, result).map_or(Tri::Undefined, Tri::Value),
             None => Tri::Undefined,
-        },
-        Tri::Null => Tri::Null,
-        Tri::Undefined => Tri::Undefined,
+        };
+    }
+    let via_field = go_func_field_result_type(t, name, ctx, depth + 1, result);
+    if !via_field.is_undefined() || method.is_undefined() {
+        return via_field;
+    }
+    let text = t.text.strip_prefix('*').unwrap_or(&t.text);
+    if re!(r"^(?:struct|interface)\b").is_match(text) || (!go_is_type_literal(text) && text.ends_with(']')) {
+        return Tri::Undefined;
+    }
+    match go_named_type_decls(&GoTypeText { text: text.to_string(), ..t.clone() }, ctx) {
+        Tri::Value(_) => Tri::Undefined,
+        _ => Tri::Null,
+    }
+}
+
+/// What calling a func-typed field `name` of a value of type `t` gives: result `result` of the func
+/// type the struct declares the field with. Undefined for no such field, or one of another type.
+fn go_func_field_result_type(t: &GoTypeText, name: &str, ctx: &Ctx, depth: u32, result: usize) -> GoTyped {
+    let Tri::Value(field) = go_field_type_of(t, name, ctx, depth + 1) else { return Tri::Undefined };
+    if !re!(r"^func\s*\(").is_match(&field.text) {
+        return Tri::Undefined;
+    }
+    let signature = re!(r"^func\s*").replace_first(&field.text, |_| String::new());
+    match go_result_text(&signature, result) {
+        Some(text) => Tri::Value(GoTypeText { text: go_normalize_type(&text), file: field.file, params: field.params }),
+        None => Tri::Undefined,
     }
 }
 
 /// The type a function's signature declares for result number `result`.
 fn go_signature_result_type(f: &NodeRef, ctx: &Ctx, result: usize) -> Option<GoTypeText> {
-    let sig = f.signature.as_deref().map(js_trim)?;
+    let text = go_result_text(f.signature.as_deref().unwrap_or(""), result)?;
+    let index = go_scope_index(&f.file_path, ctx);
+    let line_start = index.as_ref().map_or(0, |ix| ix.line_starts.get(f.start_line as usize - 1).copied().unwrap_or(0));
+    let params = index.as_ref().and_then(|ix| go_type_params_at(ix, &f.file_path, line_start, ctx));
+    Some(GoTypeText { text: go_normalize_type(&text), file: f.file_path.clone(), params })
+}
+
+/// Result `result` of a Go signature written `(params) results`, as written: `CardDo` of
+/// `(value int) CardDo`, `*Response` of `(ctx context.Context) (*Response, error)`, `int` of
+/// `() (n int, err error)`.
+fn go_result_text(signature: &str, result: usize) -> Option<String> {
+    let sig = js_trim(signature);
     if !sig.starts_with('(') {
         return None;
     }
@@ -745,10 +800,7 @@ fn go_signature_result_type(f: &NodeRef, ctx: &Ctx, result: usize) -> Option<GoT
     } else if result > 0 {
         return None;
     }
-    let index = go_scope_index(&f.file_path, ctx);
-    let line_start = index.as_ref().map_or(0, |ix| ix.line_starts.get(f.start_line as usize - 1).copied().unwrap_or(0));
-    let params = index.as_ref().and_then(|ix| go_type_params_at(ix, &f.file_path, line_start, ctx));
-    Some(GoTypeText { text: go_normalize_type(&text), file: f.file_path.clone(), params })
+    Some(text)
 }
 
 /// The type of an expression written as text: `&T{…}`, `*p`, `make(T, n)`, `T(x)`, a chain.
@@ -829,6 +881,52 @@ pub fn go_expr_type(expr: &str, at: usize, file_path: &str, index: Option<&GoSco
         return Tri::Undefined;
     }
     go_receiver_chain_type(&links, s.starts_with('('), at, file_path, index, ctx, depth + 1, 0)
+}
+
+/// Whether the value a Go declaration gives its name is a call or a conversion: `f(…)`,
+/// `pkg.F(…)`, `x.M(…)`, `T(x)`, `a.b().C(…)`, alone or as this name's place among several values
+/// (`a, b := f(), g()`). Not a `range` clause, a builtin's `make`/`new`/`append`, an assertion
+/// (`go_asserted_local_type` reads those) or a type switch's guard.
+fn go_value_is_call(local: &GoDecl, index: &GoScopeIndex) -> bool {
+    let Some(GoValueAt { at, k, n }) = local.value else { return false };
+    let code = &index.code;
+    let end = if local.kind == GoDeclKind::Header { go_header_value_end(code, at) } else { go_statement_end(code, at) };
+    let rhs = slice_bytes(code, at, end);
+    if re!(r"^\s*range\b").is_match(rhs) {
+        return false;
+    }
+    let values = go_split_top_level(rhs, ",");
+    let value = if values.len() == n { values.get(k).map_or(rhs, String::as_str) } else { rhs };
+    // A type switch's guard (`switch v := x.(type)`) has each case's type, and an assertion
+    // (`v := x.(T)`) is `go_asserted_local_type`'s to read.
+    if re!(r"\.\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*$").is_match(value) {
+        return false;
+    }
+    re!(r"^\s*[A-Za-z_(][\s\S]*\)\s*$").is_match(value) && !re!(r"^\s*(?:new|make|append)\s*\(").is_match(value)
+}
+
+/// The type of the call or conversion a Go local's declaration gives it, read as the indexed and
+/// chained calls read it: what the function or method returns (the k-th result of several), or the
+/// type converted to. `None` when the local's value is not a call.
+pub fn go_call_value_type(local: &GoDecl, file_path: &str, ctx: &Ctx) -> Option<GoTyped> {
+    local.value?;
+    let index = go_scope_index(file_path, ctx)?;
+    go_value_is_call(local, &index).then(|| go_declared_value_type(local, file_path, &index, ctx, 0))
+}
+
+/// Whether a Go value of type `t` has no method the project declares: a pointer to a pointer, a
+/// type literal, a type from outside the project or a predeclared one, or an alias of such a type.
+/// A type parameter or a type the index can't tell is not ruled out.
+pub fn go_valued_has_no_project_methods(t: &GoTypeText, ctx: &Ctx) -> bool {
+    let text = t.text.strip_prefix('*').unwrap_or(&t.text);
+    if text.starts_with('*') || go_is_type_literal(text) {
+        return true;
+    }
+    match go_named_type_decls(&GoTypeText { text: text.to_string(), ..t.clone() }, ctx) {
+        Tri::Null => true,
+        Tri::Undefined => false,
+        Tri::Value(named) => named.nodes.iter().all(|n| matches!(go_alias_target(n, ctx), Tri::Null)),
+    }
 }
 
 /// The type a local's declaration gives it: its written type, or the type of its initialiser.

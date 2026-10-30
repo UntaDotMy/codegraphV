@@ -45,6 +45,17 @@ fn trigger_count(store: &Store) -> i64 {
 }
 
 #[test]
+fn bundled_sqlite_includes_the_wal_reset_corruption_fix() {
+    // https://sqlite.org/wal.html#walreset — fixed in SQLite 3.51.3.
+    // Exercise the linked engine, not just a Cargo manifest or lockfile string.
+    let (_dir, db) = tmp();
+    let store = Store::initialize(&db).unwrap();
+    let version: String = store.conn().query_row("SELECT sqlite_version()", [], |r| r.get(0)).unwrap();
+    let parts: Vec<u32> = version.split('.').map(|p| p.parse().unwrap()).collect();
+    assert!(parts.as_slice() >= [3, 51, 3].as_slice(), "SQLite {version} predates the required WAL-reset fix");
+}
+
+#[test]
 fn initialize_creates_a_current_versioned_wal_database() {
     let (_d, db) = tmp();
     let store = Store::initialize(&db).unwrap();

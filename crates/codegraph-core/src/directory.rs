@@ -3,7 +3,7 @@
 //! Manages the `.codegraph/` directory structure for CodeGraph data. (The prompt-hook helpers of
 //! that module live in [`crate::prompt_hook`].)
 
-use crate::utils::real_path;
+use crate::utils::{real_path, sensitive_directory_refusal};
 use crate::watch_policy::is_wsl_windows_drive;
 use codegraph_types::nodepath;
 use codegraph_types::paths::codegraph_dir_name;
@@ -399,6 +399,10 @@ pub struct ServerRootResolution {
     /// candidates). Empty when the up-walk resolved or the scan was skipped. Callers surface
     /// these so "no default project" errors can say what IS reachable (#1607).
     pub candidates: Vec<String>,
+    /// Why the root that was found is not served: it, or the path the search started from, is a
+    /// sensitive folder (`~/.ssh`, `~/.config`, `/etc`, …), refused as a tool call's `projectPath`
+    /// is. `root` is then `None`.
+    pub refusal: Option<String>,
 }
 
 /// Whether `base` is a plausible workspace root for the sub-project down-scan. Mirrors
@@ -432,9 +436,31 @@ fn eligible_for_subproject_scan(base: &str) -> bool {
 ///
 /// `subproject_scan: false` skips the down-scan entirely (the per-tool-call retry path throttles
 /// it; the up-walk always runs).
+///
+/// The default project gets the sensitive-folder refusal a tool call's `projectPath` gets: on the
+/// path searched from when it exists, and on the root the search lands on. A refused root resolves
+/// to `None`, with the reason in `refusal`: the server has no default project, so nothing there
+/// is opened, watched or synced. Sub-projects below a refused path aren't listed either; a tool
+/// call would refuse them.
 pub fn resolve_server_root(search_from: &str, subproject_scan: bool) -> ServerRootResolution {
+    let found = find_server_root(search_from, subproject_scan);
+    if found.root.is_none() && found.candidates.is_empty() {
+        return found;
+    }
+    let start_refusal = Path::new(search_from).exists().then(|| sensitive_directory_refusal(search_from)).flatten();
+    let Some(root) = found.root.as_deref() else {
+        return if start_refusal.is_some() { ServerRootResolution { candidates: Vec::new(), ..found } } else { found };
+    };
+    match start_refusal.or_else(|| sensitive_directory_refusal(root)) {
+        Some(refusal) => ServerRootResolution { refusal: Some(refusal), ..Default::default() },
+        None => found,
+    }
+}
+
+/// [`resolve_server_root`] before the sensitive-folder refusal.
+fn find_server_root(search_from: &str, subproject_scan: bool) -> ServerRootResolution {
     if let Some(up) = find_nearest_code_graph_root(search_from) {
-        return ServerRootResolution { root: Some(up), via_sub_scan: false, candidates: Vec::new() };
+        return ServerRootResolution { root: Some(up), ..Default::default() };
     }
     if !subproject_scan {
         return ServerRootResolution::default();
@@ -445,9 +471,9 @@ pub fn resolve_server_root(search_from: &str, subproject_scan: bool) -> ServerRo
     }
     let subs = find_indexed_subproject_roots(&base, SubprojectScanOptions::default());
     if subs.len() == 1 {
-        return ServerRootResolution { root: Some(subs[0].clone()), via_sub_scan: true, candidates: subs };
+        return ServerRootResolution { root: Some(subs[0].clone()), via_sub_scan: true, candidates: subs, refusal: None };
     }
-    ServerRootResolution { root: None, via_sub_scan: false, candidates: subs }
+    ServerRootResolution { candidates: subs, ..Default::default() }
 }
 
 /// What the front-load hook should do for a prompt issued from a directory.

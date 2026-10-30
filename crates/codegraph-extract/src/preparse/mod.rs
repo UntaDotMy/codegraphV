@@ -16,6 +16,7 @@ pub fn mask_cpp_raw_strings_source(source: &str) -> String {
     cmask::mask_cpp_raw_strings(source).source
 }
 
+mod cconditional;
 mod conly;
 mod cpp;
 mod cshared;

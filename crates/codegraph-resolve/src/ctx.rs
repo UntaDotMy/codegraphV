@@ -7,6 +7,7 @@
 //! when full — the caches are pure memoization of stable DB reads, so eviction order has no
 //! effect on results.
 
+use crate::detection_inputs::{DetectionInputs, Recorder};
 use crate::go_module::{find_go_module_for_import, go_module_package_dir, load_go_module, GoModule};
 use crate::js_class_expressions::{build_class_expression_index, ClassExpressionIndex};
 use crate::import_resolver::{
@@ -237,6 +238,8 @@ pub struct Ctx {
     memos: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
     /// A file list standing in for the index's, for framework detection before anything is stored.
     file_list: RefCell<Option<Rc<Vec<String>>>>,
+    /// What a framework detection reads, while one is being recorded (`record_detection_inputs`).
+    detection: RefCell<Option<Recorder>>,
     /// Resolving production code in a project with manual mocks: lookups answer as if no
     /// `__mocks__/` file were indexed, and memos are the view's own (#2455).
     mockless: Cell<bool>,
@@ -296,6 +299,7 @@ impl Ctx {
             manifest_scopes: RefCell::new(HashMap::new()),
             memos: RefCell::new(HashMap::new()),
             file_list: RefCell::new(None),
+            detection: RefCell::new(None),
             mockless: Cell::new(false),
             manual_mocks: RefCell::new(None),
             mockless_caches: RefCell::new(MocklessCaches::default()),
@@ -314,6 +318,26 @@ impl Ctx {
         let ctx = Ctx::new(project_root, store);
         *ctx.file_list.borrow_mut() = Some(Rc::new(files));
         ctx
+    }
+
+    /// Start recording the paths detection reads or probes (see [`DetectionInputs`]): a path in
+    /// this context's file list is a source file, any other is read from disk. Call before the
+    /// detectors run; [`Ctx::take_detection_inputs`] ends it.
+    pub fn record_detection_inputs(&self) {
+        let listed = self.file_list.borrow().as_ref().map(|l| l.iter().cloned().collect()).unwrap_or_default();
+        *self.detection.borrow_mut() = Some(Recorder { listed, inputs: DetectionInputs::default() });
+    }
+
+    /// What was recorded since [`Ctx::record_detection_inputs`]; recording stops.
+    pub fn take_detection_inputs(&self) -> DetectionInputs {
+        self.detection.borrow_mut().take().map(|r| r.inputs).unwrap_or_default()
+    }
+
+    /// Note that `relative` (at `full` on disk) was read or probed, when a recording is on.
+    fn record_path(&self, relative: &str, full: &str) {
+        if let Some(recorder) = self.detection.borrow_mut().as_mut() {
+            recorder.path(relative, std::path::Path::new(full));
+        }
     }
 
     pub fn store(&self) -> &Rc<Store> {
@@ -836,7 +860,10 @@ impl Ctx {
             return *p;
         }
         let exists = match lexical_path_within_root(&self.project_root, file_path) {
-            Some(full) => std::path::Path::new(&full).exists(),
+            Some(full) => {
+                self.record_path(file_path, &full);
+                std::path::Path::new(&full).exists()
+            }
             None => false,
         };
         let mut memo = self.file_exists_memo.borrow_mut();
@@ -853,6 +880,7 @@ impl Ctx {
             return c;
         }
         let full = nodepath::join(&[&self.project_root, file_path]);
+        self.record_path(file_path, &full);
         let content = (|| {
             // Reject anything extraction would not accept before decoding can multiply a
             // large binary blob into gigabytes of heap.
@@ -874,6 +902,7 @@ impl Ctx {
             return c.is_some_and(|s| s.contains(needle));
         }
         let full = nodepath::join(&[&self.project_root, file_path]);
+        self.record_path(file_path, &full);
         let Ok(meta) = std::fs::metadata(&full) else { return false };
         if !meta.is_file() || meta.len() > max_source_file_bytes() {
             return false;
@@ -906,6 +935,10 @@ impl Ctx {
         } else {
             nodepath::join(&[&self.project_root, relative_path])
         };
+        // A folder appearing or going changes what a monorepo probe sees.
+        if let Some(recorder) = self.detection.borrow_mut().as_mut() {
+            recorder.folder(if relative_path == "." { "" } else { relative_path }, std::path::Path::new(&target));
+        }
         match std::fs::read_dir(&target) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())

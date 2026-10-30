@@ -23,7 +23,6 @@
 
 use super::now_ms;
 use crate::ctx::Ctx;
-use crate::name_matcher::util::locale_compare;
 use crate::types::{FrameworkExtractionResult, FrameworkResolver, NodeRef, ResolvedBy, ResolvedRef, UnresolvedRef};
 use codegraph_jsre::re;
 use codegraph_types::{Language, Metadata, Node, NodeKind};
@@ -313,7 +312,8 @@ fn build_rn_maps(ctx: &Ctx) -> Rc<RnMaps> {
                     }
                     let mut candidates: Vec<&NodeRef> =
                         swift_methods_by_name.get(&ext.native_selector_first_kw).unwrap_or(&empty).iter().filter(|c| c.qualified_name.split("::").any(|seg| seg == ext.class_name)).collect();
-                    candidates.sort_by(|a, b| locale_compare(&a.file_path, &b.file_path).then(a.start_line.cmp(&b.start_line)));
+                    // By file in code-unit order: collation depends on the host's locale.
+                    candidates.sort_by(|a, b| a.file_path.encode_utf16().cmp(b.file_path.encode_utf16()).then(a.start_line.cmp(&b.start_line)));
                     let Some(node) = candidates.first() else { continue };
                     add_entry(&mut by_js_name, &ext.js_name, NativeMethod { module_name: ext.module_name, node: Rc::clone(node) });
                 }

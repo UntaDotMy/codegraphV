@@ -421,9 +421,12 @@ impl ReferenceResolver {
         // A full index resolves by the package.json files on disk now, as the fingerprint it
         // stamps says, even in a process that read them earlier.
         self.ctx.set_workspace_packages(None);
+        // Detection reads through the caches (file contents, existence probes, declared
+        // dependencies): clear them first, or a process that read the manifests earlier detects by
+        // what they said then (upstream 31ec9082, #2519).
+        self.clear_caches();
         *self.frameworks.borrow_mut() = detect_frameworks(&self.ctx);
         self.frameworks_by_language.borrow_mut().clear();
-        self.clear_caches();
     }
 
     pub fn context(&self) -> &Rc<Ctx> {
@@ -833,6 +836,27 @@ impl ReferenceResolver {
             return super_call.value();
         }
 
+        // A Kotlin call through a receiver chain (`engine.pump.drain()`) resolves on the chain's
+        // declared type, or gets no edge when that type is a library one. An untyped chain
+        // resolves as the bare method name, the ref the extractor emitted before it kept the
+        // chain.
+        if r.language == Language::Kotlin && r.is_kind(EdgeKind::Calls) {
+            use crate::name_matcher::kotlin_receiver::{match_kotlin_receiver_chain, KotlinChain};
+            match match_kotlin_receiver_chain(r, ctx) {
+                KotlinChain::NotAChain => {}
+                KotlinChain::NoEdge => return None,
+                KotlinChain::Method(method) => {
+                    let mut bare = r.clone();
+                    bare.reference_name = method;
+                    return self.resolve_one_inner(&bare).map(|mut resolved| {
+                        resolved.original = r.clone();
+                        resolved
+                    });
+                }
+                KotlinChain::Resolved(resolved) => return self.gate_language(Some(resolved), r),
+            }
+        }
+
         // Built-ins and external modules never resolve to project symbols — except a python call
         // of a builtin-named method through a local or a parameter its def types as a project
         // class (`reg = Registry(); reg.get(k)`, #2583): that reading, by evidence only, is the one
@@ -887,6 +911,16 @@ impl ReferenceResolver {
         let ruby_path = crate::ruby_constant_paths::match_ruby_constant_path_ref(r, ctx);
         if !ruby_path.is_undefined() {
             return self.gate_language(ruby_path.value(), r);
+        }
+
+        // A bare Rust name a `use` renames (`use crate::util::take as consume; consume()`) is the
+        // item its path names, which no declaration carries by that name — the pre-filter below
+        // would drop it — and a call to a name a local binds where it is written (a parameter, a
+        // `let`, a closure's) is to that local, whatever the file imports (see
+        // `match_rust_use_bound_name`).
+        let rust_bound = match_rust_use_bound_name(r, ctx);
+        if !rust_bound.is_undefined() {
+            return self.gate_language(rust_bound.value(), r);
         }
 
         let mut existence_name: String = if r.language == Language::ArkTs && r.reference_name.starts_with('.') {

@@ -7,7 +7,7 @@ pub mod methods;
 pub mod qualify;
 pub mod scope;
 
-pub use chain::{go_asserted_type, go_chain_links, match_go_chained_call, match_go_indexed_call, GoChainKind, GoChainLink};
+pub use chain::{go_asserted_type, go_chain_links, go_valued_has_no_project_methods, match_go_chained_call, match_go_indexed_call, GoChainKind, GoChainLink};
 pub use methods::{
     go_alias_target, go_asserted_local_type, go_embedded_types, go_local_value, go_unread_file_declares, go_written_type,
     is_go_asserted_local, is_go_project_local_call, match_go_asserted_call, match_go_field_chain_call, match_go_package_value_call,

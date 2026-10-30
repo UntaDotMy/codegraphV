@@ -19,7 +19,11 @@ function Get-LatestTag {
         $uri = if ($r.BaseResponse.ResponseUri) { $r.BaseResponse.ResponseUri } else { $r.BaseResponse.RequestMessage.RequestUri }
         if ("$uri" -match '/releases/tag/([^/]+)$') { return $Matches[1] }
     } catch {}
-    (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'codegraphV-install' }).tag_name
+    # Both lookups can fail (a 403 once the API's hourly limit is spent): the caller then stops with
+    # its own message instead of the raw HTTP error.
+    try {
+        (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'codegraphV-install' }).tag_name
+    } catch {}
 }
 # `codegraph upgrade` of codegraph v0.0.1 (before the rename) runs this script with the old
 # variable names. It gets codegraphV in codegraphV's own folder, then a migrate of its setup.
@@ -36,27 +40,40 @@ $name = "codegraphV-$version-windows-x64"
 $base = "https://github.com/$repo/releases/download/$version"
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("codegraphV-install-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force $tmp | Out-Null
+$staged = $null
 try {
     Write-Host "Downloading codegraphV $version..."
     Invoke-WebRequest "$base/$name.zip" -OutFile "$tmp\$name.zip"
     Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$tmp\SHA256SUMS"
-    $expected = (Get-Content "$tmp\SHA256SUMS" | Where-Object { $_ -match "\s\*?$name\.zip$" }) -replace '\s.*$', ''
-    $actual = (Get-FileHash "$tmp\$name.zip" -Algorithm SHA256).Hash.ToLower()
+    $expected = (Get-Content -LiteralPath "$tmp\SHA256SUMS" | Where-Object { $_ -match "\s\*?$name\.zip$" }) -replace '\s.*$', ''
+    $actual = (Get-FileHash -LiteralPath "$tmp\$name.zip" -Algorithm SHA256).Hash.ToLower()
     if (-not $expected -or $expected.ToLower() -ne $actual) { throw "Checksum mismatch for $name.zip; nothing was installed." }
-    Expand-Archive "$tmp\$name.zip" -DestinationPath $tmp
+    Expand-Archive -LiteralPath "$tmp\$name.zip" -DestinationPath $tmp
 
     New-Item -ItemType Directory -Force $dir | Out-Null
     $target = Join-Path $dir 'codegraphV.exe'
     # Copies earlier upgrades moved aside; one still in use by an open session stays.
-    Get-ChildItem $dir -Filter 'codegraphV.exe.old*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $dir -Filter 'codegraphV.exe.old*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    # Finish the potentially failing copy while the current executable is still in place.
+    # The staged file is on the destination filesystem, so the final swap is a rename.
+    $staged = Join-Path $dir (".codegraphV-" + [guid]::NewGuid() + '.new.exe')
+    Copy-Item -LiteralPath "$tmp\$name\codegraphV.exe" -Destination $staged
     # A running codegraphV (an MCP server) locks its exe; Windows still lets it be renamed.
     $aside = "$target.old"
-    if (Test-Path $aside) { $aside = "$target.old-$([DateTime]::UtcNow.Ticks)" }
-    if (Test-Path $target) { Move-Item $target $aside -Force }
-    Copy-Item "$tmp\$name\codegraphV.exe" $target
-    Remove-Item $aside -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $aside) { $aside = "$target.old-$([DateTime]::UtcNow.Ticks)" }
+    if (Test-Path -LiteralPath $target) { Move-Item -LiteralPath $target -Destination $aside -Force }
+    try {
+        Move-Item -LiteralPath $staged -Destination $target -Force
+    } catch {
+        if ((Test-Path -LiteralPath $aside) -and -not (Test-Path -LiteralPath $target)) {
+            Move-Item -LiteralPath $aside -Destination $target -Force
+        }
+        throw
+    }
+    Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
 } finally {
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    if ($staged) { Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

@@ -102,9 +102,63 @@ pub static SWIFT_STD_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(||
     ])
 });
 
+/// Python's dict / list / set / str / file / `re` methods. On an untyped receiver
+/// (`options.setdefault(…)`, `d.copy()`) they are the builtin type's, never a same-named project
+/// method the call happens to share a file with.
+pub static PYTHON_STD_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    set(&[
+        "get", "setdefault", "pop", "popitem", "update", "items", "keys", "values", "copy", "clear",
+        "append", "extend", "insert", "remove", "index", "count", "sort", "reverse", "add", "discard",
+        "union", "intersection", "difference", "split", "rsplit", "join", "strip", "lstrip", "rstrip",
+        "replace", "startswith", "endswith", "lower", "upper", "format", "encode", "decode", "find",
+        "rfind", "splitlines", "read", "readline", "readlines", "write", "writelines", "close", "seek",
+        "flush", "group", "groups", "match", "search", "sub", "findall", "fullmatch",
+    ])
+});
+
+/// Scala's collection / Option / Future methods and the `java.*` calls Scala code makes. On Play,
+/// ~2,500 `map` / `get` / `foreach` calls on untyped values landed on unrelated project methods.
+pub static SCALA_STD_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    set(&[
+        "map", "flatMap", "filter", "filterNot", "foreach", "fold", "foldLeft", "foldRight", "reduce",
+        "collect", "collectFirst", "find", "exists", "forall", "count", "get", "getOrElse", "orElse",
+        "orNull", "isEmpty", "nonEmpty", "isDefined", "contains", "headOption", "head", "tail", "last",
+        "lastOption", "take", "drop", "groupBy", "sortBy", "sorted", "mkString", "toList", "toSeq",
+        "toSet", "toMap", "toVector", "toArray", "zip", "zipWithIndex", "size", "length", "update",
+        "updated", "recover", "recoverWith", "transform", "andThen", "compose", "onComplete", "asScala",
+        "asJava", "getOrElseUpdate", "put", "remove", "add", "append", "replace", "split", "trim",
+        "startsWith", "endsWith", "format", "equals", "hashCode", "toString", "set", "build", "execute",
+        "of", "encode", "decode", "max", "min",
+    ])
+});
+
+/// `java.lang` / `java.util` / streams and the Android framework calls Java code makes on values
+/// whose type the resolver cannot see: a lambda parameter, a `var`, a call result, an inherited
+/// field. On Play ~1,100 test-map `put` calls landed on a test class's `RejectingMap::put`. Names
+/// Java projects commonly declare themselves (`post`, `of`, `apply`, `run`, `start`, `getId`) stay
+/// out.
+pub static JAVA_STD_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    set(&[
+        "equals", "hashCode", "toString", "getClass", "compareTo",
+        "get", "put", "add", "remove", "contains", "containsKey", "containsValue", "size", "isEmpty",
+        "clear", "iterator", "hasNext", "next", "stream", "forEach", "keySet", "values", "entrySet",
+        "addAll", "removeAll", "putAll", "putIfAbsent", "getOrDefault", "computeIfAbsent", "indexOf",
+        "toArray", "subList",
+        "length", "charAt", "substring", "trim", "split", "startsWith", "endsWith", "equalsIgnoreCase",
+        "toLowerCase", "toUpperCase", "replace", "format", "valueOf",
+        "map", "filter", "orElse", "orElseGet", "orElseThrow", "ifPresent", "isPresent", "collect",
+        "findFirst", "anyMatch", "allMatch",
+        "postDelayed", "removeCallbacks", "obtainMessage", "getResources", "getSystemService",
+        "findViewById", "setVisibility", "startActivity",
+    ])
+});
+
 /// `isStdMethodName(language, name)`: is `name` a standard-library method of `language`?
 pub fn is_std_method_name(language: &str, name: &str) -> bool {
     match language {
+        "python" => PYTHON_STD_METHODS.contains(name),
+        "scala" => SCALA_STD_METHODS.contains(name),
+        "java" => JAVA_STD_METHODS.contains(name),
         "go" => GO_STD_METHODS.contains(name),
         "rust" => RUST_STD_METHODS.contains(name),
         "kotlin" => KOTLIN_STD_METHODS.contains(name),
