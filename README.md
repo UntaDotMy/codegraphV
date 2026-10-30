@@ -75,6 +75,8 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/codegraphV/rust-rewrite/i
 
 Both scripts download the release archive for your platform, check it against the release's
 `SHA256SUMS`, and delete their temporary files.
+The Windows installer stages the replacement before switching executables and restores the
+previous executable if activation fails.
 
 - **Windows:** the binary goes in `%LOCALAPPDATA%\codegraphV\bin`, which is added to your user
   PATH.
@@ -120,6 +122,12 @@ expected, because codegraphV replaced it.
 
 If an agent session still has an index or the old binary open, `migrate` says so; close the
 session and run `codegraphV migrate` again to finish. Running it again is always safe.
+
+If `.codegraphV/` already exists, migration checks that it contains a healthy, completed
+index before removing `.codegraph/`. An empty, damaged or unfinished destination keeps
+both folders and prints recovery instructions. Resolve any reported failure and retry;
+the original program and settings stay installed until the agents and indexes migrate
+successfully, and each retry saves configuration backups in a separate folder.
 
 ### Copy-paste prompts for your agent
 
@@ -203,7 +211,7 @@ with codegraphV v0.0.2.
 
 ### Answering questions (`explore`, median per query)
 
-| repo | engine | queries | recall | time | peak memory | output tokens |
+| repo | engine | queries | recall | time | peak memory | estimated output tokens |
 |---|---|---|---|---|---|---|
 | serde_json | **Rust** | 11 | **1.00** | **37 ms** | 12 MB | **696** |
 | serde_json | TypeScript | 11 | 0.94 | 1039 ms | 190 MB | 3367 |
@@ -218,6 +226,7 @@ with codegraphV v0.0.2.
 How to read the columns:
 
 - **recall:** the share of each query's target definitions whose source is in the answer.
+- **estimated output tokens:** response characters divided by four, rounded up; this is a size estimate, not a provider tokenizer count or total agent-session usage.
 - **time:** includes process start-up. Each CLI query is a new process, so most of the
   TypeScript time is Node start-up and loading. A long-running MCP server pays that cost only
   once.
@@ -313,6 +322,24 @@ codegraphV migrate              move over from the original codegraph
 ```
 
 `codegraphV <command> --help` lists each command's options.
+
+## Getting useful answers from your agent
+
+Start with `codegraphV_explore` and name the symbols or files you need. For a call path,
+name both ends in one query, such as `loginUser createSession`. Include a file path when
+several definitions share a name. Returned source has line numbers and can be used to edit.
+
+When source does not fit, follow the returned continuation arguments. Exact ranges such
+as `src/auth.ts:40-90` return those lines even if they were shown earlier. Oversized lines
+come with character pages and a source hash that detects edits between pages.
+
+| Symptom | Next step |
+|---|---|
+| The agent cannot see `codegraphV_explore` after installation | Restart the agent once and check its MCP server status; `codegraphV install --print-config codex` shows the expected Codex configuration (replace `codex` with your agent's target name). |
+| The server has no default project, or you are working in a monorepo | Pass `projectPath` for the indexed project; indexing a different project is a separate choice. |
+| A recent CLI answer is stale | Run `codegraphV sync` in that project; the MCP server follows edits while a session is running. |
+| A query has no matches | Use an exact symbol name or indexed file path; matching is lexical, and does not require an embedding service. |
+| Migration reports a damaged or unfinished destination | Keep both folders, move the destination aside as directed, then rerun `codegraphV migrate`. |
 
 ## Configuration
 

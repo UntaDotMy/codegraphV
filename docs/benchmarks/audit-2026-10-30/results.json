@@ -1,0 +1,1654 @@
+{
+  "collectedAt": "2026-10-29T19:38:27.499Z",
+  "baselineRevision": "c645adc0c446aefe852d4ae0c649792359810741",
+  "platform": "win32-x64",
+  "cpu": "AMD Ryzen 5 2600 Six-Core Processor            ",
+  "binaries": {
+    "before": {
+      "file": "retrieval_bench-before.exe",
+      "sha256": "72beb93a1f729b30a446fd33d4fa82ff8edd60cb4bf424448c32a3d8aacfad58"
+    },
+    "after": {
+      "file": "retrieval_bench.exe",
+      "sha256": "5abc4d86492c6a6586368c1ce69c9b8770d012cb0569a180945c7ef2c99e1361"
+    }
+  },
+  "rounds": 3,
+  "samplesPerRound": 9,
+  "repetitionsPerSample": 5,
+  "rows": [
+    {
+      "operation": "queryPaths",
+      "files": 100,
+      "query": "index_all sync",
+      "beforeMedianMs": 0.0189,
+      "afterMedianMs": 0.00074,
+      "speedup": 25.54054054054054,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 100,
+      "query": "src/module_99/file_99.rs:1-40",
+      "beforeMedianMs": 0.01826,
+      "afterMedianMs": 0.00112,
+      "speedup": 16.303571428571427,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 100,
+      "query": "file_42.rs index_all",
+      "beforeMedianMs": 0.020560000000000002,
+      "afterMedianMs": 0.02202,
+      "speedup": 0.9336966394187103,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 5000,
+      "query": "index_all sync",
+      "beforeMedianMs": 1.4014199999999999,
+      "afterMedianMs": 0.015880000000000002,
+      "speedup": 88.2506297229219,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 5000,
+      "query": "src/module_4999/file_4999.rs:1-40",
+      "beforeMedianMs": 1.3886,
+      "afterMedianMs": 0.00092,
+      "speedup": 1509.3478260869565,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 5000,
+      "query": "file_42.rs index_all",
+      "beforeMedianMs": 1.41506,
+      "afterMedianMs": 1.44522,
+      "speedup": 0.9791312049376566,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 40000,
+      "query": "index_all sync",
+      "beforeMedianMs": 12.12216,
+      "afterMedianMs": 0.1563,
+      "speedup": 77.55700575815739,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 40000,
+      "query": "src/module_39999/file_39999.rs:1-40",
+      "beforeMedianMs": 11.85372,
+      "afterMedianMs": 0.00092,
+      "speedup": 12884.478260869564,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "queryPaths",
+      "files": 40000,
+      "query": "file_42.rs index_all",
+      "beforeMedianMs": 12.099779999999999,
+      "afterMedianMs": 12.6069,
+      "speedup": 0.9597744092520762,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "explore",
+      "query": "sync index_all",
+      "beforeMedianMs": 25.685839999999995,
+      "afterMedianMs": 25.741360000000004,
+      "speedup": 0.9978431598019681,
+      "beforeChars": 22076,
+      "afterChars": 22076,
+      "sourceLines": 294,
+      "answerHashesEqual": true
+    },
+    {
+      "operation": "explore",
+      "query": "crates/codegraph-core/src/codegraph.rs:667-698",
+      "beforeMedianMs": 4.57986,
+      "afterMedianMs": 2.41388,
+      "speedup": 1.8973022685469039,
+      "beforeChars": 2793,
+      "afterChars": 2421,
+      "sourceLines": 32,
+      "answerHashesEqual": false
+    },
+    {
+      "operation": "explore",
+      "query": "crates/codegraph-core/src/codegraph.rs:667-667",
+      "beforeMedianMs": 4.27904,
+      "afterMedianMs": 2.1936600000000004,
+      "speedup": 1.9506395703983295,
+      "beforeChars": 697,
+      "afterChars": 325,
+      "sourceLines": 1,
+      "answerHashesEqual": false
+    }
+  ],
+  "runs": {
+    "before": [
+      {
+        "platform": "windows",
+        "arch": "x86_64",
+        "samples": 9,
+        "repeats": 5,
+        "rows": [
+          {
+            "medianMs": 0.01928,
+            "p95Ms": 0.020220000000000002,
+            "samplesMs": [
+              0.020220000000000002,
+              0.01974,
+              0.0194,
+              0.01928,
+              0.02004,
+              0.01854,
+              0.01854,
+              0.0185,
+              0.0184
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.018000000000000002,
+            "p95Ms": 0.01862,
+            "samplesMs": [
+              0.01862,
+              0.01826,
+              0.018139999999999996,
+              0.018000000000000002,
+              0.01806,
+              0.018000000000000002,
+              0.018000000000000002,
+              0.01758,
+              0.01744
+            ],
+            "resultBytes": 180,
+            "resultSha256": "bcb8848f4600d10a817f00bacb3d2fa8190308654f0374dd14377405dd189fb9",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "src/module_99/file_99.rs:1-40"
+          },
+          {
+            "medianMs": 0.020560000000000002,
+            "p95Ms": 0.02172,
+            "samplesMs": [
+              0.02066,
+              0.02038,
+              0.020560000000000002,
+              0.02172,
+              0.02066,
+              0.020359999999999996,
+              0.020579999999999998,
+              0.02044,
+              0.02054
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 1.43002,
+            "p95Ms": 1.4914999999999998,
+            "samplesMs": [
+              1.40462,
+              1.4143599999999998,
+              1.4479799999999998,
+              1.4914999999999998,
+              1.4314399999999998,
+              1.45202,
+              1.37894,
+              1.39832,
+              1.43002
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 1.3867600000000002,
+            "p95Ms": 1.4443199999999998,
+            "samplesMs": [
+              1.4443199999999998,
+              1.4120000000000001,
+              1.3512400000000002,
+              1.41562,
+              1.3867600000000002,
+              1.40124,
+              1.37836,
+              1.3851600000000002,
+              1.3758
+            ],
+            "resultBytes": 188,
+            "resultSha256": "c00033a9559693db5208f6d77ec4af5a685934b5ec386660ee3b0a67a48c4056",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "src/module_4999/file_4999.rs:1-40"
+          },
+          {
+            "medianMs": 1.39962,
+            "p95Ms": 1.4292,
+            "samplesMs": [
+              1.4292,
+              1.4208,
+              1.40042,
+              1.395,
+              1.39632,
+              1.3946200000000002,
+              1.40516,
+              1.39466,
+              1.39962
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 11.9187,
+            "p95Ms": 12.250020000000001,
+            "samplesMs": [
+              12.111139999999999,
+              11.901480000000001,
+              12.2255,
+              11.65488,
+              12.17758,
+              12.250020000000001,
+              11.843259999999999,
+              11.9187,
+              11.820020000000001
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 12.00524,
+            "p95Ms": 12.21676,
+            "samplesMs": [
+              12.00524,
+              11.943180000000002,
+              11.59206,
+              12.21676,
+              11.48866,
+              12.008140000000001,
+              12.00882,
+              12.13146,
+              11.85372
+            ],
+            "resultBytes": 192,
+            "resultSha256": "457eeddfbded0efc7d24b42f08aaf25850fcde7e03ed61ea90cd3c886587eefb",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "src/module_39999/file_39999.rs:1-40"
+          },
+          {
+            "medianMs": 11.54138,
+            "p95Ms": 12.861279999999999,
+            "samplesMs": [
+              11.985240000000001,
+              11.43852,
+              11.497739999999999,
+              12.2713,
+              12.861279999999999,
+              11.54418,
+              11.54138,
+              11.45048,
+              11.4745
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 25.68784,
+            "p95Ms": 25.990340000000003,
+            "samplesMs": [
+              25.97434,
+              25.990340000000003,
+              25.889940000000003,
+              25.62346,
+              25.68784,
+              25.37398,
+              25.7092,
+              25.20776,
+              25.247419999999998
+            ],
+            "resultBytes": 22839,
+            "resultSha256": "216d7d0322daf24091a1e675547a1fada7f5663da69a6f36f0c0006df7db30a7",
+            "operation": "explore",
+            "query": "sync index_all",
+            "responseChars": 22076,
+            "sourceLines": 294
+          },
+          {
+            "medianMs": 4.56736,
+            "p95Ms": 4.74466,
+            "samplesMs": [
+              4.56736,
+              4.45582,
+              4.33122,
+              4.4477,
+              4.69028,
+              4.74466,
+              4.66742,
+              4.39548,
+              4.67474
+            ],
+            "resultBytes": 2914,
+            "resultSha256": "abf8e49e044e79f43c71482048226501e9d793d9352f3bd487e6225f52b12563",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-698",
+            "responseChars": 2793,
+            "sourceLines": 32
+          },
+          {
+            "medianMs": 4.22368,
+            "p95Ms": 4.36322,
+            "samplesMs": [
+              4.22368,
+              4.35034,
+              4.3014600000000005,
+              4.18016,
+              4.36322,
+              4.27904,
+              4.02816,
+              4.10876,
+              4.19478
+            ],
+            "resultBytes": 748,
+            "resultSha256": "cf64e559460c35071798ee25570b9f7386cd61ddc7d8a4b46eafcdc068caf7b5",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-667",
+            "responseChars": 697,
+            "sourceLines": 1
+          }
+        ],
+        "scope": "Warm in-process calls; excludes startup, indexing, MCP transport and model usage. Character/byte counts are not token counts."
+      },
+      {
+        "platform": "windows",
+        "arch": "x86_64",
+        "samples": 9,
+        "repeats": 5,
+        "rows": [
+          {
+            "medianMs": 0.01886,
+            "p95Ms": 0.02592,
+            "samplesMs": [
+              0.020359999999999996,
+              0.01948,
+              0.01942,
+              0.02592,
+              0.018840000000000003,
+              0.01886,
+              0.018660000000000003,
+              0.018760000000000002,
+              0.018660000000000003
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.0183,
+            "p95Ms": 0.01864,
+            "samplesMs": [
+              0.01864,
+              0.01848,
+              0.01832,
+              0.01816,
+              0.018139999999999996,
+              0.0183,
+              0.01832,
+              0.01826,
+              0.018000000000000002
+            ],
+            "resultBytes": 180,
+            "resultSha256": "bcb8848f4600d10a817f00bacb3d2fa8190308654f0374dd14377405dd189fb9",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "src/module_99/file_99.rs:1-40"
+          },
+          {
+            "medianMs": 0.020579999999999998,
+            "p95Ms": 0.030940000000000002,
+            "samplesMs": [
+              0.02086,
+              0.020579999999999998,
+              0.02062,
+              0.030940000000000002,
+              0.02144,
+              0.01976,
+              0.02,
+              0.01998,
+              0.019819999999999997
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 1.4014199999999999,
+            "p95Ms": 1.4436,
+            "samplesMs": [
+              1.41236,
+              1.39956,
+              1.41182,
+              1.4436,
+              1.3885,
+              1.3952000000000002,
+              1.4049,
+              1.4014199999999999,
+              1.38766
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 1.40664,
+            "p95Ms": 1.43728,
+            "samplesMs": [
+              1.43728,
+              1.38912,
+              1.41724,
+              1.3886,
+              1.40664,
+              1.41008,
+              1.39196,
+              1.4203999999999999,
+              1.3878400000000002
+            ],
+            "resultBytes": 188,
+            "resultSha256": "c00033a9559693db5208f6d77ec4af5a685934b5ec386660ee3b0a67a48c4056",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "src/module_4999/file_4999.rs:1-40"
+          },
+          {
+            "medianMs": 1.44614,
+            "p95Ms": 1.49758,
+            "samplesMs": [
+              1.46488,
+              1.4637799999999999,
+              1.42956,
+              1.41506,
+              1.49758,
+              1.46152,
+              1.43774,
+              1.44276,
+              1.44614
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 12.25554,
+            "p95Ms": 12.9078,
+            "samplesMs": [
+              12.9078,
+              12.66542,
+              12.25554,
+              12.37946,
+              12.33868,
+              12.11364,
+              12.23714,
+              11.887080000000001,
+              11.99072
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 11.84822,
+            "p95Ms": 12.229299999999999,
+            "samplesMs": [
+              12.1975,
+              11.693480000000001,
+              11.77374,
+              12.005939999999999,
+              11.74204,
+              11.70376,
+              11.84822,
+              11.88918,
+              12.229299999999999
+            ],
+            "resultBytes": 192,
+            "resultSha256": "457eeddfbded0efc7d24b42f08aaf25850fcde7e03ed61ea90cd3c886587eefb",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "src/module_39999/file_39999.rs:1-40"
+          },
+          {
+            "medianMs": 12.12328,
+            "p95Ms": 12.232240000000001,
+            "samplesMs": [
+              11.95646,
+              12.1018,
+              12.099779999999999,
+              12.12328,
+              12.137820000000001,
+              11.89898,
+              12.17676,
+              12.232240000000001,
+              12.20444
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 25.75844,
+            "p95Ms": 26.249579999999998,
+            "samplesMs": [
+              26.249579999999998,
+              26.01614,
+              25.75844,
+              25.685839999999995,
+              25.83028,
+              26.024,
+              25.661340000000003,
+              25.620500000000003,
+              25.415919999999996
+            ],
+            "resultBytes": 22839,
+            "resultSha256": "216d7d0322daf24091a1e675547a1fada7f5663da69a6f36f0c0006df7db30a7",
+            "operation": "explore",
+            "query": "sync index_all",
+            "responseChars": 22076,
+            "sourceLines": 294
+          },
+          {
+            "medianMs": 4.3802,
+            "p95Ms": 4.7421999999999995,
+            "samplesMs": [
+              4.7421999999999995,
+              4.4986,
+              4.41784,
+              4.57986,
+              4.272320000000001,
+              4.213800000000001,
+              4.3802,
+              4.08592,
+              4.34316
+            ],
+            "resultBytes": 2914,
+            "resultSha256": "abf8e49e044e79f43c71482048226501e9d793d9352f3bd487e6225f52b12563",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-698",
+            "responseChars": 2793,
+            "sourceLines": 32
+          },
+          {
+            "medianMs": 4.176740000000001,
+            "p95Ms": 4.347340000000001,
+            "samplesMs": [
+              4.07718,
+              4.227539999999999,
+              4.176740000000001,
+              4.347340000000001,
+              4.1531199999999995,
+              4.2132000000000005,
+              4.1883,
+              4.05344,
+              4.11156
+            ],
+            "resultBytes": 748,
+            "resultSha256": "cf64e559460c35071798ee25570b9f7386cd61ddc7d8a4b46eafcdc068caf7b5",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-667",
+            "responseChars": 697,
+            "sourceLines": 1
+          }
+        ],
+        "scope": "Warm in-process calls; excludes startup, indexing, MCP transport and model usage. Character/byte counts are not token counts."
+      },
+      {
+        "platform": "windows",
+        "arch": "x86_64",
+        "samples": 9,
+        "repeats": 5,
+        "rows": [
+          {
+            "medianMs": 0.0189,
+            "p95Ms": 0.01976,
+            "samplesMs": [
+              0.01976,
+              0.019200000000000002,
+              0.01892,
+              0.01888,
+              0.0188,
+              0.018840000000000003,
+              0.0189,
+              0.0189,
+              0.0188
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.01856,
+            "p95Ms": 0.021660000000000002,
+            "samplesMs": [
+              0.01908,
+              0.01882,
+              0.01862,
+              0.01848,
+              0.01856,
+              0.021660000000000002,
+              0.0183,
+              0.018000000000000002,
+              0.01786
+            ],
+            "resultBytes": 180,
+            "resultSha256": "bcb8848f4600d10a817f00bacb3d2fa8190308654f0374dd14377405dd189fb9",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "src/module_99/file_99.rs:1-40"
+          },
+          {
+            "medianMs": 0.02034,
+            "p95Ms": 0.02188,
+            "samplesMs": [
+              0.02188,
+              0.02154,
+              0.0216,
+              0.021,
+              0.02034,
+              0.020139999999999998,
+              0.020120000000000002,
+              0.02008,
+              0.02004
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 1.3781599999999998,
+            "p95Ms": 1.53056,
+            "samplesMs": [
+              1.38658,
+              1.36334,
+              1.3781599999999998,
+              1.53056,
+              1.3863999999999999,
+              1.4072200000000001,
+              1.3659599999999998,
+              1.36274,
+              1.3752
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 1.3631600000000001,
+            "p95Ms": 1.4125800000000002,
+            "samplesMs": [
+              1.4064999999999999,
+              1.3631600000000001,
+              1.3551600000000001,
+              1.3713,
+              1.35274,
+              1.4125800000000002,
+              1.3365200000000002,
+              1.38528,
+              1.3032
+            ],
+            "resultBytes": 188,
+            "resultSha256": "c00033a9559693db5208f6d77ec4af5a685934b5ec386660ee3b0a67a48c4056",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "src/module_4999/file_4999.rs:1-40"
+          },
+          {
+            "medianMs": 1.37026,
+            "p95Ms": 1.6115199999999998,
+            "samplesMs": [
+              1.42926,
+              1.3354599999999999,
+              1.41608,
+              1.3405,
+              1.3631,
+              1.6115199999999998,
+              1.37026,
+              1.37046,
+              1.36624
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 12.12216,
+            "p95Ms": 13.837620000000001,
+            "samplesMs": [
+              12.51996,
+              13.837620000000001,
+              12.167300000000001,
+              12.23274,
+              12.12216,
+              11.89394,
+              12.09632,
+              11.83934,
+              11.97724
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 11.7805,
+            "p95Ms": 12.219339999999999,
+            "samplesMs": [
+              11.396040000000001,
+              11.7805,
+              11.718219999999999,
+              11.5428,
+              11.87932,
+              11.72724,
+              11.80806,
+              12.219339999999999,
+              11.867360000000001
+            ],
+            "resultBytes": 192,
+            "resultSha256": "457eeddfbded0efc7d24b42f08aaf25850fcde7e03ed61ea90cd3c886587eefb",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "src/module_39999/file_39999.rs:1-40"
+          },
+          {
+            "medianMs": 12.12822,
+            "p95Ms": 12.366879999999998,
+            "samplesMs": [
+              11.933499999999999,
+              12.22014,
+              12.25458,
+              12.366879999999998,
+              12.12822,
+              11.89942,
+              11.71132,
+              11.76668,
+              12.2486
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 25.62858,
+            "p95Ms": 26.48278,
+            "samplesMs": [
+              26.48278,
+              26.116539999999997,
+              25.632500000000004,
+              25.56022,
+              25.59344,
+              25.62858,
+              25.5137,
+              25.78068,
+              25.42546
+            ],
+            "resultBytes": 22839,
+            "resultSha256": "216d7d0322daf24091a1e675547a1fada7f5663da69a6f36f0c0006df7db30a7",
+            "operation": "explore",
+            "query": "sync index_all",
+            "responseChars": 22076,
+            "sourceLines": 294
+          },
+          {
+            "medianMs": 4.73294,
+            "p95Ms": 4.81798,
+            "samplesMs": [
+              4.81798,
+              4.69318,
+              4.73294,
+              4.72134,
+              4.7374,
+              4.74328,
+              4.60806,
+              4.76576,
+              4.46484
+            ],
+            "resultBytes": 2914,
+            "resultSha256": "abf8e49e044e79f43c71482048226501e9d793d9352f3bd487e6225f52b12563",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-698",
+            "responseChars": 2793,
+            "sourceLines": 32
+          },
+          {
+            "medianMs": 4.4982,
+            "p95Ms": 4.77464,
+            "samplesMs": [
+              4.77464,
+              4.51712,
+              4.41246,
+              4.45634,
+              4.4982,
+              4.55912,
+              4.33178,
+              4.55804,
+              4.34974
+            ],
+            "resultBytes": 748,
+            "resultSha256": "cf64e559460c35071798ee25570b9f7386cd61ddc7d8a4b46eafcdc068caf7b5",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-667",
+            "responseChars": 697,
+            "sourceLines": 1
+          }
+        ],
+        "scope": "Warm in-process calls; excludes startup, indexing, MCP transport and model usage. Character/byte counts are not token counts."
+      }
+    ],
+    "after": [
+      {
+        "platform": "windows",
+        "arch": "x86_64",
+        "samples": 9,
+        "repeats": 5,
+        "rows": [
+          {
+            "medianMs": 0.00086,
+            "p95Ms": 0.00104,
+            "samplesMs": [
+              0.00104,
+              0.0009599999999999999,
+              0.00086,
+              0.00086,
+              0.00086,
+              0.00086,
+              0.00086,
+              0.00086,
+              0.00086
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.00126,
+            "p95Ms": 0.00132,
+            "samplesMs": [
+              0.00132,
+              0.0012799999999999999,
+              0.0012799999999999999,
+              0.00126,
+              0.00126,
+              0.00126,
+              0.0012799999999999999,
+              0.00126,
+              0.00126
+            ],
+            "resultBytes": 180,
+            "resultSha256": "bcb8848f4600d10a817f00bacb3d2fa8190308654f0374dd14377405dd189fb9",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "src/module_99/file_99.rs:1-40"
+          },
+          {
+            "medianMs": 0.025999999999999995,
+            "p95Ms": 0.02752,
+            "samplesMs": [
+              0.02752,
+              0.0268,
+              0.02636,
+              0.025999999999999995,
+              0.02646,
+              0.02594,
+              0.02592,
+              0.025880000000000004,
+              0.02594
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 0.01696,
+            "p95Ms": 0.017,
+            "samplesMs": [
+              0.017,
+              0.016980000000000002,
+              0.016980000000000002,
+              0.01696,
+              0.01694,
+              0.01694,
+              0.016980000000000002,
+              0.01696,
+              0.01694
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.00104,
+            "p95Ms": 0.00232,
+            "samplesMs": [
+              0.00232,
+              0.00116,
+              0.00104,
+              0.00104,
+              0.00102,
+              0.00104,
+              0.00104,
+              0.00104,
+              0.00104
+            ],
+            "resultBytes": 188,
+            "resultSha256": "c00033a9559693db5208f6d77ec4af5a685934b5ec386660ee3b0a67a48c4056",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "src/module_4999/file_4999.rs:1-40"
+          },
+          {
+            "medianMs": 1.4461600000000001,
+            "p95Ms": 1.51208,
+            "samplesMs": [
+              1.43244,
+              1.4461600000000001,
+              1.4704000000000002,
+              1.4398,
+              1.51208,
+              1.4253200000000001,
+              1.46012,
+              1.42376,
+              1.47488
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 0.15608,
+            "p95Ms": 0.16146,
+            "samplesMs": [
+              0.15608,
+              0.15596,
+              0.15842,
+              0.15582000000000001,
+              0.16146,
+              0.1593,
+              0.15592,
+              0.15872,
+              0.15598
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.00092,
+            "p95Ms": 0.0009599999999999999,
+            "samplesMs": [
+              0.0009599999999999999,
+              0.0009400000000000001,
+              0.00092,
+              0.00092,
+              0.00092,
+              0.00092,
+              0.00092,
+              0.0009000000000000001,
+              0.00092
+            ],
+            "resultBytes": 192,
+            "resultSha256": "457eeddfbded0efc7d24b42f08aaf25850fcde7e03ed61ea90cd3c886587eefb",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "src/module_39999/file_39999.rs:1-40"
+          },
+          {
+            "medianMs": 12.577440000000001,
+            "p95Ms": 12.93066,
+            "samplesMs": [
+              12.577440000000001,
+              12.678600000000001,
+              12.540799999999999,
+              12.5466,
+              12.51244,
+              12.695739999999999,
+              12.93066,
+              12.6837,
+              12.12736
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 25.741360000000004,
+            "p95Ms": 26.87296,
+            "samplesMs": [
+              25.57584,
+              26.87296,
+              25.6318,
+              25.60716,
+              25.741360000000004,
+              26.70628,
+              25.57932,
+              26.58016,
+              26.6318
+            ],
+            "resultBytes": 22839,
+            "resultSha256": "216d7d0322daf24091a1e675547a1fada7f5663da69a6f36f0c0006df7db30a7",
+            "operation": "explore",
+            "query": "sync index_all",
+            "responseChars": 22076,
+            "sourceLines": 294
+          },
+          {
+            "medianMs": 2.4345399999999997,
+            "p95Ms": 2.4928999999999997,
+            "samplesMs": [
+              2.4928999999999997,
+              2.4717,
+              2.4098,
+              2.41388,
+              2.4591600000000002,
+              2.4296800000000003,
+              2.4345399999999997,
+              2.46234,
+              2.3604600000000002
+            ],
+            "resultBytes": 2541,
+            "resultSha256": "f7691502d476255c326ca1f0bd8153ea97a8ec343fc19a9e0f81bd3807ed5428",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-698",
+            "responseChars": 2421,
+            "sourceLines": 32
+          },
+          {
+            "medianMs": 2.1936600000000004,
+            "p95Ms": 2.39348,
+            "samplesMs": [
+              2.1536199999999996,
+              2.1065,
+              2.1786199999999996,
+              2.1936600000000004,
+              2.19872,
+              2.21852,
+              2.1755400000000003,
+              2.39348,
+              2.19938
+            ],
+            "resultBytes": 375,
+            "resultSha256": "caffe9414aa6e8cb18b02191146eb102baae4ea036f9f26cf3a2830e34b715e8",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-667",
+            "responseChars": 325,
+            "sourceLines": 1
+          }
+        ],
+        "scope": "Warm in-process calls; excludes startup, indexing, MCP transport and model usage. Character/byte counts are not token counts."
+      },
+      {
+        "platform": "windows",
+        "arch": "x86_64",
+        "samples": 9,
+        "repeats": 5,
+        "rows": [
+          {
+            "medianMs": 0.00074,
+            "p95Ms": 0.00098,
+            "samplesMs": [
+              0.00098,
+              0.00086,
+              0.0007199999999999999,
+              0.00074,
+              0.00074,
+              0.00074,
+              0.00074,
+              0.00074,
+              0.00074
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.00112,
+            "p95Ms": 0.0012000000000000001,
+            "samplesMs": [
+              0.0012000000000000001,
+              0.00112,
+              0.0010999999999999998,
+              0.0010999999999999998,
+              0.00112,
+              0.00112,
+              0.00112,
+              0.00112,
+              0.00112
+            ],
+            "resultBytes": 180,
+            "resultSha256": "bcb8848f4600d10a817f00bacb3d2fa8190308654f0374dd14377405dd189fb9",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "src/module_99/file_99.rs:1-40"
+          },
+          {
+            "medianMs": 0.02144,
+            "p95Ms": 0.0299,
+            "samplesMs": [
+              0.0299,
+              0.02226,
+              0.021939999999999998,
+              0.02144,
+              0.02184,
+              0.02138,
+              0.0214,
+              0.0213,
+              0.02138
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 0.0154,
+            "p95Ms": 0.01636,
+            "samplesMs": [
+              0.015160000000000002,
+              0.0152,
+              0.015160000000000002,
+              0.015179999999999999,
+              0.01636,
+              0.0155,
+              0.015479999999999999,
+              0.015459999999999998,
+              0.0154
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.00092,
+            "p95Ms": 0.0021,
+            "samplesMs": [
+              0.0021,
+              0.00102,
+              0.0009000000000000001,
+              0.0009000000000000001,
+              0.0009000000000000001,
+              0.00092,
+              0.00092,
+              0.0009000000000000001,
+              0.00092
+            ],
+            "resultBytes": 188,
+            "resultSha256": "c00033a9559693db5208f6d77ec4af5a685934b5ec386660ee3b0a67a48c4056",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "src/module_4999/file_4999.rs:1-40"
+          },
+          {
+            "medianMs": 1.44522,
+            "p95Ms": 1.46722,
+            "samplesMs": [
+              1.44804,
+              1.45236,
+              1.43338,
+              1.46722,
+              1.42938,
+              1.44522,
+              1.43254,
+              1.4429,
+              1.45668
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 0.15704,
+            "p95Ms": 0.16154,
+            "samplesMs": [
+              0.15704,
+              0.16154,
+              0.1607,
+              0.1563,
+              0.15796000000000002,
+              0.15718,
+              0.15617999999999999,
+              0.15666,
+              0.15604
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.00092,
+            "p95Ms": 0.0009599999999999999,
+            "samplesMs": [
+              0.0009599999999999999,
+              0.00092,
+              0.00092,
+              0.00092,
+              0.00092,
+              0.0009000000000000001,
+              0.00092,
+              0.00092,
+              0.00092
+            ],
+            "resultBytes": 192,
+            "resultSha256": "457eeddfbded0efc7d24b42f08aaf25850fcde7e03ed61ea90cd3c886587eefb",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "src/module_39999/file_39999.rs:1-40"
+          },
+          {
+            "medianMs": 12.680140000000002,
+            "p95Ms": 12.79938,
+            "samplesMs": [
+              12.562619999999999,
+              12.680140000000002,
+              12.70626,
+              12.79938,
+              12.6297,
+              12.70212,
+              12.7823,
+              12.6069,
+              12.525220000000001
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 25.66218,
+            "p95Ms": 26.03478,
+            "samplesMs": [
+              25.80118,
+              25.781120000000005,
+              26.03478,
+              25.66218,
+              25.56616,
+              25.896980000000003,
+              25.385619999999996,
+              25.422499999999996,
+              25.261159999999997
+            ],
+            "resultBytes": 22839,
+            "resultSha256": "216d7d0322daf24091a1e675547a1fada7f5663da69a6f36f0c0006df7db30a7",
+            "operation": "explore",
+            "query": "sync index_all",
+            "responseChars": 22076,
+            "sourceLines": 294
+          },
+          {
+            "medianMs": 2.42774,
+            "p95Ms": 2.47628,
+            "samplesMs": [
+              2.46418,
+              2.419,
+              2.4423199999999996,
+              2.42866,
+              2.42774,
+              2.47628,
+              2.41548,
+              2.39472,
+              2.39908
+            ],
+            "resultBytes": 2541,
+            "resultSha256": "f7691502d476255c326ca1f0bd8153ea97a8ec343fc19a9e0f81bd3807ed5428",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-698",
+            "responseChars": 2421,
+            "sourceLines": 32
+          },
+          {
+            "medianMs": 2.42276,
+            "p95Ms": 2.46316,
+            "samplesMs": [
+              2.4413799999999997,
+              2.3600800000000004,
+              2.33994,
+              2.3156600000000003,
+              2.42276,
+              2.46316,
+              2.42804,
+              2.4394400000000003,
+              2.21352
+            ],
+            "resultBytes": 375,
+            "resultSha256": "caffe9414aa6e8cb18b02191146eb102baae4ea036f9f26cf3a2830e34b715e8",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-667",
+            "responseChars": 325,
+            "sourceLines": 1
+          }
+        ],
+        "scope": "Warm in-process calls; excludes startup, indexing, MCP transport and model usage. Character/byte counts are not token counts."
+      },
+      {
+        "platform": "windows",
+        "arch": "x86_64",
+        "samples": 9,
+        "repeats": 5,
+        "rows": [
+          {
+            "medianMs": 0.00074,
+            "p95Ms": 0.0009000000000000001,
+            "samplesMs": [
+              0.0009000000000000001,
+              0.0008399999999999999,
+              0.00074,
+              0.00074,
+              0.00074,
+              0.0007199999999999999,
+              0.00074,
+              0.00074,
+              0.00074
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.001,
+            "p95Ms": 0.00104,
+            "samplesMs": [
+              0.00104,
+              0.00102,
+              0.001,
+              0.001,
+              0.001,
+              0.001,
+              0.00102,
+              0.001,
+              0.001
+            ],
+            "resultBytes": 180,
+            "resultSha256": "bcb8848f4600d10a817f00bacb3d2fa8190308654f0374dd14377405dd189fb9",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "src/module_99/file_99.rs:1-40"
+          },
+          {
+            "medianMs": 0.02096,
+            "p95Ms": 0.024159999999999997,
+            "samplesMs": [
+              0.024159999999999997,
+              0.02216,
+              0.02198,
+              0.02202,
+              0.02096,
+              0.020300000000000002,
+              0.02044,
+              0.020139999999999998,
+              0.020200000000000003
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 100,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 0.015880000000000002,
+            "p95Ms": 0.01678,
+            "samplesMs": [
+              0.01604,
+              0.015880000000000002,
+              0.01678,
+              0.015880000000000002,
+              0.015860000000000003,
+              0.0159,
+              0.015880000000000002,
+              0.015860000000000003,
+              0.015880000000000002
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.0008199999999999999,
+            "p95Ms": 0.00266,
+            "samplesMs": [
+              0.0009599999999999999,
+              0.00266,
+              0.0008,
+              0.0008,
+              0.0008,
+              0.0008199999999999999,
+              0.0008199999999999999,
+              0.0008199999999999999,
+              0.0008199999999999999
+            ],
+            "resultBytes": 188,
+            "resultSha256": "c00033a9559693db5208f6d77ec4af5a685934b5ec386660ee3b0a67a48c4056",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "src/module_4999/file_4999.rs:1-40"
+          },
+          {
+            "medianMs": 1.43768,
+            "p95Ms": 1.491,
+            "samplesMs": [
+              1.43768,
+              1.462,
+              1.43594,
+              1.41552,
+              1.491,
+              1.4297799999999998,
+              1.4510399999999999,
+              1.4508800000000002,
+              1.4366400000000001
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 5000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 0.15588,
+            "p95Ms": 0.16065999999999997,
+            "samplesMs": [
+              0.157,
+              0.16065999999999997,
+              0.1544,
+              0.15598,
+              0.15358,
+              0.15588,
+              0.15358,
+              0.1535,
+              0.15667999999999999
+            ],
+            "resultBytes": 114,
+            "resultSha256": "f2139904a90e4f3fa4ae3c7d4ba1770488df0523b79a4e43854e27037349e93a",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "index_all sync"
+          },
+          {
+            "medianMs": 0.0008,
+            "p95Ms": 0.0008399999999999999,
+            "samplesMs": [
+              0.0008399999999999999,
+              0.0008,
+              0.0008,
+              0.0008,
+              0.00078,
+              0.0008,
+              0.0008,
+              0.0008,
+              0.0008
+            ],
+            "resultBytes": 192,
+            "resultSha256": "457eeddfbded0efc7d24b42f08aaf25850fcde7e03ed61ea90cd3c886587eefb",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "src/module_39999/file_39999.rs:1-40"
+          },
+          {
+            "medianMs": 12.523100000000001,
+            "p95Ms": 13.18332,
+            "samplesMs": [
+              12.523100000000001,
+              12.35802,
+              12.061060000000001,
+              12.55074,
+              13.18332,
+              12.711,
+              12.72538,
+              12.452340000000001,
+              12.50346
+            ],
+            "resultBytes": 135,
+            "resultSha256": "3a770b3ac9d989f69e07a834af7917e638e92c71ef451023cf78c474b92c9b0f",
+            "operation": "queryPaths",
+            "files": 40000,
+            "query": "file_42.rs index_all"
+          },
+          {
+            "medianMs": 25.74896,
+            "p95Ms": 25.84894,
+            "samplesMs": [
+              25.74896,
+              25.79076,
+              25.763659999999998,
+              25.764879999999998,
+              25.699080000000002,
+              25.84894,
+              25.657780000000002,
+              25.622980000000002,
+              25.482599999999998
+            ],
+            "resultBytes": 22839,
+            "resultSha256": "216d7d0322daf24091a1e675547a1fada7f5663da69a6f36f0c0006df7db30a7",
+            "operation": "explore",
+            "query": "sync index_all",
+            "responseChars": 22076,
+            "sourceLines": 294
+          },
+          {
+            "medianMs": 2.14678,
+            "p95Ms": 2.24134,
+            "samplesMs": [
+              2.14678,
+              2.22822,
+              2.0625999999999998,
+              2.1925,
+              2.06818,
+              2.19198,
+              2.02426,
+              2.24134,
+              2.06648
+            ],
+            "resultBytes": 2541,
+            "resultSha256": "f7691502d476255c326ca1f0bd8153ea97a8ec343fc19a9e0f81bd3807ed5428",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-698",
+            "responseChars": 2421,
+            "sourceLines": 32
+          },
+          {
+            "medianMs": 2.09128,
+            "p95Ms": 2.1321199999999996,
+            "samplesMs": [
+              2.1109,
+              2.0997999999999997,
+              2.06574,
+              2.1321199999999996,
+              2.12424,
+              1.98816,
+              2.0022399999999996,
+              2.09128,
+              1.9886199999999998
+            ],
+            "resultBytes": 375,
+            "resultSha256": "caffe9414aa6e8cb18b02191146eb102baae4ea036f9f26cf3a2830e34b715e8",
+            "operation": "explore",
+            "query": "crates/codegraph-core/src/codegraph.rs:667-667",
+            "responseChars": 325,
+            "sourceLines": 1
+          }
+        ],
+        "scope": "Warm in-process calls; excludes startup, indexing, MCP transport and model usage. Character/byte counts are not token counts."
+      }
+    ]
+  },
+  "scope": "Warm in-process retrieval. Synthetic path indexes at three sizes plus explore on this checkout. Exact-range metadata intentionally changes; source line counts and separate verbatim-source tests are checked. Excludes startup, transport, model tokens/cost and agent task success."
+}

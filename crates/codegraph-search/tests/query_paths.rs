@@ -48,3 +48,20 @@ fn path_and_line_recognition_matches_the_typescript_oracle() {
         assert_eq!(actual, vector["expected"], "vector {i}: {}", input);
     }
 }
+
+#[test]
+fn whole_path_shortcuts_preserve_unicode_spaces_and_case_collision_rules() {
+    let paths = ["README", "src/Été.rs", "src/a file.rs", "src/a.rs", "SRC/A.RS"]
+        .map(str::to_string);
+    for (query, expected, range) in [
+        ("readme", "README", None),
+        ("src/ÉTÉ.rs:4-9", "src/Été.rs", Some((4, 9))),
+        ("./src/a file.rs:8-12", "src/a file.rs", Some((8, 12))),
+        ("src/a.rs", "SRC/A.RS", None),
+    ] {
+        let result = extract_query_paths(query, &paths, &Default::default());
+        assert_eq!(result.pinned_files, vec![expected], "{query}");
+        assert!(result.stripped_query.is_empty(), "{query}");
+        assert_eq!(result.line_anchors.first().map(|a| (a.start, a.end)), range, "{query}");
+    }
+}

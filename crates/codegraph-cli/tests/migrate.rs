@@ -256,6 +256,78 @@ fn dry_run() {
     }
 }
 
+#[test]
+fn an_invalid_destination_keeps_the_original_index_and_program_for_recovery() {
+    for destination in ["empty folder", "corrupt database", "unfinished index", "unrelated database"] {
+        let sb = Sandbox::new();
+        let project = tempfile::tempdir().unwrap();
+        sb.original_project(project.path());
+        let binaries = sb.original_program();
+        let old = project.path().join(".codegraph/codegraph.db");
+        let original = fs::read(&old).unwrap();
+        let new = project.path().join(".codegraphV");
+        fs::create_dir(&new).unwrap();
+        match destination {
+            "empty folder" => {}
+            "corrupt database" => fs::write(new.join("codegraph.db"), "not a database").unwrap(),
+            "unfinished index" => { codegraph_db::Store::initialize(new.join("codegraph.db")).unwrap(); }
+            _ => {
+                let conn = codegraph_db::RawConnection::open(new.join("codegraph.db")).unwrap();
+                conn.execute_batch("CREATE TABLE unrelated (value TEXT)").unwrap();
+            }
+        }
+        let out = sb.migrate(project.path(), &["--yes"]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "{destination}: {text}");
+        assert!(text.contains("Both folders were kept") && text.contains("Migration is incomplete"), "{text}");
+        assert_eq!(fs::read(&old).unwrap(), original, "{destination}: original index lost");
+        assert!(new.exists(), "{destination}: destination lost");
+        assert!(sb.home().join(".codegraph").exists(), "{destination}: original settings lost");
+        assert!(binaries.iter().all(|b| b.exists()), "{destination}: original program removed");
+
+        // The printed recovery is actionable: set the incomplete destination aside and retry.
+        fs::rename(&new, project.path().join("kept-destination")).unwrap();
+        ok(sb.migrate(project.path(), &["--yes"]));
+        assert!(!old.exists());
+        assert!(ok(sb.cmd(project.path()).args(["files", "--json"]).output().unwrap()).contains("src/app.ts"));
+    }
+}
+
+#[test]
+fn unreadable_agent_configuration_keeps_the_original_install() {
+    let sb = Sandbox::new();
+    let project = tempfile::tempdir().unwrap();
+    let config = sb.write(".codex/config.toml", "[mcp_servers.codegraph\ncommand = 'codegraph'\n");
+    let binaries = sb.original_program();
+    let original = fs::read(&config).unwrap();
+    let out = sb.migrate(project.path(), &["--yes"]);
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(fs::read(config).unwrap(), original);
+    assert!(binaries.iter().all(|b| b.exists()));
+    assert!(sb.home().join(".codegraph").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_destination_junction_back_to_the_original_is_not_a_replacement_index() {
+    use std::os::windows::process::CommandExt;
+    let sb = Sandbox::new();
+    let project = tempfile::tempdir().unwrap();
+    sb.original_project(project.path());
+    let old = project.path().join(".codegraph");
+    let original = fs::read(old.join("codegraph.db")).unwrap();
+    let link = project.path().join(".codegraphV");
+    let junction = Command::new("cmd").args(["/C", "mklink", "/J"])
+        .arg(&link).arg(&old).creation_flags(0x08000000).output().unwrap();
+    assert!(junction.status.success(), "{}", String::from_utf8_lossy(&junction.stderr));
+    let out = sb.migrate(project.path(), &["--yes"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("not an independent index"), "{text}");
+    assert_eq!(fs::read(old.join("codegraph.db")).unwrap(), original);
+    assert!(link.exists());
+}
+
 /// BUG-89: an agent session of the original still has the index open. Windows cannot move the
 /// folder then, so migrate copies the database and reports the old folder as in use; once the
 /// session is gone, running migrate again removes it.

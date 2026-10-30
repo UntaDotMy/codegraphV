@@ -4,7 +4,32 @@ Canonical project guidance for coding agents working in this repository (Codex/A
 
 **Codex size note:** root `AGENTS.md` is intentionally kept near ~35 KiB (critical build/test/arch/retrieval rules retained). Longer validation methodology + the Excalidraw worked example live in `docs/AGENTS.md`. This environment sets `project_doc_max_bytes = 49152` so root (and root+`docs/` when cwd is under `docs/`) are not silently truncated at the 32 KiB default.
 
-## Project Overview
+## Rust rewrite: current implementation
+
+This branch ships **codegraphV**, the native Rust executable. Production code lives in
+`crates/`; `src/`, `dist/`, `package.json` and the npm tests are the original TypeScript
+implementation kept for differential checks. Start changes in the Rust implementation.
+The inherited guidance below still defines retrieval, testing and release contracts;
+its TypeScript paths describe the reference implementation.
+
+```text
+cargo build --release --locked -p codegraph-cli
+cargo test --workspace --locked
+cargo test --locked -p codegraph-mcp --test explore_render
+cargo test --locked -p codegraph-cli --test migrate
+```
+
+The executable is `target/release/codegraphV` (`.exe` on Windows). Runtime data is in
+`.codegraphV/`, and environment variables start with `CODEGRAPHV_`. The native CLI is in
+`crates/codegraph-cli/src/main.rs`; MCP dispatch is in `crates/codegraph-mcp/src/tools.rs`
+and source rendering is in `crates/codegraph-mcp/src/render.rs`. Native agent guidance and tool schemas live
+in `crates/codegraph-mcp/src/assets/`; change those when native tool behavior changes.
+Installer contracts are in `crates/codegraph-installer/tests/contracts.rs`.
+Native releases use `.github/workflows/rust-release.yml` and `install-rust.{ps1,sh}`.
+See `scripts/rust-golden/README.md` for parity checks. Never build a Cargo target while
+its probe executable is running on Windows. Do not bump versions or publish unless asked.
+
+## Project Overview (TypeScript reference)
 
 CodeGraph is a local-first code intelligence library + CLI + MCP server. It parses any supported codebase with tree-sitter, stores symbols/edges/files in SQLite (FTS5), and exposes a knowledge graph to AI agents (Claude Code, Cursor, Codex CLI, opencode) over MCP. Per-project data lives in `.codegraph/`. Extraction is deterministic — derived from AST, not LLM-summarized.
 

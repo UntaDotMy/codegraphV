@@ -35,6 +35,10 @@ jobs:
           ref: ${{ env.TAG }}
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: cargo test --workspace --locked
+      - name: Windows installer recovery
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/test-install-rust.ps1
 
   build:
     strategy:
