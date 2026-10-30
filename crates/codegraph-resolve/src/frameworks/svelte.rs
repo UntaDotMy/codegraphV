@@ -3,6 +3,7 @@
 //! Handles Svelte component references, Svelte 5 runes, store auto-subscriptions, and SvelteKit
 //! route/module patterns.
 
+use super::component_folder::in_referencing_folder;
 use super::now_ms;
 use crate::ctx::Ctx;
 use crate::types::{FrameworkExtractionResult, FrameworkResolver, ResolvedBy, ResolvedRef, UnresolvedRef};
@@ -168,9 +169,8 @@ fn resolve_component(name: &str, from_file: &str, ctx: &Ctx) -> Option<String> {
         return None;
     }
 
-    // Prefer same directory
-    let from_dir = from_file.rfind('/').map_or("", |i| &from_file[..i]);
-    if let Some(same) = components.iter().find(|n| n.file_path.starts_with(from_dir)) {
+    // Prefer the referencing file's folder, or one below it
+    if let Some(same) = in_referencing_folder(from_file, components.iter(), |n| n.file_path.as_str()).next() {
         return Some(same.id.clone());
     }
 

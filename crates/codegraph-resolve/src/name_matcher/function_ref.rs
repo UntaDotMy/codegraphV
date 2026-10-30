@@ -82,8 +82,14 @@ pub fn match_member_function_ref(r: &UnresolvedRef, ctx: &Ctx) -> Option<Resolve
             Tri::Value(d) if go_has_no_project_methods(d, r, ctx) => return None,
             _ => {}
         }
+        // Nor one a call or a conversion gives a value of such a type.
+        match &decl.valued {
+            Tri::Null => return None,
+            Tri::Value(v) if go_valued_has_no_project_methods(v, ctx) => return None,
+            _ => {}
+        }
         if let Some(ty) = ty {
-            let pkg = go_declared_type_package(decl.raw.as_deref(), &r.file_path, ctx);
+            let pkg = go_declared_type_package(decl.raw.as_deref(), decl.file.as_deref().unwrap_or(&r.file_path), ctx);
             return resolve_method_on_type(&ty, member, r, ctx, 0.9, ResolvedBy::FunctionRef, pkg.as_deref(), 0);
         }
         let types: Vec<NodeRef> = ctx

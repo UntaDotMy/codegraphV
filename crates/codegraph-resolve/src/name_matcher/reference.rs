@@ -9,6 +9,7 @@ use super::function_ref::match_function_ref;
 use super::gate::gate_language_match;
 use super::js_scope::is_outside_js_local;
 use super::js_store::{is_unresolved_js_member_call, match_store_accessor_chain};
+use super::kotlin::{is_kotlin_top_level_visible, kotlin_file_scope};
 use super::lua::{lua_alias_target, LUA_GLOBAL_FUNCTIONS};
 use super::method::match_method_call;
 use super::object_literal::{match_collapsed_object_call, match_object_path_call};
@@ -307,6 +308,41 @@ fn is_scala_type_kind(k: NodeKind) -> bool {
 
 memo_map!(JvmPackagesMemo, String, Rc<HashSet<String>>);
 
+/// `Modifier.pad()` after `import androidx.compose.ui.Modifier`: the type is outside the project,
+/// but Kotlin lets the project extend it. The call reaches a project extension on that type
+/// (`fun Modifier.pad()`, indexed as `Modifier::pad`) that the call site can see (its file, its
+/// package, an import of it by name or `.*`) and whose own file imports the same type. Compose's
+/// own `Modifier.fillMaxSize()` matches none and stays unlinked.
+fn kotlin_extension_on_imported_type(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    if !r.is_kind(EdgeKind::Calls) {
+        return None;
+    }
+    let (receiver, member) = r.reference_name.split_once('.')?;
+    if receiver.is_empty() || member.is_empty() || !receiver.chars().all(|c| c.is_alphanumeric() || c == '_') || !member.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let imports = ctx.get_import_mappings(&r.file_path, r.language);
+    let binding = imports.iter().find(|m| m.local_name == receiver)?;
+    let package = binding.source.rfind('.').map_or("", |dot| &binding.source[..dot]);
+    let extensions: Vec<NodeRef> = ctx
+        .get_nodes_by_qualified_name(&format!("{}::{member}", binding.exported_name))
+        .iter()
+        .filter(|n| {
+            if n.kind != NodeKind::Method || n.language != Language::Kotlin || !is_kotlin_top_level_visible(n, r, ctx) {
+                return false;
+            }
+            let scope = kotlin_file_scope(&n.file_path, ctx);
+            scope.imports.contains(&binding.source) || scope.stars.contains(package)
+        })
+        .cloned()
+        .collect();
+    let chosen: Vec<&NodeRef> = if extensions.len() > 1 { extensions.iter().filter(|n| n.file_path == r.file_path).collect() } else { extensions.iter().collect() };
+    match chosen.as_slice() {
+        [only] => Some(ResolvedRef::new(r, only.id.clone(), 0.9, ResolvedBy::QualifiedName)),
+        _ => None,
+    }
+}
+
 /// `isJavaOutsideImport`: the name is bound by an import of a package the project does not declare.
 pub(crate) fn is_java_outside_import(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     let imports = ctx.get_import_mappings(&r.file_path, r.language);
@@ -387,7 +423,8 @@ fn match_reference_inner(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         && !r.is_kind(EdgeKind::Imports)
         && is_java_outside_import(r.reference_name.split('.').next().unwrap_or(""), r, ctx)
     {
-        return None;
+        // Only a Kotlin extension the project declares on that type is in the graph.
+        return if r.language == Language::Kotlin { kotlin_extension_on_imported_type(r, ctx) } else { None };
     }
     if r.language == Language::Scala && r.is_kind(EdgeKind::References) && re!(r"^[^\w\s]+$").is_match(&r.reference_name) {
         let types: Vec<NodeRef> = ctx

@@ -16,6 +16,7 @@ use self::loader::{
     LAZY_ROUTE_PREFIX,
 };
 use self::scan::{compose_route_path, scan_route_declarations, RoutePart};
+use super::component_folder::in_referencing_folder;
 use super::object_literal::match_bracket;
 use super::object_literal::skip_string;
 use super::package_deps::depends_on;
@@ -897,9 +898,8 @@ fn resolve_component(name: &str, from_file: &str, ctx: &Ctx) -> Option<String> {
         return None;
     }
 
-    // Prefer same directory
-    let from_dir = &from_file[..from_file.rfind('/').unwrap_or(0)];
-    if let Some(same_dir) = components.iter().find(|n| n.file_path.starts_with(from_dir)) {
+    // Prefer the referencing file's folder, or one below it
+    if let Some(same_dir) = in_referencing_folder(from_file, components.iter(), |n| n.file_path.as_str()).next() {
         return Some(same_dir.id.clone());
     }
 

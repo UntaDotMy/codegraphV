@@ -4,6 +4,7 @@
 use super::exact::prefer_call_site_file;
 use super::infer::{array_element_type, infer_esm_awaited_call_type, infer_java_field_receiver_type, infer_local_receiver_type, normalize_inferred_type_name, ts_imported_type_file, GoReceiverDecl};
 use super::js_imports::{is_import_binding, is_imported_module_receiver, is_vue_component_method};
+use super::java_receiver::{java_receiver_declared_type, java_type_ref, resolve_on_java_type, JavaDeclared};
 use super::js_scope::is_locally_bound_js_name;
 use super::lang_shape::is_method_owner_kind;
 use super::members::{class_strategy_method, infer_member_receiver_type, inherited_class_method, is_member_typed_language, type_parameter_bound};
@@ -220,6 +221,18 @@ pub fn resolve_method_on_type(
                     return Some(ResolvedRef::new(r, chosen.id.clone(), confidence, resolved_by));
                 }
             } else if r.language != Language::Go {
+                // Prefer the candidate whose package-qualified name matches the imported FQN: JVM
+                // declarations are indexed as `<pkg>::<Class>` from the file's `package`
+                // directive, independent of the file name, so this disambiguates Kotlin (where
+                // `FooConverter` can live in `Converters.kt`) that the file-path suffix below
+                // cannot. `com.example.b.FooConverter` → `com.example.b::FooConverter::convert`.
+                if let Some(last_dot) = fqn.rfind('.').filter(|d| *d > 0) {
+                    let expected = format!("{}::{}::{method_name}", &fqn[..last_dot], &fqn[last_dot + 1..]);
+                    if let Some(by_name) = matches.iter().find(|m| m.qualified_name == expected) {
+                        return Some(ResolvedRef::new(r, by_name.id.clone(), confidence, resolved_by));
+                    }
+                }
+                // Fall back to the file-path suffix for Java's class-name = file-name layout.
                 let ext = if r.language == Language::Kotlin { ".kt" } else { ".java" };
                 let fqn_path = format!("{}{ext}", fqn.replace('.', "/"));
                 let chosen = matches.iter().find(|m| {
@@ -235,7 +248,11 @@ pub fn resolve_method_on_type(
     if r.reference_kind == codegraph_types::ReferenceKind::FunctionRef && matches.len() != 1 {
         return None;
     }
-    let visible = cpp_visible_first(matches, r, ctx);
+    // Java: a same-named type in another JVM language (Scala's `play.api.data.Form` beside Java's
+    // `play.data.Form`) is the weaker candidate when no import pins one — a wildcard `import
+    // play.data.*` or the same package names none.
+    let same_language: Vec<NodeRef> = if r.language == Language::Java { matches.iter().filter(|m| m.language == Language::Java).cloned().collect() } else { Vec::new() };
+    let visible = cpp_visible_first(if same_language.is_empty() { matches } else { same_language }, r, ctx);
     // A Ruby receiver is typed only by `x = Widget.new`, so it is an instance: `x.build` reaches
     // `def build`, not `def self.build`, wherever each is.
     let ordered = ruby_methods_of_kind_first(
@@ -355,6 +372,9 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             RustTyped::Unread(line) => rust_binding_line = Some(line),
         }
     }
+    let mut local_inferred = false;
+    // Java: what `java_receiver_declared_type` read for the receiver, once it ran.
+    let mut java_declared: Option<Option<JavaDeclared>> = None;
     if inferable_receiver {
         if r.language == Language::VbNet && dot {
             let typed = match_vb_typed_call(&object_or_class, &method_name, r, ctx);
@@ -416,6 +436,10 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         if matches!(decl.declared, Tri::Null) {
             return None;
         }
+        // So does a local a call gives a value of such a type (`c, _ := net.Dial(…)`).
+        if matches!(decl.valued, Tri::Null) {
+            return None;
+        }
         let go_declared = decl.declared.clone();
         if go_std && go_declared.is_undefined() && decl.asserted.is_undefined() {
             if let Some(from) = go_local_decl_from(&object_or_class, r, ctx) {
@@ -424,7 +448,20 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 }
             }
         }
-        if inferred_type.is_none() && is_member_typed_language(r.language) && dot {
+        // A Java field the class around the call declares is read below as its declaration writes
+        // it, with the package or outer class the member reader drops (`PauseTest.Suite`,
+        // `io.kestra.core.http.HttpRequest`); the member reader still types a field the class
+        // inherits.
+        if inferred_type.is_none()
+            && is_member_typed_language(r.language)
+            && dot
+            && (r.language != Language::Java || {
+                let declared = java_receiver_declared_type(&object_or_class, r, ctx);
+                let unread = declared.is_none();
+                java_declared = Some(declared);
+                unread
+            })
+        {
             inferred_type = infer_member_receiver_type(&object_or_class, r, ctx);
             if inferred_type.as_ref().is_some_and(|t| re!(r"^[a-z]").is_match(t)) {
                 return None;
@@ -489,7 +526,25 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         if r.language == Language::Rust && inferred_type.as_deref() == Some("Pin") && !is_rust_project_named("Pin", ctx) {
             return match_rust_pinned_call(&object_or_class, &method_name, r, ctx);
         }
-        if let Some(t) = inferred_type.clone() {
+        if r.language == Language::Java && inferred_type.is_some() {
+            local_inferred = true;
+            let t = inferred_type.clone().unwrap_or_default();
+            // Java: a local of a library type (`Parcel parcel`, `List<Foo> items`) has none of the
+            // project's methods — neither a same-named nested project type's (`Iterator<T> it`
+            // beside `UByteArray.Iterator`) nor whatever the name-only strategies below would bind
+            // the call to.
+            let ty = java_type_ref(&t, &r.file_path, ctx)?;
+            if let Some(typed_match) = resolve_on_java_type(&ty, &method_name, r, ctx) {
+                return Some(typed_match);
+            }
+            // As for every other language below: a type no project class or interface is named — a
+            // library `URI` the short-name rule took for a type parameter, an enum whose `name()` /
+            // `equals()` are Java's — is past guessing (kestra's `URI file; file.toString()`).
+            if is_undeclared_type_name(re!(r"[.:]+").split(&t).into_iter().last().unwrap_or(""), r, ctx) {
+                return None;
+            }
+        } else if let Some(t) = inferred_type.clone() {
+            local_inferred = true;
             match &decl.asserted {
                 Tri::Value(a) => return resolve_method_on_type(&a.name, &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, Some(&a.dir), 0),
                 Tri::Null => return None,
@@ -500,10 +555,17 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                     return None;
                 }
             }
+            // So does a local whose value's type, read in the file that writes it (a callee's
+            // result), is one from outside the project.
+            if let Tri::Value(v) = &decl.valued {
+                if go_valued_has_no_project_methods(v, ctx) {
+                    return None;
+                }
+            }
             let mut imported_fqn: Option<String> = if matches!(r.language, Language::Java | Language::Kotlin) {
                 imported_fqn_of(&t, r, ctx)
             } else if r.language == Language::Go {
-                go_declared_type_package(decl.raw.as_deref(), &r.file_path, ctx)
+                go_declared_type_package(decl.raw.as_deref(), decl.file.as_deref().unwrap_or(&r.file_path), ctx)
             } else if is_esm_family(r.language) && awaited.is_none() {
                 ts_imported_type_file(decl.raw.as_deref().unwrap_or(&t), r, ctx)
             } else {
@@ -545,7 +607,14 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                     tm.original = r.clone();
                     return Some(tm);
                 }
-                return Some(tm);
+                // A Scala call never lands on another language's constructor here: a
+                // `def f(): T = T.Inner(...)` return annotation reads as `T`'s type and hands
+                // `Inner::Inner` over. Fall through to the Scala type lookup.
+                let foreign_constructor = r.language == Language::Scala
+                    && ctx.node_by_id(&tm.target_node_id).is_some_and(|target| is_other_language_constructor(&target, r.language));
+                if !foreign_constructor {
+                    return Some(tm);
+                }
             }
             if awaited.is_some() {
                 return None;
@@ -553,7 +622,7 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             if is_esm_family(r.language) && (JS_BUILT_INS.contains(t.as_str()) || TS_PRIMITIVE_TYPES.contains(t.as_str())) {
                 return None;
             }
-            if go_std && !go_declared.is_undefined() {
+            if go_std && (!go_declared.is_undefined() || matches!(decl.valued, Tri::Value(_))) {
                 return None;
             }
             if r.language == Language::Go {
@@ -616,11 +685,57 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             other => other,
         };
     }
-    if matches!(r.language, Language::Java | Language::Kotlin) && dot {
+    // Java: a field receiver — `mRepo`, `this.mRepo`, `Outer.this.mRepo`, or a chain of fields
+    // `mState.menu` — resolves on its declared type, and a library type (`Handler`, `Context`) gets
+    // NO edge rather than the name-only guesses below.
+    if r.language == Language::Java && dot && !local_inferred {
+        let declared = match java_declared.take() {
+            Some(read) => read,
+            None => java_receiver_declared_type(&object_or_class, r, ctx),
+        };
+        match declared {
+            Some(JavaDeclared::External) => return None,
+            Some(JavaDeclared::Type(ty)) => {
+                if let Some(typed_match) = resolve_on_java_type(&ty, &method_name, r, ctx) {
+                    return Some(typed_match);
+                }
+                if is_undeclared_type_name(ty.name.rsplit("::").next().unwrap_or(""), r, ctx) {
+                    return None;
+                }
+            }
+            None => {}
+        }
+    }
+    // Kotlin (Java's fields are read in the branch above): receiver may be a field whose name
+    // doesn't match the type by Java naming convention (`userbo` → class `UserBO`, abbreviated).
+    // Look up the field in the enclosing class to get its declared type, then resolve the method on
+    // that type. Covers Spring `@Resource`/`@Autowired` field injection where the field type is the
+    // concrete bean class.
+    if r.language == Language::Kotlin && dot {
         if let Some(t) = infer_java_field_receiver_type(&object_or_class, r, ctx) {
             let fqn = imported_fqn_of(&t, r, ctx);
             if let Some(m) = resolve_method_on_type(&t, &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, fqn.as_deref(), 0) {
                 return Some(m);
+            }
+        }
+    }
+    // Kotlin: a receiver whose type is known — a local bound to a call (`val lease =
+    // HardwareLock.tryBegin()`, typed by the callee's declared return type), a local constructor
+    // call, or a property — resolves on that type. A type the project does not declare (`Regex`,
+    // `Properties`, a JDK or Android class) has none of the project's methods, so the call gets NO
+    // edge instead of the name-only guesses below, which bind it to whatever project class declares
+    // a method of the same name.
+    if r.language == Language::Kotlin && dot && !object_or_class.contains('.') {
+        let declared = super::kotlin_receiver::kotlin_receiver_declared_type(&object_or_class, r, ctx, 0);
+        if declared.as_deref() == Some(super::kotlin_receiver::KOTLIN_EXTERNAL_TYPE) {
+            return None;
+        }
+        if let Some(declared) = declared {
+            if let Some(typed_match) = resolve_method_on_type(&declared, &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, None, 0) {
+                return Some(typed_match);
+            }
+            if !super::kotlin_receiver::is_project_type(&declared, r, ctx) {
+                return None;
             }
         }
     }
@@ -749,10 +864,57 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             }
         }
     }
+    // Scala `Outer.Inner(args)`: a case-class / companion `apply` on the nested Scala type
+    // `Outer::Inner` (Scala qualified names carry no package). Taken only when every match sits in
+    // one file (a class and its companion share the name), or else from the call site's own file.
+    // A Scala `object` is a `module`; a class / trait of the same name is preferred over it.
+    if r.language == Language::Scala && kind == MatchKind::Dot && method_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        let type_qn = format!("{}::{method_name}", object_or_class.replace('.', "::"));
+        let mut types: Vec<NodeRef> = ctx
+            .get_nodes_by_qualified_name(&type_qn)
+            .iter()
+            .filter(|n| n.language == Language::Scala && matches!(n.kind, NodeKind::Class | NodeKind::Trait | NodeKind::Module))
+            .cloned()
+            .collect();
+        types.sort_by_key(|n| n.kind == NodeKind::Module);
+        let one_file = types.first().is_some_and(|first| types.iter().all(|n| n.file_path == first.file_path));
+        let chosen = if one_file { types.first() } else { types.iter().find(|n| n.file_path == r.file_path) };
+        if let Some(chosen) = chosen {
+            return Some(ResolvedRef::new(r, chosen.id.clone(), 0.85, ResolvedBy::QualifiedName));
+        }
+    }
     if !method_name.is_empty() {
         return match_by_method_name(r, ctx, &object_or_class, &method_name, kind == MatchKind::Colon, &through_cpp_namespace);
     }
     None
+}
+
+/// A constructor node of another language: a method named like its owner
+/// (`pkg::Outer::Inner::Inner`), which is how the Java/Kotlin extractors record an explicit
+/// constructor.
+fn is_other_language_constructor(node: &Node, language: Language) -> bool {
+    if node.language == language {
+        return false;
+    }
+    let mut segments = node.qualified_name.rsplit("::");
+    matches!((segments.next(), segments.next()), (Some(last), Some(owner)) if last == owner)
+}
+
+/// Receivers that name the current object (or its own class/base): a call through one of these may
+/// genuinely recurse into the enclosing method.
+const SELF_RECEIVERS: [&str; 5] = ["this", "self", "Self", "super", "cls"];
+
+/// The single-candidate branch below matches by method NAME alone, so a delegating wrapper whose
+/// method is the only one of that name (`wrapped.unbind(v)` inside `unbind(v)`) name-matches the
+/// method it is written in and would be recorded as recursive. A receiver that is an explicit,
+/// other object is by construction not the enclosing method's own instance, so that candidate is
+/// the one guess known to be wrong: no edge beats a wrong edge. Real recursion (`this.foo()`,
+/// `self.foo()`, bare `foo()`) is kept. Go is left out altogether: a method's receiver and a
+/// struct's fields are typed before this point, so a Go call that still arrives here is on a local
+/// the resolver could not type, mostly a range variable over the type's own children (cobra's
+/// `sub.checkCommandGroups()`, etcd's `child.Repr(…)`), which is real recursion.
+fn is_foreign_receiver_self_loop(candidate: &Node, receiver: &str, r: &UnresolvedRef) -> bool {
+    candidate.id == r.from_node_id && !SELF_RECEIVERS.contains(&receiver) && r.language != Language::Go
 }
 
 /// The last strategy: the method's name alone, narrowed by reach and by the receiver's words.
@@ -833,6 +995,9 @@ fn match_by_method_name(
             && !(r.language == Language::Php && php_receiver_reaches(object_or_class, &target[0], ctx)))
     {
         if through_cpp_namespace() && !is_cpp_constructor_through(object_or_class, &target[0], ctx) {
+            return None;
+        }
+        if is_foreign_receiver_self_loop(&target[0], object_or_class, r) {
             return None;
         }
         return Some(ResolvedRef::new(r, target[0].id.clone(), 0.7, ResolvedBy::InstanceMethod).guessed_by_name());

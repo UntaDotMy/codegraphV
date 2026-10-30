@@ -2,6 +2,7 @@
 //! languages/c-cpp.ts): kernel annotations, statement macros, type-keyword
 //! macro arguments, `__cplusplus` guards, designated-initializer macro calls.
 
+use super::cconditional::blank_c_unbalanced_conditional_branches;
 use super::cmask::*;
 use super::cshared::*;
 use super::jsre::Re;
@@ -19,12 +20,12 @@ static PREPROC_DIRECTIVE: LazyLock<Re> = LazyLock::new(|| Re::new(r"^[ \t]*#"));
 static PREPROC_ENDIF: LazyLock<Re> = LazyLock::new(|| Re::new(r"^[ \t]*#[ \t]*endif\b"));
 const CPLUSPLUS_GUARD_MAX_BODY_LINES: usize = 40;
 
-fn strip_cr(l: &str) -> &str {
+pub(super) fn strip_cr(l: &str) -> &str {
     l.strip_suffix('\r').unwrap_or(l)
 }
 
 /// Replace every character of `line` except a `\r` with a space.
-fn blank_keep_cr(line: &str) -> String {
+pub(super) fn blank_keep_cr(line: &str) -> String {
     line.chars().map(|c| if c == '\r' { c } else { ' ' }).collect()
 }
 
@@ -75,7 +76,10 @@ pub(crate) fn blank_c_cplusplus_guard_bodies(source: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const C_STMT_MACRO_KEYWORDS: &[&str] = &["if", "while", "for", "switch", "return", "do", "else", "sizeof"];
-static STMT_MACRO_HEAD: LazyLock<Re> = LazyLock::new(|| Re::new(r"^[ \t]+([a-z_][a-z0-9_]*)[ \t]*\("));
+// Lowercase iterator macros, or an all-caps block macro (`ATOMIC_BLOCK(NVIC_PRIO_MAX) {`,
+// `PG_FOREACH(reg) {` — betaflight); a PascalCase name is left alone (a constructor, if the file is
+// C++).
+static STMT_MACRO_HEAD: LazyLock<Re> = LazyLock::new(|| Re::new(r"^[ \t]+([a-z_][a-z0-9_]*|[A-Z_][A-Z0-9_]*)[ \t]*\("));
 
 /// Scan `line` from `from` for the `)` that balances `depth`, skipping literals.
 /// `Err(())` when a `;`, `{` or `}` shows up (only with `bail_on_stmt`).
@@ -654,7 +658,9 @@ pub(crate) fn pre_parse_c(source: &str) -> String {
     if looks_like_cuda_source(&blanked) {
         blanked = blank_cuda_constructs(&blanked);
     }
-    // The named-variadic `#define` pass runs after the directive restore — it
-    // deliberately edits directive lines.
-    raw.restore(&blank_c_named_variadic_define_dots(&restore_directive_lines(&source, &blanked)))
+    // The named-variadic `#define` pass and the conditional-group collapse run after the
+    // directive restore — they deliberately edit directive lines — and before the raw-string
+    // restore: both are length-preserving, and the collapse must count braces with raw-string
+    // bodies still masked.
+    raw.restore(&blank_c_unbalanced_conditional_branches(&blank_c_named_variadic_define_dots(&restore_directive_lines(&source, &blanked))))
 }

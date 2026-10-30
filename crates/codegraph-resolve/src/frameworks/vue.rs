@@ -3,6 +3,7 @@
 //! Handles Vue component references, compiler macros (`defineProps`, etc.) and Nuxt auto-imports;
 //! [`NuxtResolver`] reads Nuxt's file-based routes.
 
+use super::component_folder::in_referencing_folder;
 use super::now_ms;
 use super::package_deps::depends_on;
 use super::page_component::{page_component_ref, resolve_page_component};
@@ -306,9 +307,8 @@ fn resolve_component(name: &str, from_file: &str, ctx: &Ctx) -> Option<String> {
         nodes.iter().find(|n| n.kind == NodeKind::Component && n.name == name).map(|n| n.id.clone())
     };
 
-    // Same directory first for specificity
-    let from_dir = from_file.rfind('/').map_or("", |i| &from_file[..i]);
-    if let Some(same) = matches.iter().find(|f| f.starts_with(from_dir)) {
+    // The referencing file's folder, or one below it, first for specificity
+    if let Some(same) = in_referencing_folder(from_file, matches.iter(), |f| f.as_str()).next() {
         return component_in(same);
     }
 

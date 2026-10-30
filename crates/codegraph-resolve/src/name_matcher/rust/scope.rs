@@ -1,6 +1,7 @@
 //! Whether a Rust name resolves to a candidate where it is written: paths, `use` imports, glob
 //! imports, associated items and enum variants.
 
+use super::binding::is_rust_scoped_ref;
 use super::impls::*;
 use super::uses::*;
 use crate::ctx::Ctx;
@@ -127,6 +128,8 @@ pub struct RustRefScope {
     variant: Option<String>,
     /// `(prefix, last segment)` of a `a::b::name` path, and the path's root.
     pathed: Option<(String, String, String)>,
+    /// The scope around the reference already said what its name is (`match_rust_use_bound_name`).
+    scoped: bool,
 }
 
 impl RustRefScope {
@@ -164,10 +167,13 @@ impl RustRefScope {
             let root = re!(r"^([A-Za-z_]\w*)").captures(&prefix).and_then(|c| c.text(1).map(String::from)).unwrap_or_else(|| seg.clone());
             (prefix, seg, root)
         });
-        RustRefScope { line, references, assoc_binding, variant, pathed }
+        RustRefScope { line, references, assoc_binding, variant, pathed, scoped: is_rust_scoped_ref(r, ctx) }
     }
 
     pub fn admits(&self, candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+        if self.scoped {
+            return true;
+        }
         if !is_rust_item_visible_from(candidate, r) {
             return false;
         }
@@ -250,10 +256,21 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
             Some(cut) => candidate.qualified_name[..cut].rsplit("::").next().unwrap_or("").to_string(),
             None => String::new(),
         };
-        return (!owner.is_empty() && uses.globs.contains(&owner)) || (uses.names.contains(name) && uses.names.contains(&owner));
+        if !((!owner.is_empty() && uses.globs.contains(&owner)) || (uses.names.contains(name) && uses.names.contains(&owner))) {
+            return false;
+        }
+        // A `use` of the variant itself names that enum's: `use crate::models::E::Good` is
+        // `models`'s `E::Good`, not an `E::Good` another module declares.
+        return !uses.paths.contains_key(name) || rust_use_items_at(name, r, ctx).is_none_or(|ids| ids.contains(&candidate.id));
     }
     if candidate.file_path == r.file_path {
-        return true;
+        // A `use` in the block around the reference shadows its module's own item of the name:
+        // `fn f() { use crate::util::take; take() }` is util's `take`, not the file's.
+        if candidate.qualified_name != name || !is_rust_module_item_kind(candidate.kind) {
+            return true;
+        }
+        let visible = rust_visible_use(name, &r.file_path, rust_use_ref_offset(r, ctx), ctx);
+        return visible.is_none_or(|v| v.block < 0 || rust_use_items_at(name, r, ctx).is_none_or(|ids| ids.contains(&candidate.id)));
     }
     let uses = rust_uses_of(&r.file_path, ctx);
     let from = if is_rust_module_item_kind(candidate.kind) { uses.bound_from.get(name) } else { None };
@@ -261,7 +278,9 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
         if !rust_use_can_reach(from, candidate, r, ctx) {
             return false;
         }
-        if let Some(items) = rust_use_items(name, &r.file_path, ctx) {
+        // The `use` that binds the name where the reference is (a block's own, else its module's),
+        // else those of the whole file.
+        if let Some(items) = rust_use_items_at(name, r, ctx) {
             if !items.contains(&candidate.id) {
                 return false;
             }

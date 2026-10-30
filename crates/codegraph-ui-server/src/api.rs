@@ -198,6 +198,11 @@ pub fn relations(cg: &CodeGraph, edges: &[Edge], incoming: bool) -> Result<Vec<V
     Ok(out)
 }
 pub fn resolve_file(cg: &CodeGraph, file: &str) -> Result<(FileRecord, String)> {
+    // The root is vetted on every read, not only at startup: a folder linked somewhere sensitive
+    // while the viewer runs must stop serving what is inside it.
+    if let Some(reason) = codegraph_core::utils::sensitive_directory_refusal(cg.project_root()) {
+        return Err(Error::refused(reason));
+    }
     if file.is_empty()
         || std::path::Path::new(file).is_absolute()
         || file.contains('\\')

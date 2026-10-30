@@ -671,9 +671,18 @@ impl<'a> Pass<'a> {
 
     // -- Stage C: registrations -------------------------------------------------
 
-    /// Prefer a function in the same file.
+    /// Prefer a function in the same file. C and C++ functions only (the files this pass scans): a
+    /// same-named Python or Rust function is never what a C table registers, and must not displace
+    /// the C one.
     fn resolve_fn(&self, name: &str, prefer_file: &str) -> Option<NodeRef> {
-        let cands: Vec<NodeRef> = self.ctx.get_nodes_by_name(name).iter().filter(|n| is_fn_kind(n.kind)).cloned().collect();
+        let c_cpp = Re::cached(C_CPP_EXT, "i");
+        let cands: Vec<NodeRef> = self
+            .ctx
+            .get_nodes_by_name(name)
+            .iter()
+            .filter(|n| is_fn_kind(n.kind) && c_cpp.is_match(&n.file_path))
+            .cloned()
+            .collect();
         if cands.is_empty() {
             return None;
         }

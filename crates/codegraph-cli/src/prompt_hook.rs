@@ -56,7 +56,15 @@ pub fn frontload(cwd: &str, prompt: &str) -> Option<String> {
             )
         ));
     };
-    let cg = CodeGraph::open(&root, OpenOptions::default()).ok()?;
+    // Read-only: the hook runs on its own for every structural prompt, so it must never run the
+    // writer's repairs inside a full index, and it stays out of a running rebuild altogether: the
+    // index is half-built until it ends, and the hook would hold the file the rebuild replaces.
+    // Its one write, filling an empty segment vocabulary, goes through a writer of its own.
+    let cg = CodeGraph::open(&root, OpenOptions { read_only: true, ..OpenOptions::default() }).ok()?;
+    if cg.is_rebuild_in_progress() {
+        cg.close();
+        return None;
+    }
     let out = frontload_project(&cg, &root, &prompt, keyworded, &code_tokens, &prose_words, &plan.nudge_projects, plan.via_sub_scan);
     cg.close();
     out

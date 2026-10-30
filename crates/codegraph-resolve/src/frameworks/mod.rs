@@ -4,6 +4,7 @@ pub mod angular_router;
 pub mod astro;
 pub mod cargo_workspace;
 pub mod cics;
+pub mod component_folder;
 pub mod csharp;
 pub mod drupal;
 pub mod expo_router;

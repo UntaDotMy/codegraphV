@@ -34,7 +34,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// The extraction version this engine stamps into an index it builds (`extraction-version.ts`).
@@ -49,6 +49,11 @@ const PYTHON_ROOTS_METADATA_KEY: &str = "python_root_fingerprint";
 /// Metadata key: the digest of the workspace packages and path dependencies the index was
 /// resolved by (see `sync`).
 const WORKSPACE_METADATA_KEY: &str = "js_workspace_fingerprint";
+/// Metadata key: the frameworks (sorted JSON names) the last full index extracted every file with.
+const FRAMEWORKS_AT_INDEX_KEY: &str = "frameworks_at_index";
+/// Metadata key: `{added, removed}` — the frameworks a sync detected since the last full index,
+/// against `FRAMEWORKS_AT_INDEX_KEY`; '' when none.
+const FRAMEWORKS_SINCE_INDEX_KEY: &str = "frameworks_since_index";
 /// The ES module family whose references a moved workspace map re-opens (ESM_IMPORT_LANGUAGES).
 const ESM_IMPORT_LANGUAGES: [Language; 8] =
     [Language::TypeScript, Language::Tsx, Language::JavaScript, Language::Jsx, Language::ArkTs, Language::Svelte, Language::Vue, Language::Astro];
@@ -76,6 +81,15 @@ pub struct IndexOptions {
     pub verbose: bool,
     /// Watcher fast path: reconcile ONLY these project-relative paths.
     pub paths: Option<Vec<String>>,
+}
+
+/// The frameworks a sync detected since the last full index, against the ones that index extracted
+/// every file with: files indexed before the change were read without the added ones and with the
+/// removed ones, so a full re-index brings them in line.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FrameworkChanges {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 /// Completeness of the last full index run (`index_state` metadata).
@@ -471,9 +485,14 @@ impl CodeGraph {
         // Mark the index as in-flight BEFORE any writes: a run killed mid-index leaves this marker
         // behind, so `codegraph status` can tell a truncated index from a completed one.
         let _ = self.store.set_metadata("index_state", "indexing");
-        // The segment vocabulary starts empty and is repopulated by the node write path as every
-        // file (re-)indexes below — so a full index is also the orphan-cleanup pass.
-        let _ = self.store.clear_name_segment_vocab();
+        // Segment vocabulary. On a fresh database it starts empty, and the node write path fills it
+        // as every file indexes below. Over an existing graph the store skips unchanged files,
+        // which never write their names again, so clearing here lost them until a rebuild, and a
+        // cancelled or failed run left the table empty (#2252). There the table is kept, and the
+        // names no symbol carries any more are pruned once the run completes.
+        if fresh_db {
+            let _ = self.store.clear_name_segment_vocab();
+        }
         // Bulk FTS mode for the mass-insert phase: drop the per-row FTS sync triggers, rebuild
         // nodes_fts once from the nodes table afterwards.
         self.store.begin_bulk_node_load()?;
@@ -520,6 +539,18 @@ impl CodeGraph {
             self.resolver().resolve_chained_calls_via_conformance()?;
             self.resolver().resolve_deferred_this_member_refs()?;
 
+            // Over an existing graph the vocabulary was kept (see the top of the run). Every write
+            // of this run has landed, so drop the rows of names deleted or renamed since they
+            // were written — the orphan cleanup the up-front clear used to do. A cancelled run
+            // keeps them all.
+            if !fresh_db && !signal.is_some_and(|s| s.load(Ordering::SeqCst)) {
+                let t = Instant::now();
+                let _ = self.store.prune_name_segment_vocab();
+                if timings() {
+                    eprintln!("[phase-timing] vocab-prune: {}ms", t.elapsed().as_millis());
+                }
+            }
+
             // Refresh planner stats + checkpoint the WAL after bulk writes.
             let t = Instant::now();
             self.store.run_maintenance();
@@ -537,6 +568,7 @@ impl CodeGraph {
         if result.success {
             self.stamp_python_root_fingerprint(None);
             self.stamp_workspace_fingerprint(None);
+            self.stamp_indexed_frameworks();
         }
         if result.success && result.files_indexed > 0 {
             let _ = self.store.set_metadata("indexed_with_version", PACKAGE_VERSION);
@@ -618,6 +650,42 @@ impl CodeGraph {
     fn stamp_workspace_fingerprint(&self, fingerprint: Option<String>) {
         let fingerprint = fingerprint.unwrap_or_else(|| self.resolver().get_workspace_fingerprint());
         let _ = self.store.set_metadata(WORKSPACE_METADATA_KEY, &fingerprint);
+    }
+
+    /// Record the frameworks a full index extracted every file with; none has come or gone since.
+    fn stamp_indexed_frameworks(&self) {
+        let Some(mut names) = self.orchestrator.detected_framework_names() else { return };
+        names.sort();
+        if let Ok(json) = serde_json::to_string(&names) {
+            let _ = self.store.set_metadata(FRAMEWORKS_AT_INDEX_KEY, &json);
+            let _ = self.store.set_metadata(FRAMEWORKS_SINCE_INDEX_KEY, "");
+        }
+    }
+
+    /// A sync detected frameworks again because what detection read had changed (#2516): a
+    /// framework arrived mid-session, like Express in a new `package.json`, or one left. Files the
+    /// sync extracted were read with the new set already. The resolver detects again when its set
+    /// differs, so resolution and the passes after it use the new one too. Files indexed before the
+    /// change were extracted without it, so the change against the last full index is recorded for
+    /// `codegraphV status`, which recommends a re-index: re-extracting every file a framework can
+    /// touch would mean re-parsing most of the project inside a watcher's sync.
+    fn follow_detected_frameworks(&self, detected: &[String]) {
+        let mut now = detected.to_vec();
+        now.sort();
+        let mut resolver_now = self.resolver().detected_frameworks();
+        resolver_now.sort();
+        if now != resolver_now {
+            self.resolver().initialize();
+        }
+        let Some(at_index) = self.store.get_metadata(FRAMEWORKS_AT_INDEX_KEY).ok().flatten().and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok()) else {
+            return; // indexed before this was recorded: nothing to compare with
+        };
+        let added: Vec<&String> = now.iter().filter(|n| !at_index.contains(n)).collect();
+        let removed: Vec<&String> = at_index.iter().filter(|n| !now.contains(n)).collect();
+        let value = if added.is_empty() && removed.is_empty() { String::new() } else { serde_json::json!({ "added": added, "removed": removed }).to_string() };
+        if self.store.get_metadata(FRAMEWORKS_SINCE_INDEX_KEY).ok().flatten().unwrap_or_default() != value {
+            let _ = self.store.set_metadata(FRAMEWORKS_SINCE_INDEX_KEY, &value);
+        }
     }
 
     /// Resolve every pending reference in batches (memory-bounded), then synthesize.
@@ -754,6 +822,12 @@ impl CodeGraph {
             };
             self.orchestrator.sync(reborrow(on_progress), scoped, None, Some(&mut on_file_change))?
         };
+
+        // Frameworks detected again because what detection read changed: the passes below use the
+        // new set (#2516).
+        if let Some(detected) = &result.detected_frameworks {
+            self.follow_detected_frameworks(detected);
+        }
 
         // A component a tag in an unchanged file may render: `<Team />` links to the `Team` this
         // sync adds. Removing one needs no check: a component a tag rendered had synthesized edges
@@ -1184,9 +1258,32 @@ impl CodeGraph {
         if self.indexing.get() || self.file_lock.borrow_mut().acquire().is_err() {
             return false; // an index/sync is running — it backfills the vocab itself
         }
-        let healed = if self.store.is_name_segment_vocab_empty().unwrap_or(false) { self.rebuild_name_segment_vocab().is_ok() } else { true };
+        let healed = if self.store.is_read_only() {
+            // A read-only instance leaves every write to a writer. This one is opened only now
+            // that this process holds the index lock, which every index and sync holds while it
+            // writes, so its repairs on open cannot land inside a running bulk load.
+            match CodeGraph::open(&self.project_root, OpenOptions::default()) {
+                Ok(writer) => {
+                    let healed = !writer.store.is_name_segment_vocab_empty().unwrap_or(false) || writer.rebuild_name_segment_vocab().is_ok();
+                    writer.close();
+                    healed
+                }
+                Err(_) => false,
+            }
+        } else if self.store.is_name_segment_vocab_empty().unwrap_or(false) {
+            self.rebuild_name_segment_vocab().is_ok()
+        } else {
+            true
+        };
         self.file_lock.borrow_mut().release();
         healed
+    }
+
+    /// Whether another live process is rebuilding this index: a full index marks the index state
+    /// `indexing` and holds the index lock until it ends. A read command that finds this should say
+    /// its answer may be incomplete, and skip the advice meant for an index at rest.
+    pub fn is_rebuild_in_progress(&self) -> bool {
+        self.get_index_state() == Some(IndexState::Indexing) && self.file_lock.borrow().held_by_another()
     }
 
     // ===========================================================================
@@ -1244,6 +1341,26 @@ impl CodeGraph {
     }
 
     /// Re-initialize the resolver (useful after adding new files).
+    /// The frameworks a sync detected since the last full index, against the ones that index
+    /// extracted every file with. `None` when nothing changed, or for an index built before this
+    /// was recorded.
+    pub fn get_framework_changes_since_index(&self) -> Option<FrameworkChanges> {
+        let value = self.store().get_metadata(FRAMEWORKS_SINCE_INDEX_KEY).ok().flatten().filter(|v| !v.is_empty())?;
+        let parsed: serde_json::Value = serde_json::from_str(&value).ok()?;
+        let names = |key: &str| -> Vec<String> {
+            parsed.get(key).and_then(|l| l.as_array()).map(|l| l.iter().filter_map(|n| n.as_str().map(String::from)).collect()).unwrap_or_default()
+        };
+        let changes = FrameworkChanges { added: names("added"), removed: names("removed") };
+        (!changes.added.is_empty() || !changes.removed.is_empty()).then_some(changes)
+    }
+
+    /// `(runs, scans)` of framework detection in this instance: a test seam for "detected once,
+    /// and without walking the project".
+    #[doc(hidden)]
+    pub fn framework_detection_stats(&self) -> (usize, usize) {
+        self.orchestrator.detection_stats()
+    }
+
     pub fn reinitialize_resolver(&self) {
         self.resolver().initialize();
     }

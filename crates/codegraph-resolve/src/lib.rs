@@ -10,6 +10,7 @@ pub mod cpp_raw_strings;
 pub mod cpp_supertypes;
 pub mod cpp_type_aliases;
 pub mod ctx;
+pub mod detection_inputs;
 pub mod go_module;
 pub mod import_resolver;
 pub mod name_matcher;

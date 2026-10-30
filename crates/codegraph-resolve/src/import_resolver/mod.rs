@@ -76,11 +76,6 @@ pub fn is_esm_import_language(language: Language) -> bool {
     )
 }
 
-/// Rust path roots that always name a standard-library crate.
-pub fn is_rust_stdlib_root(name: &str) -> bool {
-    matches!(name, "std" | "core" | "alloc" | "proc_macro")
-}
-
 pub fn is_nix_path_import_ref(r: &UnresolvedRef) -> bool {
     r.language == Language::Nix
         && r.is_kind(EdgeKind::Imports)

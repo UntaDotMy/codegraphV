@@ -3,8 +3,8 @@
 //! comes from and the symbol that module exports.
 
 use super::{
-    collect_rust_use_bindings, find_exported_symbol, is_cobol_copybook_ref, is_dart_import_ref, is_esm_import_language, is_external_import,
-    is_nix_path_import_ref, is_php_include_path_ref, is_rust_stdlib_root, lua_basename_index, names_own_config_module, resolve_import_path,
+    find_exported_symbol, is_cobol_copybook_ref, is_dart_import_ref, is_esm_import_language, is_external_import,
+    is_nix_path_import_ref, is_php_include_path_ref, lua_basename_index, names_own_config_module, resolve_import_path,
     resolve_php_include_path, resolve_static_member, ExternalOpts, Want, REEXPORT_MAX_DEPTH,
 };
 use crate::ambient_modules::{
@@ -17,7 +17,7 @@ use crate::name_matcher::infer::{array_element_type, infer_local_receiver_type, 
 use crate::name_matcher::js_imports::re_export_source;
 use crate::name_matcher::match_by_file_path;
 use crate::name_matcher::object_literal::{resolve_object_literal_binding, resolve_object_literal_member};
-use crate::name_matcher::{go_ref_qualifier, is_rust_associated_item};
+use crate::name_matcher::{go_ref_qualifier, is_rust_name_from_std, rust_path_target};
 use crate::name_matcher::python::python_function_module_alias;
 use crate::name_matcher::reach::{is_ts_js_file, ts_global_scope};
 use crate::name_matcher::resolve_method_on_type;
@@ -803,113 +803,15 @@ fn resolve_imported_instance_member(value: &Node, r: &UnresolvedRef, local_name:
 
 // -- Rust ------------------------------------------------------------------------------------
 
-fn rust_crate_root_dir(from_file: &str, ctx: &Ctx) -> Option<String> {
-    let mut dir = posix::dirname(from_file);
-    if dir == "." {
-        dir = String::new();
-    }
-    for _ in 0..64 {
-        let lib = posix::join(&[&dir, "lib.rs"]);
-        let main = posix::join(&[&dir, "main.rs"]);
-        if ctx.file_exists(&lib) || ctx.file_exists(&main) {
-            return Some(dir);
-        }
-        if dir.is_empty() {
-            return None;
-        }
-        let parent = posix::dirname(&dir);
-        dir = if parent == "." { String::new() } else { parent };
-    }
-    None
-}
-
-fn rust_self_module_dir(from_file: &str) -> String {
-    let base = posix::basename(from_file);
-    let dir = posix::dirname(from_file);
-    let dir = if dir == "." { String::new() } else { dir };
-    if base == "mod.rs" || base == "lib.rs" || base == "main.rs" {
-        return dir;
-    }
-    posix::join(&[&dir, base.strip_suffix(".rs").unwrap_or(&base)])
-}
-
-fn resolve_rust_module_file(segments: &[String], from_file: &str, ctx: &Ctx) -> Option<String> {
-    if segments.is_empty() {
-        return None;
-    }
-    let resolve_under = |start_dir: Option<String>, rest: &[String]| -> Option<String> {
-        let mut dir = start_dir?;
-        let mut target_file: Option<String> = None;
-        for seg in rest {
-            if seg == "self" || seg == "crate" || seg == "super" {
-                continue;
-            }
-            let as_file = posix::join(&[&dir, &format!("{seg}.rs")]);
-            let as_mod = posix::join(&[&dir, seg, "mod.rs"]);
-            if ctx.file_exists(&as_file) {
-                target_file = Some(as_file);
-            } else if ctx.file_exists(&as_mod) {
-                target_file = Some(as_mod);
-            } else {
-                return None;
-            }
-            dir = posix::join(&[&dir, seg]);
-        }
-        target_file
-    };
-    let first = segments[0].as_str();
-    if first == "crate" {
-        return resolve_under(rust_crate_root_dir(from_file, ctx), &segments[1..]);
-    }
-    if first == "self" {
-        return resolve_under(Some(rust_self_module_dir(from_file)), &segments[1..]);
-    }
-    if first == "super" {
-        let supers = segments.iter().take_while(|s| *s == "super").count();
-        let mut dir: Option<String> = Some(rust_self_module_dir(from_file));
-        for _ in 0..supers {
-            dir = match dir {
-                Some(d) if !d.is_empty() => {
-                    let p = posix::dirname(&d);
-                    Some(if p == "." { String::new() } else { p })
-                }
-                _ => None,
-            };
-            if dir.is_none() {
-                break;
-            }
-        }
-        return resolve_under(dir, &segments[supers..]);
-    }
-    resolve_under(Some(rust_self_module_dir(from_file)), segments).or_else(|| resolve_under(rust_crate_root_dir(from_file, ctx), segments))
-}
-
+/// Resolve a Rust qualified reference `A::B::C` to the item module `A::B` holds by the name `C`
+/// (`rust_path_target` walks the modules as Rust does). This is the Rust analog of
+/// `resolve_python_module_member` / `resolve_go_cross_package_reference` and the precise answer to
+/// common-name re-exports (`pub use self::read::read`) that name-matching can't disambiguate.
+/// `None` when the prefix isn't a module path the project holds (e.g. `Widget::new` — `Widget` is
+/// a struct, not a module), so associated-function calls and enum-variant paths fall through
+/// untouched.
 fn resolve_rust_path_reference(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
-    let segments: Vec<String> = r.reference_name.split("::").filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
-    if segments.len() < 2 {
-        return None;
-    }
-    let leaf = &segments[segments.len() - 1];
-    let mod_segs = &segments[..segments.len() - 1];
-    let file = resolve_rust_module_file(mod_segs, &r.file_path, ctx).filter(|f| *f != r.file_path)?;
-    let in_file = ctx.get_nodes_in_file(&file);
-    let target = in_file.iter().find(|n| {
-        &n.name == leaf
-            && !is_rust_associated_item(n)
-            && matches!(
-                n.kind,
-                NodeKind::Function
-                    | NodeKind::Struct
-                    | NodeKind::Union
-                    | NodeKind::Enum
-                    | NodeKind::Trait
-                    | NodeKind::TypeAlias
-                    | NodeKind::Constant
-                    | NodeKind::Method
-                    | NodeKind::Class
-                    | NodeKind::Interface
-            )
-    })?;
+    let target = rust_path_target(r, ctx)?;
     Some(imported(r, &target.id, 0.9))
 }
 
@@ -1144,15 +1046,10 @@ pub fn is_bound_to_out_of_repo_import(r: &UnresolvedRef, ctx: &Ctx) -> bool {
     if name.contains("::") || name.contains('.') {
         return false;
     }
+    // (A 2015-edition crate-relative path can shadow a stdlib root with a local module of the
+    // same name: a `use core::…` with a `mod core;` is the crate's.)
     if r.language == Language::Rust {
-        let Some(content) = ctx.read_file(&r.file_path).filter(|c| !c.is_empty()) else { return false };
-        let bindings = collect_rust_use_bindings(&content);
-        let Some(use_path) = bindings.get(name.as_str()).filter(|p| !p.is_empty()) else { return false };
-        let segments: Vec<String> = use_path.split("::").map(|s| s.to_string()).collect();
-        if segments.len() < 2 || !is_rust_stdlib_root(&segments[0]) {
-            return false;
-        }
-        return resolve_rust_module_file(&segments[..segments.len() - 1], &r.file_path, ctx).is_none();
+        return is_rust_name_from_std(r, ctx);
     }
     if !is_esm_import_language(r.language) {
         return false;

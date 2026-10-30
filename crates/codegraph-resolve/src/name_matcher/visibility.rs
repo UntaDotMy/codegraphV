@@ -128,6 +128,23 @@ fn private_is_file_local(language: Language) -> bool {
     )
 }
 
+memo_map!(PrivateOwnerMemo, String, bool);
+
+/// Whether `candidate` is a member of a `private` type in its file: a Kotlin test's `private class
+/// Clock { fun now() = value }`. The method is public, the class is not, so nothing outside the
+/// file can name `now`. Found by line range among the file's own nodes, memoised per node.
+fn is_inside_private_type(candidate: &Node, ctx: &Ctx) -> bool {
+    memoized::<PrivateOwnerMemo>(ctx, candidate.id.clone(), || {
+        ctx.get_nodes_in_file(&candidate.file_path).iter().any(|n| {
+            n.id != candidate.id
+                && matches!(n.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Struct | NodeKind::Enum | NodeKind::Namespace)
+                && n.visibility == Some(codegraph_types::Visibility::Private)
+                && n.start_line <= candidate.start_line
+                && n.end_line >= candidate.end_line
+        })
+    })
+}
+
 /// Candidate-language visibility of `n` from where `r` is written — the PHP class, Java type, Go
 /// name, Dart extension, Scala package-object member and C# type rules of `matchByExactName`'s filter.
 pub fn is_visible_by_language(n: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
@@ -230,7 +247,11 @@ pub fn is_visible_across_files(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -
             || (r.language == Language::Dart && dart_private_visible(&r.file_path, &candidate.file_path, ctx));
     }
     if private_is_file_local(lang) {
-        return candidate.visibility != Some(codegraph_types::Visibility::Private);
+        // Only Kotlin's private type keeps its members in its file: a Scala `private[pkg] class` (or
+        // one with a private constructor) is the package's, and a C# private nested class serves
+        // every file of its partial class.
+        return candidate.visibility != Some(codegraph_types::Visibility::Private)
+            && !(lang == Language::Kotlin && is_inside_private_type(candidate, ctx));
     }
     // An R test file runs in an environment of its own (testthat); the `helper-*.R` /
     // `setup-*.R` files are sourced for every test, so theirs are shared.

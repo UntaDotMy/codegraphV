@@ -28,6 +28,35 @@ pub struct NestedRepository {
     pub rel_path: String,
 }
 
+/// The filesystem's own name for `p` (the native realpath), falling back to the lexical resolve and
+/// links-only realpath where the native call fails.
+fn native_real_path(p: &str) -> String {
+    codegraph_types::paths::real_path(Path::new(&nodepath::resolve(&[p])))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| resolved(p))
+}
+
+/// Whether two paths name one directory, however each is spelled. For comparing only: the paths
+/// this module returns keep their own spelling.
+///
+/// git answers with the on-disk spelling, while callers hand in theirs: an editor passes a
+/// lowercase drive letter, NTFS ignores case, a `subst` drive is a second name for a folder. Compared
+/// as strings one directory looked like two, so a linked worktree spelled unlike git lost the
+/// borrowed-index warning and was refused as a repository of its own (upstream #2937). The identity
+/// is `canonical_project_root`'s: the native realpath, lowercased on Windows.
+fn same_directory(a: &str, b: &str) -> bool {
+    a == b || directory_identity(a) == directory_identity(b)
+}
+
+fn directory_identity(p: &str) -> String {
+    let real = native_real_path(p);
+    if cfg!(windows) {
+        real.to_lowercase()
+    } else {
+        real
+    }
+}
+
 /// The directory holding the `.git` (directory or worktree file) nearest at or above `dir`.
 fn nearest_git_root(dir: &str) -> Option<String> {
     let mut cur = nodepath::resolve(&[dir]);
@@ -50,19 +79,26 @@ pub fn detect_worktree_index_mismatch(start: &str, index: &str) -> Option<Worktr
     if std::env::var_os("GIT_DIR").is_none() {
         match nearest_git_root(start) {
             None => return None,
-            Some(root) if resolved(&root) == resolved(index) => return None,
+            Some(root) if same_directory(&root, index) => return None,
             Some(_) => {}
         }
     }
     let worktree_root = git_worktree_root(start)?;
     let index_root = resolved(index);
-    if worktree_root == index_root || git_worktree_root(&index_root).as_ref() != Some(&index_root) {
+    if same_directory(&worktree_root, &index_root) {
         return None;
     }
-    let worktree_common = git_common_dir(&worktree_root);
-    let index_common = git_common_dir(&index_root);
-    if worktree_common.is_some() && index_common.is_some() && worktree_common != index_common {
+    // Only a real working-tree root counts: "borrowed another worktree's index" is not "index sits
+    // in a plain ancestor directory".
+    if !git_worktree_root(&index_root).is_some_and(|r| same_directory(&r, &index_root)) {
         return None;
+    }
+    if let (Some(worktree_common), Some(index_common)) =
+        (git_common_dir(&worktree_root), git_common_dir(&index_root))
+    {
+        if !same_directory(&worktree_common, &index_common) {
+            return None;
+        }
     }
     Some(WorktreeIndexMismatch {
         worktree_root,
@@ -80,12 +116,7 @@ pub fn nested_repository_below(start: &str, index: &str) -> Option<NestedReposit
         dir = up;
     }
     let root = git_worktree_root(&dir)?;
-    let native = |p: &str| {
-        codegraph_types::paths::real_path(Path::new(&nodepath::resolve(&[p])))
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| resolved(p))
-    };
-    let rel = nodepath::relative(&native(index), &native(&root));
+    let rel = nodepath::relative(&native_real_path(index), &native_real_path(&root));
     if rel.is_empty()
         || rel == ".."
         || rel.starts_with(&format!("..{}", nodepath::SEP))
@@ -94,7 +125,8 @@ pub fn nested_repository_below(start: &str, index: &str) -> Option<NestedReposit
         return None;
     }
     let common = git_common_dir(&root)?;
-    if Some(common) == git_common_dir(&resolved(index)) {
+    // An index root outside git has no repository of its own, so what is below it is still reported.
+    if git_common_dir(&resolved(index)).is_some_and(|index_common| same_directory(&common, &index_common)) {
         return None;
     }
     Some(NestedRepository {

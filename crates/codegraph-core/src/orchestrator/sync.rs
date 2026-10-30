@@ -268,6 +268,21 @@ impl ExtractionOrchestrator {
             state.pairs_before.extend(self.store.get_node_name_pairs_by_files(&files_to_index)?);
         }
 
+        // The frameworks every file below is extracted with, current (#2516).
+        if !added_file_paths.is_empty() || !state.removed_file_paths.is_empty() {
+            self.detection_file_list_changed.set(true);
+        }
+        let t_detect = Instant::now();
+        let detected_frameworks = if files_to_index.is_empty() {
+            None
+        } else {
+            let scanned = if scoped_paths.is_some_and(|p| !p.is_empty()) { None } else { Some(current_files.as_slice()) };
+            self.refresh_framework_detection(scanned, &files_to_index, &added_file_paths)
+        };
+        if timings && !files_to_index.is_empty() {
+            eprintln!("[phase-timing] sync-framework-detect: {}ms ({})", t_detect.elapsed().as_millis(), if detected_frameworks.is_some() { "detected again" } else { "unchanged" });
+        }
+
         // Index changed files
         let total = files_to_index.len();
         for (i, file_path) in files_to_index.iter().enumerate() {
@@ -320,6 +335,7 @@ impl ExtractionOrchestrator {
             failed_file_paths: non_empty(failed_file_paths),
             definition_delta: non_empty(delta_names.into_iter().collect()),
             removed_file_paths: non_empty(state.removed_file_paths),
+            detected_frameworks,
             ..SyncResult::default()
         })
     }

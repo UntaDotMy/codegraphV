@@ -126,9 +126,52 @@ fn parse_workspace_members(cargo_toml: &str) -> Vec<String> {
     extract_quoted_values(&members)
 }
 
-fn parse_package_name(cargo_toml: &str) -> Option<String> {
+/// A manifest's `[package]` name, wherever the section writes it (after a `categories = [...]` too).
+pub fn parse_package_name(cargo_toml: &str) -> Option<String> {
     let package = get_section(cargo_toml, "package").filter(|s| !s.is_empty())?;
     re!(r#"name\s*=\s*["']([^"'\n]+)["']"#).captures(&package).and_then(|c| c.text(1)).map(|s| js_trim(s).to_string())
+}
+
+/// The target roots a manifest names with a `path` of its own, as written (relative to the
+/// manifest's directory): `[lib] path = "…"` and each `[[bin]] path = "…"` (ripgrep's
+/// `crates/core/main.rs`).
+#[derive(Debug, Default)]
+pub struct TargetPaths {
+    pub lib: Option<String>,
+    pub bins: Vec<String>,
+}
+
+pub fn parse_target_paths(cargo_toml: &str) -> TargetPaths {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Table {
+        None,
+        Lib,
+        Bin,
+    }
+    let mut out = TargetPaths::default();
+    let mut table = Table::None;
+    for raw in cargo_toml.split('\n') {
+        let line = js_trim(raw.split('#').next().unwrap_or(""));
+        if line.starts_with('[') {
+            table = match line {
+                "[lib]" => Table::Lib,
+                "[[bin]]" => Table::Bin,
+                _ => Table::None,
+            };
+            continue;
+        }
+        if table == Table::None {
+            continue;
+        }
+        let at = re!(r#"^path\s*=\s*["']([^"'\n]+)["']"#).captures(line).and_then(|c| c.text(1).map(|s| s.replace('\\', "/")));
+        let Some(at) = at.filter(|s| !s.is_empty()) else { continue };
+        if table == Table::Lib {
+            out.lib = Some(at);
+        } else {
+            out.bins.push(at);
+        }
+    }
+    out
 }
 
 fn add_crate_alias(map: &mut IndexMap<String, String>, crate_name: &str, member_path: &str) {

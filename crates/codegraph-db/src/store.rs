@@ -1059,11 +1059,23 @@ impl Store {
 
     // -- Name-segment vocabulary (prompt-hook graph-derived gate) -----------
 
-    /// Wipe the segment vocabulary. A full index calls this at its start; the
-    /// node write path repopulates it as files (re-)index, so the end state is
-    /// exactly the current names with no orphan rows.
+    /// Wipe the segment vocabulary. A full index of a fresh database calls this
+    /// at its start; the node write path repopulates it as files index, so the
+    /// end state is exactly the current names with no orphan rows.
     pub fn clear_name_segment_vocab(&self) -> Result<()> {
         self.conn.execute_batch("DELETE FROM name_segment_vocab")?;
+        self.segmented_names.borrow_mut().clear();
+        Ok(())
+    }
+
+    /// Drop the rows of names that no symbol carries any more, deleted or renamed since they were
+    /// written (file and import nodes don't count, as on the write path). A full index over an
+    /// existing graph calls this once it has stored everything, instead of clearing the table up
+    /// front: it never rewrites the names of its unchanged files, so a clear lost those until a
+    /// rebuild (#2252). The session's set of names already written goes too, so a dropped name
+    /// that comes back later is written again rather than skipped as already seen.
+    pub fn prune_name_segment_vocab(&self) -> Result<()> {
+        self.conn.execute_batch("DELETE FROM name_segment_vocab WHERE name NOT IN (SELECT name FROM nodes WHERE kind NOT IN ('file', 'import'))")?;
         self.segmented_names.borrow_mut().clear();
         Ok(())
     }

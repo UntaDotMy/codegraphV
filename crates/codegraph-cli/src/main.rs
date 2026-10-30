@@ -319,6 +319,21 @@ fn open(project: &Project) -> Result<CodeGraph> {
         OpenOptions::default(),
     )?)
 }
+/// Said on stderr by a read command that finds another process rebuilding the index, so a `--json`
+/// answer stays parseable.
+const REBUILD_NOTE: &str = "A rebuild of this index is in progress (another codegraphV process is indexing); answers may be incomplete until it finishes.";
+
+/// Open the index for a command that only reads it. Migrations, bulk-load repair and WAL
+/// maintenance are the writer's: a read-write open during a full index recreates the indexes the
+/// indexer dropped for its bulk load, and the indexer's next write then fails with "database is
+/// locked" (upstream 01873666, 475e56b2). `announce` says on stderr when another process is rebuilding.
+fn open_read_only(project: &Project, announce: bool) -> Result<CodeGraph> {
+    let cg = CodeGraph::open(&root(project.path.as_deref())?, OpenOptions { read_only: true, ..OpenOptions::default() })?;
+    if announce && cg.is_rebuild_in_progress() {
+        eprintln!("{REBUILD_NOTE}");
+    }
+    Ok(cg)
+}
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -327,7 +342,11 @@ fn tool(project: Project, name: &str, args: Value) -> Result<()> {
     let path = root(project.path.as_deref())?;
     let mut handler = ToolHandler::new(Some(path), false);
     handler.catch_up = false; // one-shot: answer from the index as it is (BUG-99)
+    handler.read_only = true;
     let result = handler.call(name, &args);
+    if handler.rebuild_in_progress() {
+        eprintln!("{REBUILD_NOTE}");
+    }
     if result.is_error {
         return Err(result.message().into());
     }
@@ -452,12 +471,24 @@ fn run() -> Result<()> {
                     );
                 }
             } else {
-                let cg = open(&Project { path: Some(path) })?;
+                let cg = open_read_only(&Project { path: Some(path) }, false)?;
                 let status = render::status(&cg)?;
                 if as_json {
                     print_json(&status)?;
                 } else {
                     println!("Project: {}\nFiles: {}\nSymbols: {}\nEdges: {}\nBackend: {}\nIndex state: {}",cg.project_root(),status["fileCount"],status["nodeCount"],status["edgeCount"],status["backend"],status["index"]["state"]);
+                    if status["rebuildInProgress"] == true {
+                        println!("\n{REBUILD_NOTE}");
+                    }
+                    if let Some(changes) = cg.get_framework_changes_since_index().filter(|_| status["rebuildInProgress"] != true) {
+                        let changed = [("added", &changes.added), ("removed", &changes.removed)]
+                            .iter()
+                            .filter(|(_, names)| !names.is_empty())
+                            .map(|(what, names)| format!("{what} {}", names.join(", ")))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        println!("\nFrameworks changed since the last full index ({changed}); files indexed before then were read without the change.\nRun `codegraphV index` to re-index every file with them.");
+                    }
                 }
                 cg.close();
             }
@@ -469,7 +500,7 @@ fn run() -> Result<()> {
             kind,
             json: as_json,
         } => {
-            let cg = open(&project)?;
+            let cg = open_read_only(&project, true)?;
             let results = cg.search_nodes(
                 &search,
                 &SearchOptions {
@@ -560,7 +591,7 @@ fn run() -> Result<()> {
         } => {
             let args = json!({"path":filter,"pattern":pattern,"format":format,"maxDepth":max_depth,"includeMetadata":!no_metadata});
             if as_json {
-                let cg = open(&project)?;
+                let cg = open_read_only(&project, true)?;
                 let files = wire::files(&cg, filter.as_deref(), pattern.as_deref())?;
                 print_json(&wire::file_json(&files))?;
                 cg.close();
@@ -578,7 +609,7 @@ fn run() -> Result<()> {
             json: as_json,
         } => {
             let args = json!({"symbol":symbol,"file":file,"depth":depth});
-            let cg = open(&project)?;
+            let cg = open_read_only(&project, true)?;
             if as_json {
                 print_json(&wire::impact(&cg, &args)?)?;
             } else {
@@ -593,7 +624,7 @@ fn run() -> Result<()> {
             max_nodes,
             no_code,
         } => {
-            let cg = open(&project)?;
+            let cg = open_read_only(&project, true)?;
             let result = cg.build_context(
                 &TaskInput::Text(task.join(" ")),
                 &BuildContextOptions {
@@ -622,7 +653,7 @@ fn run() -> Result<()> {
             json: as_json,
             quiet,
         } => {
-            let cg = open(&project)?;
+            let cg = open_read_only(&project, true)?;
             if stdin {
                 let mut input = String::new();
                 io::stdin().read_to_string(&mut input)?;
@@ -686,6 +717,14 @@ fn run() -> Result<()> {
             }
         }
         Command::DaemonServer { path, idle_timeout } => {
+            // A launcher never starts a daemon for a sensitive folder (see `Serve`). One started
+            // by hand for such a folder leaves rather than take the folder's locks and serve it.
+            if let Some(refusal) = codegraph_core::utils::sensitive_directory_refusal(&path)
+                .or_else(|| directory::resolve_server_root(&path, true).refusal)
+            {
+                eprintln!("[CodeGraphV daemon] {refusal}; exiting.");
+                return Ok(());
+            }
             let stop = Arc::new(AtomicBool::new(false));
             let signal = stop.clone();
             ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
@@ -744,7 +783,16 @@ fn run() -> Result<()> {
                     "The viewer is not released yet. Set CODEGRAPHV_UI=1 to use the preview.".into(),
                 );
             }
+            // Sensitive-directory refusal before anything opens: the guard the MCP entry points
+            // use, so `codegraphV ui ~/.ssh` (or a link to it) is turned away here rather than
+            // becoming a browsable view of it.
+            if let Some(reason) = codegraph_core::utils::validate_project_path(&nodepath::resolve(&[&path])) {
+                return Err(reason.into());
+            }
             let root = root(Some(&path))?;
+            if let Some(reason) = codegraph_core::utils::validate_project_path(&root) {
+                return Err(reason.into());
+            }
             let viewer = codegraph_ui_server::server::viewer_directory()?;
             let stop = Arc::new(AtomicBool::new(false));
             let signal = stop.clone();
@@ -898,7 +946,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 fn symbol_command(s: Symbol, callers: bool) -> Result<()> {
-    let cg = open(&s.project)?;
+    let cg = open_read_only(&s.project, true)?;
     let args = json!({"symbol":s.symbol,"file":s.file,"limit":s.limit});
     if s.json {
         print_json(&wire::relations(&cg, &args, callers)?)?;

@@ -3,8 +3,16 @@
 //! (`Mutex`, `processInBatches`, `debounce` and the memory monitor exist for the JavaScript event
 //! loop; Rust has `std::sync` and plain loops for them.)
 
-use codegraph_types::nodepath;
-use std::path::PathBuf;
+use codegraph_types::{
+    nodepath,
+    paths::{home_dir, is_same_or_under},
+};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 /// Sensitive system directories that should never be used as project roots. Checked on all
 /// platforms; non-applicable paths are harmlessly skipped.
@@ -26,7 +34,7 @@ pub fn is_config_leaf_node(kind: &str, language: Option<&str>) -> bool {
     kind == "constant" && language.is_some_and(|l| CONFIG_LEAF_LANGUAGES.contains(&l))
 }
 
-pub use codegraph_types::paths::{real_path, validate_path_within_root, ValidateOptions};
+pub use codegraph_types::paths::{is_missing_path_error, real_path, validate_path_within_root, ValidateOptions};
 
 /// Validate that a path is a safe project root directory.
 ///
@@ -34,29 +42,166 @@ pub use codegraph_types::paths::{real_path, validate_path_within_root, ValidateO
 /// at MCP and API entry points to prevent arbitrary directory access. Returns an error message if
 /// invalid, or `None` if valid.
 pub fn validate_project_path(dir_path: &str) -> Option<String> {
-    let resolved = nodepath::resolve(&[dir_path]);
-
-    // Block sensitive system directories.
-    if SENSITIVE_PATHS.contains(&resolved.as_str()) || SENSITIVE_PATHS.contains(&resolved.to_lowercase().as_str()) {
-        return Some(format!("Refusing to operate on sensitive system directory: {resolved}"));
-    }
-
-    // Also block common sensitive home subdirectories.
-    if let Some(home) = codegraph_types::paths::home_dir() {
-        for dir in [".ssh", ".gnupg", ".aws", ".config"] {
-            let sensitive = home.join(dir).to_string_lossy().into_owned();
-            if resolved == sensitive || resolved.starts_with(&format!("{sensitive}{}", nodepath::SEP)) {
-                return Some(format!("Refusing to operate on sensitive directory: {resolved}"));
-            }
-        }
+    if let Some(refusal) = sensitive_directory_refusal(dir_path) {
+        return Some(refusal);
     }
 
     // Verify it's a real directory.
+    let resolved = nodepath::resolve(&[dir_path]);
     match std::fs::metadata(&resolved) {
         Ok(m) if !m.is_dir() => Some(format!("Path is not a directory: {resolved}")),
         Ok(_) => None,
         Err(_) => Some(format!("Path does not exist or is not accessible: {resolved}")),
     }
+}
+
+/// The sensitive-folder half of [`validate_project_path`]: why `dir_path` is, or is inside, a
+/// folder CodeGraph never uses as a project, or `None`. Unlike that function it doesn't require
+/// the path to exist or be a directory, so it can vet a path a project root is searched for from.
+///
+/// The path is checked both as spelled and as the folder it really names, so a link to `~/.ssh`,
+/// a case variant (`~/.SSH`) or a `\\?\` spelling is refused like the folder itself (#1930). It is
+/// kept to one real-path lookup per call, since the viewer calls this for every file it reads:
+/// the sensitive folders' own real paths are cached and re-read every couple of seconds.
+pub fn sensitive_directory_refusal(dir_path: &str) -> Option<String> {
+    let resolved = nodepath::resolve(&[dir_path]);
+    let lexical = nodepath::resolve(&[&strip_win32_namespace_prefix(dir_path)]);
+    let mut candidates = vec![lexical.clone()];
+    if let Some(real) = native_real_path(&lexical).filter(|real| *real != lexical) {
+        candidates.push(real);
+    }
+    let named = |candidate: &str| if candidate == resolved { resolved.clone() } else { format!("{resolved} (resolves to {candidate})") };
+
+    // Block sensitive system directories.
+    let system_paths = sensitive_system_paths();
+    for candidate in &candidates {
+        if SENSITIVE_PATHS.contains(&candidate.as_str())
+            || SENSITIVE_PATHS.contains(&candidate.to_lowercase().as_str())
+            || system_paths.contains(&fold_path_case(candidate))
+        {
+            return Some(format!("Refusing to operate on sensitive system directory: {}", named(candidate)));
+        }
+    }
+
+    // Also block common sensitive home subdirectories.
+    let home_trees = sensitive_home_trees();
+    for candidate in &candidates {
+        let folded = fold_path_case(candidate);
+        if home_trees.iter().any(|tree| is_same_or_under(&folded, tree)) {
+            return Some(format!("Refusing to operate on sensitive directory: {}", named(candidate)));
+        }
+    }
+
+    None
+}
+
+/// Credential and config folders in the home directory. Unlike the system set, everything under
+/// them is refused too.
+const SENSITIVE_HOME_DIRS: [&str; 4] = [".ssh", ".gnupg", ".aws", ".config"];
+
+/// How long the real paths of the sensitive home folders are reused. The viewer re-checks its root
+/// on every file it reads, so they are not re-read per check, but a folder linked somewhere new
+/// while the process runs is noticed soon.
+const SENSITIVE_HOME_TTL: Duration = Duration::from_secs(2);
+
+struct SensitiveHome {
+    home: PathBuf,
+    expires: Instant,
+    trees: Vec<String>,
+}
+
+static SENSITIVE_HOME_CACHE: Mutex<Option<SensitiveHome>> = Mutex::new(None);
+static SENSITIVE_SYSTEM_REAL_PATHS: OnceLock<HashSet<String>> = OnceLock::new();
+
+/// A path in the form the sensitive-folder check compares: lower-cased where the file system
+/// ignores case by default (NTFS, APFS), so `~/.SSH` is `~/.ssh`.
+fn fold_path_case(p: &str) -> String {
+    if cfg!(any(windows, target_os = "macos")) {
+        p.to_lowercase()
+    } else {
+        p.to_string()
+    }
+}
+
+/// The plain spelling of a Win32 namespace path: `\\?\C:\x` and `\\.\C:\x` are `C:\x`, and
+/// `\\?\UNC\host\share` is `\\host\share`. Path resolution keeps the prefix, so a string
+/// comparison would never see the folder behind it. Other namespace paths (a `\\?\Volume{…}\`
+/// name, a device) are returned unchanged; the real path the caller also checks names their
+/// folder.
+fn strip_win32_namespace_prefix(p: &str) -> String {
+    if !cfg!(windows) {
+        return p.to_string();
+    }
+    let bytes = p.as_bytes();
+    let separator = |b: u8| b == b'\\' || b == b'/';
+    if bytes.len() < 4 || !separator(bytes[0]) || !separator(bytes[1]) || !matches!(bytes[2], b'?' | b'.') || !separator(bytes[3]) {
+        return p.to_string();
+    }
+    let rest = &p[4..];
+    let rest_bytes = rest.as_bytes();
+    if rest_bytes.len() >= 4 && rest_bytes[..3].eq_ignore_ascii_case(b"UNC") && separator(rest_bytes[3]) {
+        return format!(r"\\{}", &rest[4..]);
+    }
+    if rest_bytes.len() >= 3 && rest_bytes[0].is_ascii_alphabetic() && rest_bytes[1] == b':' && separator(rest_bytes[2]) {
+        return rest.to_string();
+    }
+    p.to_string()
+}
+
+/// The folder a path really names: links (symlinks, junctions, a `subst` drive) followed, and the
+/// case and long names stored on disk. `None` when it can't be resolved, most often because it
+/// doesn't exist; the lexical check still runs.
+fn native_real_path(p: &str) -> Option<String> {
+    real_path(Path::new(p)).ok().map(|real| real.to_string_lossy().into_owned())
+}
+
+/// The system set's own real paths, folded. macOS keeps `/etc`, `/tmp` and `/var` under
+/// `/private`, so a project whose real path is `/private/etc` is `/etc`. Read once: these folders
+/// don't move.
+fn sensitive_system_paths() -> &'static HashSet<String> {
+    SENSITIVE_SYSTEM_REAL_PATHS.get_or_init(|| {
+        SENSITIVE_PATHS
+            .iter()
+            // Only this platform's entries: on Windows `/` would resolve to the root of the
+            // current drive and refuse every project at a drive root.
+            .filter(|entry| if cfg!(windows) { entry.as_bytes().get(1) == Some(&b':') } else { entry.starts_with('/') })
+            .filter_map(|entry| native_real_path(entry))
+            .map(|real| fold_path_case(&real))
+            .collect()
+    })
+}
+
+/// The sensitive home folders, folded: as spelled under the home directory, under the home's real
+/// path (a linked home), and each folder's own real path (a `~/.ssh` that is itself a link into a
+/// dotfiles checkout).
+fn sensitive_home_trees() -> Vec<String> {
+    let Some(home) = home_dir() else { return Vec::new() };
+    let now = Instant::now();
+    let mut cache = SENSITIVE_HOME_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = cache.as_ref().filter(|cached| cached.home == home && now < cached.expires) {
+        return cached.trees.clone();
+    }
+    let home_text = home.to_string_lossy().into_owned();
+    let real_home = native_real_path(&home_text);
+    let mut trees: Vec<String> = Vec::new();
+    let mut add = |tree: String| {
+        let tree = fold_path_case(&tree);
+        if !trees.contains(&tree) {
+            trees.push(tree);
+        }
+    };
+    for dir in SENSITIVE_HOME_DIRS {
+        let spelled = nodepath::join(&[&home_text, dir]);
+        if let Some(real_home) = &real_home {
+            add(nodepath::join(&[real_home, dir]));
+        }
+        if let Some(real) = native_real_path(&spelled) {
+            add(real);
+        }
+        add(spelled);
+    }
+    *cache = Some(SensitiveHome { home, expires: now + SENSITIVE_HOME_TTL, trees: trees.clone() });
+    trees
 }
 
 /// Safely parse JSON with a fallback value. Prevents crashes from corrupted database metadata.
@@ -174,6 +319,15 @@ impl FileLock {
             )),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Whether another live process holds the lock right now: the lock file names a live PID that
+    /// is not this process's. A dead PID's leftover file is not a holder.
+    pub fn held_by_another(&self) -> bool {
+        std::fs::read_to_string(&self.lock_path)
+            .ok()
+            .and_then(|content| parse_int_prefix(content.trim()))
+            .is_some_and(|pid| pid != std::process::id() && is_process_alive(pid))
     }
 
     /// Release the lock (only if we still own it).

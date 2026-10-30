@@ -54,6 +54,39 @@ fn explicit_file_keeps_its_definition_ahead_of_other_overloads() {
 }
 
 #[test]
+fn exact_source_ranges_keep_source_without_repeating_relationship_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("target.ts"), "export function target() { return 42; }\n").unwrap();
+    std::fs::write(dir.path().join("caller.ts"), "import { target } from './target';\nexport function caller() { return target(); }\n").unwrap();
+    let cg = codegraph_core::CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
+    let mut shown = HashMap::new();
+    let whole = explore(&cg, &json!({"query":"target.ts"}), &mut shown).unwrap().message();
+    assert!(whole.contains("Used by") && whole.contains("caller.ts"), "{whole}");
+    let range = explore(&cg, &json!({"query":"target.ts:1-1"}), &mut shown).unwrap().message();
+    assert!(range.contains("     1\texport function target() { return 42; }"), "{range}");
+    assert!(!range.contains("Used by"), "{range}");
+    assert!(range.len() < whole.len(), "{range}");
+    cg.close();
+}
+
+#[test]
+fn unresolved_file_paths_are_reported_before_other_matching_source() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("actual.rs"), "pub fn target() -> u32 { 42 }\n").unwrap();
+    let cg = codegraph_core::CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
+    for query in ["absent/deep/file.rs target", "absent/deep/file.rs"] {
+        let result = explore(&cg, &json!({"query":query}), &mut HashMap::new()).unwrap();
+        assert!(!result.is_error);
+        let text = result.message();
+        assert!(text.contains("No indexed file matches requested path(s): `absent/deep/file.rs`"), "{text}");
+        if query.ends_with(" target") {
+            assert!(text.contains("pub fn target() -> u32 { 42 }"), "{text}");
+        }
+    }
+    cg.close();
+}
+
+#[test]
 fn continued_source_is_verbatim_and_edits_replace_old_dedup_state() {
     let dir = tempfile::tempdir().unwrap();
     let source = format!(

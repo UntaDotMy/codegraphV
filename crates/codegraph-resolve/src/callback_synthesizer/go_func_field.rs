@@ -262,7 +262,8 @@ fn wiring_order(a: &FieldValue, b: &FieldValue) -> std::cmp::Ordering {
     (a.test as i32)
         .cmp(&(b.test as i32))
         .then_with(|| locale_compare_numeric(&a.site, &b.site))
-        .then_with(|| crate::name_matcher::util::locale_compare(&a.target.id, &b.target.id))
+        // The last tie-break is by code unit: collation depends on the host's locale.
+        .then_with(|| a.target.id.encode_utf16().cmp(b.target.id.encode_utf16()))
 }
 
 // ── The pass ──────────────────────────────────────────────────────────────────

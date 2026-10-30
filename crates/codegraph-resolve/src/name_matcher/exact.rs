@@ -1,6 +1,7 @@
 //! The name-keyed matchers: by file path, by exact name, by qualified name and by fuzzy
 //! (case-folded) name — the core of `src/resolution/name-matcher.ts`.
 
+use super::enclosing_member::match_enclosing_scope_member;
 use super::calls::{is_bare_go_call, is_bare_js_call, is_bare_php_call, is_bare_r_call};
 use super::js_imports::{is_out_of_repo_binding, is_this_call_in_own_file, is_vue_component_method};
 use super::js_scope::is_locally_bound_js_name;
@@ -16,6 +17,7 @@ use super::util::*;
 use super::{ambiguous_name_ceiling, same_language_family};
 use crate::cpp_namespaces::cpp_macro_namespace_frames;
 use crate::ctx::Ctx;
+use crate::js_super_calls::is_js_super_call_site;
 use crate::types::{is_cpp_define_signature, is_importable_kind, is_inheritance_ref, is_supertype_target, NodeRef, ResolvedBy, ResolvedRef, UnresolvedRef};
 use codegraph_jsre::re;
 use codegraph_types::{EdgeKind, Language, NodeKind, ReferenceKind};
@@ -173,15 +175,48 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         let cross_language = candidates[0].language != r.language;
         return Some(ResolvedRef::new(r, candidates[0].id.clone(), if cross_language { 0.5 } else { 0.9 }, ResolvedBy::ExactMatch));
     }
-    if candidates.len() > ambiguous_name_ceiling() {
+    // A member of the caller's own class (or what it inherits / is nested in) is what the name
+    // means there, however far away it is declared. Not for a call written on `super`: the one in a
+    // class expression's method gets here (js-super-calls declines to place it), and its `super` is
+    // that expression's parent, never the enclosing class's (#2497).
+    let member = if is_js_super_call_site(r, ctx) { None } else { match_enclosing_scope_member(r, &candidates, ctx) };
+    // The scope names the member, not the overload: when the class declares the name more than
+    // once, the one the arguments fit, else the nearest, is chosen below — among those overloads
+    // only, so a sibling class's namesake stays out of it.
+    let overloads: Vec<NodeRef>;
+    let mut pool: &[NodeRef] = &candidates;
+    if let Some(member) = &member {
+        overloads = candidates.iter().filter(|c| c.qualified_name == member.qualified_name && c.file_path == member.file_path).cloned().collect();
+        if overloads.len() <= 1 {
+            return Some(ResolvedRef::new(r, member.id.clone(), 0.9, ResolvedBy::ExactMatch));
+        }
+        pool = &overloads;
+    }
+    if pool.len() > ambiguous_name_ceiling() {
         return None;
     }
-    let nearest = find_best_match(r, &candidates, ctx)?;
-    let best = cpp_function_overload(&nearest, &candidates, r, ctx);
+    let nearest = find_best_match(r, pool, ctx)?;
+    let best = cpp_function_overload(&nearest, pool, r, ctx);
     if is_cross_file_reachable(&best, r, ctx) {
         let proximity = compute_path_proximity(&r.file_path, &best.file_path);
+        // Every candidate is a copy of one symbol and this is the caller's own copy: the name
+        // itself is not ambiguous, only which copy — so rank it above a proximity guess, but below
+        // a unique name or the file's own definition (0.9). The candidates are those
+        // `find_best_match` weighed: a namesake in another language never wins while one in the
+        // reference's own language exists. The caller's own copy being the caller itself is no
+        // evidence, as for a same-file match.
+        let is_closest_copy = || {
+            let weighed: Vec<NodeRef> = if candidates.iter().any(|c| c.language == r.language) {
+                candidates.iter().filter(|c| c.language == r.language).cloned().collect()
+            } else {
+                candidates.clone()
+            };
+            best.id != r.from_node_id && closest_copy(r, &weighed).is_some_and(|copy| copy.id == best.id)
+        };
         let confidence = if is_decisive_same_file_match(&best, r, &candidates, ctx) {
             0.9
+        } else if is_closest_copy() {
+            0.8
         } else if proximity >= 30 {
             0.7
         } else {
