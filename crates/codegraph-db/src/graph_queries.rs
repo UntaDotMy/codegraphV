@@ -210,3 +210,16 @@ fn low_value_file(path: &str, generated: &HashSet<String>) -> bool {
         || codegraph_jsre::re!(r"(?:^|/)__test__/", "i").is_match(path)
         || codegraph_search::is_generated_file(path)
 }
+
+impl Store {
+    /// Only imports form file dependency cycles; calls and navigation are not imports.
+    pub fn get_file_import_pairs(&self) -> crate::Result<Vec<(String, String)>> {
+        let mut statement = self.conn().prepare_cached(
+            "SELECT DISTINCT sn.file_path, tn.file_path FROM edges e \
+             JOIN nodes sn ON sn.id = e.source JOIN nodes tn ON tn.id = e.target \
+             WHERE e.kind = 'imports' AND sn.file_path <> tn.file_path")?;
+        let pairs = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pairs)
+    }
+}

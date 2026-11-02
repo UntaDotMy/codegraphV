@@ -50,6 +50,7 @@ const CALLABLES: &[NodeKind] = &[NodeKind::Function, NodeKind::Method, NodeKind:
 
 pub fn extract_symbols_from_query(query: &str) -> Vec<String> {
     let mut symbols = IndexSet::new();
+    let ascii_view = codegraph_search::query_utils::blank_non_ascii_words(query);
     for (pattern, flags, minimum) in [
         (
             r"\b([A-Z][a-z]+(?:[A-Z][a-z]*)*|[a-z]+(?:[A-Z][a-z]*)+)\b",
@@ -60,7 +61,7 @@ pub fn extract_symbols_from_query(query: &str) -> Vec<String> {
         (r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b", "g", 0),
         (r"\b([A-Z]{2,})\b", "g", 0),
     ] {
-        for m in codegraph_jsre::Re::cached(pattern, flags).captures_iter(query) {
+        for m in codegraph_jsre::Re::cached(pattern, flags).captures_iter(&ascii_view) {
             if let Some(s) = m.text(1).filter(|s| utf16_len(s) >= minimum) {
                 symbols.insert(s.to_string());
             }
@@ -70,7 +71,7 @@ pub fn extract_symbols_from_query(query: &str) -> Vec<String> {
         r"\b([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\b",
         "g"
     )
-    .captures_iter(query)
+    .captures_iter(&ascii_view)
     {
         if let Some(s) = m.text(1) {
             symbols.insert(s.to_string());
@@ -79,9 +80,19 @@ pub fn extract_symbols_from_query(query: &str) -> Vec<String> {
             }
         }
     }
-    for m in re!(r"\b([a-z][a-z0-9]{2,})\b", "g").captures_iter(query) {
+    for m in re!(r"\b([a-z][a-z0-9]{2,})\b", "g").captures_iter(&ascii_view) {
         if let Some(s) = m.text(1) {
             symbols.insert(s.to_string());
+        }
+    }
+    use codegraph_search::query_utils::{split_at_cjk_switches, meets_query_word_floor};
+    for capture in re!(r"[\p{L}\p{N}\p{M}_$]+", "gu").captures_iter(query) {
+        let run = capture.text(0).unwrap();
+        if run.is_ascii() { continue; }
+        let words: Vec<_> = run.split(['_', '$']).flat_map(split_at_cjk_switches).collect();
+        if words.len() > 1 && meets_query_word_floor(run) { symbols.insert(run.to_owned()); }
+        for word in words {
+            if !word.is_ascii() && meets_query_word_floor(word) { symbols.insert(word.to_owned()); }
         }
     }
     const COMMON: &str = "the and for with from this that have been will would could should does done make made use used using work works find found show call called calling get set add all any how what when where which who why not but are was were has had its can did may also into than then them each other some such only same about after before between through during without again further once here there both just more most very being having doing system need needs want wants like look change changes changed changing layer handle handles handling incoming outgoing data flow flows level levels request requests response responses implement implements implementation interface interfaces class classes method methods trigger triggers affected affect affects else code failing failed silently decide decides return returns returned take takes taken check checks checked create creates created read reads write writes written start starts stop stops run runs running";

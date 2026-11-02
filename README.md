@@ -9,6 +9,11 @@ Windows · macOS · Linux · MIT
 
 </div>
 
+The [November audit](docs/benchmarks/audit-2026-11-03/report.md) records retrieval,
+context-size and reliability fixes, validation results, and the exact upstream
+changes included in v0.0.9. Its upstream ledger distinguishes ported changes
+from remaining work; this is not a claim of full parity with upstream HEAD.
+
 > **Credit where it is due.** CodeGraph was designed and built by Colby McHenry
 > ([colbymchenry/codegraph](https://github.com/colbymchenry/codegraph), MIT). The ideas, the
 > graph model, the MCP tools, the language extractors and the framework resolvers are all his

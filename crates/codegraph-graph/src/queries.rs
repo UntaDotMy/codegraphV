@@ -156,45 +156,51 @@ impl<'a> GraphQueryManager<'a> {
         Ok(out)
     }
 
+    /// Strongly connected import groups, not traversal-dependent loops or call cycles.
     pub fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
-        enum Frame {
-            Enter(String),
-            Leave(String),
+        let mut forward = HashMap::<String, Vec<String>>::new();
+        let mut reverse = HashMap::<String, Vec<String>>::new();
+        let mut files = std::collections::BTreeSet::new();
+        for (source, target) in self.store.get_file_import_pairs()? {
+            files.insert(source.clone());
+            files.insert(target.clone());
+            forward.entry(source.clone()).or_default().push(target.clone());
+            reverse.entry(target).or_default().push(source);
         }
-        let mut out = Vec::new();
+        // Iterative Kosaraju: two linear walks, no recursion on deep import chains.
         let mut visited = HashSet::new();
-        let mut path = Vec::<String>::new();
-        let mut active = HashMap::new();
-        for file in self.store.get_all_files()? {
-            if visited.contains(&file.path) {
-                continue;
-            }
-            let mut stack = vec![Frame::Enter(file.path)];
-            while let Some(frame) = stack.pop() {
-                match frame {
-                    Frame::Enter(file) => {
-                        if let Some(&start) = active.get(&file) {
-                            out.push(path[start..].to_vec());
-                            continue;
-                        }
-                        if !visited.insert(file.clone()) {
-                            continue;
-                        }
-                        active.insert(file.clone(), path.len());
-                        path.push(file.clone());
-                        stack.push(Frame::Leave(file.clone()));
-                        for dep in self.get_file_dependencies(&file)?.into_iter().rev() {
-                            stack.push(Frame::Enter(dep));
-                        }
-                    }
-                    Frame::Leave(file) => {
-                        active.remove(&file);
-                        path.pop();
-                    }
+        let mut finished = Vec::new();
+        for file in files {
+            let mut stack = vec![(file, false)];
+            while let Some((file, leave)) = stack.pop() {
+                if leave { finished.push(file); continue; }
+                if !visited.insert(file.clone()) { continue; }
+                stack.push((file.clone(), true));
+                for next in forward.get(&file).into_iter().flatten() {
+                    if !visited.contains(next) { stack.push((next.clone(), false)); }
                 }
             }
         }
-        Ok(out)
+        visited.clear();
+        let mut groups = Vec::new();
+        for file in finished.into_iter().rev() {
+            if visited.contains(&file) { continue; }
+            let mut group = Vec::new();
+            let mut stack = vec![file];
+            while let Some(file) = stack.pop() {
+                if !visited.insert(file.clone()) { continue; }
+                for next in reverse.get(&file).into_iter().flatten() {
+                    if !visited.contains(next) { stack.push(next.clone()); }
+                }
+                group.push(file);
+            }
+            if group.len() > 1 {
+                group.sort_by(|a,b| a.encode_utf16().cmp(b.encode_utf16()));
+                groups.push(group);
+            }
+        }
+        groups.sort_by(|a,b| a.len().cmp(&b.len()).then_with(|| crate::type_hierarchy::locale_compare(&a[0], &b[0])));
+        Ok(groups)
     }
 
     pub fn get_node_metrics(&self, id: &str) -> Result<NodeMetrics> {

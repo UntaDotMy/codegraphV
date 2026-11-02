@@ -16,10 +16,11 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { oracleRoot } from './check-upstream.mjs';
 
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const dist = (p) => require(path.join(root, 'dist', p));
+const dist = (p) => require(path.join(oracleRoot, 'dist', p));
 
 const seg = dist('search/identifier-segments');
 const qp = dist('search/query-parser');
@@ -41,7 +42,8 @@ const sampleIdents = pick(identList, 1500);
 // Hand-picked edge cases the repo corpus can't be trusted to contain.
 const edgeIdents = ['', 'x', '42', 'HTMLParser', 'parseHTML5Doc', 'getData_getData', 'XMLHttpRequest',
   'ÜberCoolName', 'naïveBayes', 'snake_case_name', 'MAX_RETRY_COUNT', 'a.b.c', 'camelCaseWithManyHumpsInIt',
-  'İstanbul', 'straße', 'ΑΒΓ', 'user2Id', 'ID', 'iOS', 'eBay', 'base64Encode'];
+  'İstanbul', 'straße', 'ΑΒΓ', 'user2Id', 'ID', 'iOS', 'eBay', 'base64Encode',
+  '入口', '末端', '로그인', '寻路服务.计算路径', 'NavMeshAgent类型', 'get用户信息', 'état', 'на', 'из', 'ユーザー', '時々'];
 const allIdents = [...edgeIdents, ...sampleIdents];
 
 let seed = 0x2545f491;

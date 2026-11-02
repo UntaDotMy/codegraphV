@@ -7,6 +7,43 @@ fn request(session: &mut Session, id: u32, method: &str, params: Value) -> Value
         .next()
         .unwrap()
 }
+
+#[test]
+fn invalid_tool_arguments_are_protocol_errors_and_session_recovers() {
+    let mut session = Session::new(None, false);
+    request(&mut session, 1, "initialize", json!({}));
+    for args in [json!(null), json!([]), json!("query"), json!(42), json!(true)] {
+        let result = request(&mut session, 2, "tools/call", json!({"name":"codegraphV_explore", "arguments":args}));
+        assert_eq!(result["error"]["code"], -32602);
+    }
+    assert!(request(&mut session, 3, "ping", json!({}))["result"].is_object());
+}
+
+#[test]
+fn project_path_accepts_a_file_in_an_indexed_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.ts");
+    std::fs::write(&file, "export function target() { return 42; }\n").unwrap();
+    codegraph_core::CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap().close();
+    let mut handler = ToolHandler::new(None, false);
+    handler.catch_up = false;
+    let result = handler.call("codegraphV_explore", &json!({"query":"target", "projectPath":file}));
+    assert!(!result.is_error);
+    assert!(result.message().contains("return 42"), "{}", result.message());
+}
+
+#[test]
+fn file_project_path_keeps_the_sensitive_folder_refusal() {
+    let file = if cfg!(windows) { std::path::Path::new(r"C:\Windows\win.ini") }
+        else { std::path::Path::new("/etc/hosts") };
+    if !file.is_file() { return; }
+    let mut handler = ToolHandler::new(None, false);
+    let from_file = handler.call("codegraphV_explore", &json!({"query":"target", "projectPath":file}));
+    let from_dir = handler.call("codegraphV_explore", &json!({"query":"target", "projectPath":file.parent().unwrap()}));
+    assert!(from_file.is_error && from_dir.is_error);
+    assert_eq!(from_file.message(), from_dir.message());
+    assert_eq!(handler.open_project_count(), 0);
+}
 #[test]
 fn protocol_handshake_roots_and_recoverable_misses() {
     let dir = tempfile::tempdir().unwrap();

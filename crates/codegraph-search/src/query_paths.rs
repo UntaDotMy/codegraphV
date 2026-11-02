@@ -353,6 +353,10 @@ pub fn extract_query_paths(
             );
         } else if ambiguous
             || clearly_path_shaped(&normalized)
+            // A filename with an explicit line range is a source request even
+            // without a directory. Do not reinterpret a missing install.ps1:1-20
+            // as fuzzy symbol terms and dump unrelated code into the context.
+            || (lines.is_some() && dotted_basename(&normalized))
             || (normalized.contains('/')
                 && opts
                     .exists_on_disk

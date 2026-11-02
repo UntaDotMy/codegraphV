@@ -1,6 +1,44 @@
 use codegraph_db::{OpenOptions, Store};
 use codegraph_types::{Language, Node, NodeKind, SearchOptions};
 
+#[test]
+fn field_filters_precede_all_candidate_limits_and_keep_unicode_literal_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("codegraph.db");
+    let store = Store::initialize(&path).unwrap();
+    let mut rows: Vec<_> = (0..160).map(|i| Node::new(format!("n{i}"), NodeKind::Function,
+        "target", "target", format!("src/other{i}.rs"), Language::Rust, 1, 1, 0, 0, 1)).collect();
+    rows.push(Node::new("wanted", NodeKind::Function, "target", "target", "src/ÉTÉ_100%.rs", Language::Rust, 1, 1, 0, 0, 1));
+    store.insert_nodes(&rows).unwrap();
+    let opts = SearchOptions { limit: Some(1), ..Default::default() };
+    for query in ["target path:été_100%", "path:été_100% name:target", "targt path:été_100%"] {
+        let found = store.search_nodes(query, &opts).unwrap();
+        assert_eq!(found.len(), 1, "{query}");
+        assert_eq!(found[0].node.id, "wanted", "{query}");
+    }
+    assert!(store.search_nodes("target path:été_100X", &opts).unwrap().is_empty());
+    store.close().unwrap();
+    let store = Store::open(path, OpenOptions { read_only: true }).unwrap();
+    assert_eq!(store.search_nodes("target path:été", &opts).unwrap()[0].node.id, "wanted");
+    // Exercise LIKE and fuzzy with a real unavailable FTS table.
+    drop(store);
+    let store = Store::open(dir.path().join("codegraph.db"), Default::default()).unwrap();
+    store.conn().execute_batch("DROP TABLE nodes_fts").unwrap();
+    for query in ["target path:été", "targt path:été"] {
+        assert_eq!(store.search_nodes(query, &opts).unwrap()[0].node.id, "wanted");
+    }
+}
+
+#[test]
+fn pasted_call_punctuation_separates_search_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::initialize(dir.path().join("codegraph.db")).unwrap();
+    store.insert_nodes(&nodes()).unwrap();
+    let found = store.search_nodes("getUser(run)", &Default::default()).unwrap();
+    assert!(found.iter().any(|r| r.node.name == "getUser"));
+    assert!(found.iter().any(|r| r.node.name == "run"));
+}
+
 fn nodes() -> Vec<Node> {
     ["getUser", "signInWithGoogle", "run"]
         .into_iter()

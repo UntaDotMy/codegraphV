@@ -1,0 +1,726 @@
+{
+  "date": "2026-11-02T17:57:21.238Z",
+  "platform": "win32",
+  "beforeSha256": "c1716aa4db70df896ce610c3aedd703c7ad4e70b0d84480b5985b274f5060417",
+  "afterSha256": "90cf70940583fdba1bedae4eacd4c0893b033c8b7f8e7b7e8656c854c47cfbe2",
+  "queries": [
+    "entry deep leaf",
+    "entry deep leaf",
+    "flow.ts:1-3",
+    "install.ps1:1-200"
+  ],
+  "results": [
+    {
+      "files": 50,
+      "arms": {
+        "before": [
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 5.444999999999936,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.3057000000001153,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 2.733699999999999,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 11.477899999999863,
+                "chars": 168,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              }
+            ]
+          },
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 5.45069999999987,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.3945999999996275,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 2.779700000000048,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 10.90020000000004,
+                "chars": 168,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              }
+            ]
+          },
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 5.507200000000012,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.373700000000099,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 2.8036000000001877,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 11.255699999999706,
+                "chars": 168,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              }
+            ]
+          }
+        ],
+        "after": [
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 6.1240999999999985,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.4827999999999975,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.0517999999999574,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 2.6888000000001284,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          },
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 5.560599999999795,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.4250999999999294,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 2.776100000000042,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 2.661800000000312,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          },
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 5.4585000000001855,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.3337000000001353,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.0693999999998596,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 1 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 2.642399999999725,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": 500,
+      "arms": {
+        "before": [
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 5.961299999999937,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 4.3005999999995765,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.109599999999773,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 18.077500000000327,
+                "chars": 241,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n**filler200.ts**\n- filler200 (function) :1–1 `(value: number): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              }
+            ]
+          },
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 6.210700000001452,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.7397000000000844,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.024199999999837,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 16.398699999999735,
+                "chars": 241,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n**filler200.ts**\n- filler200 (function) :1–1 `(value: number): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              }
+            ]
+          },
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 6.572500000000218,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.705600000001141,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.1415999999990163,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 16.479999999999563,
+                "chars": 241,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n**filler200.ts**\n- filler200 (function) :1–1 `(value: number): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              }
+            ]
+          }
+        ],
+        "after": [
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 6.1229000000003,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.7696999999998297,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.172299999999268,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 3.2781999999997424,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          },
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 6.355099999999766,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.774000000000342,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.201000000000022,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 3.0697000000000116,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          },
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 6.039499999998952,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 3.7352999999984604,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 3.1987000000008265,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 2 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 3.108299999999872,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": 5000,
+      "arms": {
+        "before": [
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 10.791600000000471,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 7.859400000001187,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 6.198500000002241,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 76.2635999999984,
+                "chars": 243,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n**filler2847.ts**\n- filler2847 (function) :1–1 `(value: number): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              }
+            ]
+          },
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 10.296300000001793,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 8.018599999999424,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 6.299399999999878,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 60.828599999997095,
+                "chars": 243,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n**filler2847.ts**\n- filler2847 (function) :1–1 `(value: number): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              }
+            ]
+          },
+          {
+            "instructionsChars": 3409,
+            "toolSchemaChars": 2330,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 10.344300000000658,
+                "chars": 914,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 7.828300000001036,
+                "chars": 506,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n\n**flow.ts**\n- entry (function) :1–1 `(value: number = 1): number`\n- mid1 (function) :2–2 `(value: number): number`\n- deep (function) :4–4 `(value: number): number`\n- leaf (function) :5–5 `(value: number): number`\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 6.197299999999814,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 61.384100000002945,
+                "chars": 243,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\n**flow.ts**\n- install (function) :6–6 `(): number`\n\n\n**filler2847.ts**\n- filler2847 (function) :1–1 `(value: number): number`\n\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              }
+            ]
+          }
+        ],
+        "after": [
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 10.222000000001572,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 7.897399999998015,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 6.12840000000142,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 6.694999999999709,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          },
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 10.452400000001944,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 8.220799999999144,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 6.213499999998021,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 7.482299999999668,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          },
+          {
+            "instructionsChars": 1216,
+            "toolSchemaChars": 1507,
+            "rows": [
+              {
+                "query": "entry deep leaf",
+                "ms": 10.445400000000518,
+                "chars": 838,
+                "sourceHash": "5c8a94534206bb7f40aef2a8258e6a5bc46f77ae1ba70d3c384b3947bb4457f6",
+                "sourceLines": 6,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n     4\texport function deep(value: number): number { return leaf(value); }\n     5\texport function leaf(value: number): number { return value + 1; }\n     6\texport function install(): number { return 123456789; }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "entry deep leaf",
+                "ms": 7.7237999999997555,
+                "chars": 430,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: entry deep leaf**\n\n**Flow among named symbols**\n\n- entry (function) — flow.ts:1\n  → mid1 (function) — flow.ts:2\n  → deep (function) — flow.ts:4\n  → leaf (function) — flow.ts:5\n\n**flow.ts**\n- entry (function) :1–1\n- mid1 (function) :2–2\n- deep (function) :4–4\n- leaf (function) :5–5\n\nRequested source was already shown in this session.\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "flow.ts:1-3",
+                "ms": 6.238300000000891,
+                "chars": 372,
+                "sourceHash": "4470fd7570051b36e86e0e1e3c0c57690337c01af1d0c0166e138f912b19176f",
+                "sourceLines": 3,
+                "text": "**Explore: flow.ts:1-3**\n\n**flow.ts**\n\n\n```typescript\n     1\texport function entry(value: number = 1): number { return mid1(value) + mid2(value); }\n     2\tfunction mid1(value: number): number { return deep(value); }\n     3\tfunction mid2(value: number): number { return leaf(value); }\n```\n\n\nTreat returned source as already Read. Explore budget for this project: 3 call(s)."
+              },
+              {
+                "query": "install.ps1:1-200",
+                "ms": 6.909200000001874,
+                "chars": 166,
+                "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sourceLines": 0,
+                "text": "**Explore: install.ps1:1-200**\n\nNo indexed file matches requested path(s): `install.ps1`. Check the indexed path; any results below match the remaining query terms.\n\n"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "scope": "Warm MCP round trips and cumulative returned characters. Three sessions per arm per synthetic repository. Not provider token usage, model task success, indexing speed, or a real-repository agent A/B."
+}

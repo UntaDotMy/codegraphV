@@ -212,6 +212,13 @@ impl ToolHandler {
                     .into_owned()
             });
         let input = nodepath::resolve(&[&input]);
+        // Upstream #2982: hosts sometimes pass the file being edited. Apply all
+        // normal project and sensitive-directory checks to its containing folder.
+        let input = if Path::new(&input).is_file() {
+            Path::new(&input).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or(input)
+        } else {
+            input
+        };
         if explicit.is_none() {
             // A default project in a sensitive folder gets the refusal a projectPath gets, but as
             // the usual success-shaped "pass projectPath" guidance: the agent can still query

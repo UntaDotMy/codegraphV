@@ -98,6 +98,9 @@ impl Session {
                     return vec![error(id, -32602, "Unknown tool")];
                 }
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                if !args.is_object() {
+                    return vec![error(id, -32602, "Tool arguments must be an object")];
+                }
                 serde_json::to_value(self.handler.call(name, &args)).unwrap()
             }
             "shutdown" => {

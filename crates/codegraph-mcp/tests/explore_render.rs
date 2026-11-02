@@ -10,6 +10,34 @@ fn explore_text(root: &std::path::Path, query: &str) -> String {
     result.content[0]["text"].as_str().unwrap().to_string()
 }
 
+#[test]
+fn focused_signature_is_not_repeated_above_verbatim_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "pub fn named_function(value: u32) -> u32 { value + 1 }\n";
+    std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+    let text = explore_text(dir.path(), "named_function");
+    assert!(text.contains(source.trim()), "{text}");
+    assert_eq!(text.matches("value: u32").count(), 1, "{text}");
+}
+
+#[test]
+fn combining_marks_stay_inside_a_named_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "pub fn e\u{301}tat() -> u32 { 73645 }\n").unwrap();
+    let text = explore_text(dir.path(), "e\u{301}tat");
+    assert!(text.contains("73645"), "{text}");
+}
+
+#[test]
+fn unindexed_filename_range_does_not_expand_into_unrelated_code() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "pub fn install() { let unrelated_marker = 42; }\n").unwrap();
+    let text = explore_text(dir.path(), "install.ps1:1-200");
+    assert!(text.contains("No indexed file matches"), "{text}");
+    assert!(!text.contains("unrelated_marker"), "{text}");
+    assert!(text.len() < 400, "{text}");
+}
+
 /// A named definition is shown even when a long body the graph relates to it (a caller) comes
 /// first in its file: that body used to spend the file's budget in line order.
 #[test]

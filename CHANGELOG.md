@@ -14,6 +14,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- codegraphV uses shorter agent guidance and avoids repeating signatures already present in returned source.
+- codegraphV searches apply path and name filters before result limits, honor filter-only pagination and understand pasted calls.
+- codegraphV finds Unicode symbol names and preserves named flow waypoints even when a shorter branch reaches the destination first.
+- codegraphV no longer confuses similarly named classes or lets self-closing script tags hide later component code.
+- codegraphV safely handles simultaneous stale-lock recovery and accepts an indexed file as `projectPath`.
+- codegraphV reports circular imports as stable file groups and avoids unrelated source for missing filename ranges.
 - Windows installs and upgrades keep the working codegraphV executable if copying or activating its replacement fails.
 - codegraphV migrations preserve the original index, program and settings when a destination or agent configuration needs repair, and keep separate backups for retries.
 - codegraphV includes a SQLite update that fixes a rare corruption bug when concurrent sessions write and checkpoint the same index.

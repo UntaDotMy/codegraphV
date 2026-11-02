@@ -3,6 +3,17 @@ use codegraph_extract::{extract_source, with_error_tolerance};
 use codegraph_types::{EdgeKind, Language, NodeKind};
 use serde_json::Value;
 
+#[test]
+fn self_closing_script_does_not_swallow_the_next_block_or_template() {
+    for language in [Language::Vue, Language::Svelte, Language::Astro] {
+        let source = "<script src=\"./legacy.js\" />\n<template><Child /></template>\n<script lang=\"ts\">\nexport function actual(value: number) { return value; }\n</script>\n";
+        let result = extract_source(&format!("Page.{}", language.as_str()), source, language).unwrap();
+        assert!(result.nodes.iter().any(|n| n.name == "actual" && n.start_line == 4), "{language}: {:?}", result.nodes);
+        assert!(result.errors.is_empty(), "{language}: {:?}", result.errors);
+        assert!(result.unresolved_references.iter().any(|r| r.reference_name == "Child"), "{language}: {:?}", result.unresolved_references);
+    }
+}
+
 fn canonical(value: Value) -> Value {
     match value {
         Value::Array(values) => values.into_iter().map(canonical).collect(),

@@ -252,6 +252,12 @@ for (const [name, tests, generatedCount] of [['nineteen-tests', 19, 0], ['twenty
   for (let i = 0; i < generatedCount; i++) addFile(`src/auto${i}.ts`, 80, 20, true);
   scenarios.push(scenario);
 }
+scenarios.push({ name: 'upstream-november-flow',
+  nodes: ['entry', 'mid1', 'mid2', 'deep', 'leaf', '入口', '末端'].map(id => node(id)),
+  edges: [['entry','mid1'], ['entry','mid2'], ['mid1','deep'], ['deep','leaf'], ['mid2','leaf'], ['leaf','entry'], ['入口','末端']].map(([a,b]) => edge(a,b)),
+  cases: [{ op:'flow', query:'entry deep leaf' }, { op:'flow', query:'入口 末端' },
+    { op:'flowTokens', query:'入口 末端 Ωmega état NavMeshAgent类型' }],
+});
 try {
   for (const scenario of scenarios) {
     const dbPath = path.join(work, `${scenario.name}.db`);

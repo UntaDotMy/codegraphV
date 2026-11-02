@@ -3,6 +3,51 @@ use codegraph_graph::named_symbol_flow::{resolve_named_symbol_flow, NamedSymbolF
 use codegraph_types::{Edge, EdgeKind, Language, Node, NodeKind};
 
 #[test]
+fn unicode_names_reach_named_flows_without_ascii_fragments() {
+    use codegraph_graph::named_symbol_flow::flow_tokens;
+    assert_eq!(flow_tokens("入口 末端 Ωmega état NavMeshAgent类型"), ["入口", "末端", "Ωmega", "état", "NavMeshAgent", "类型"]);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::initialize(dir.path().join("codegraph.db")).unwrap();
+    let nodes: Vec<_> = ["入口", "末端"].into_iter().map(|name| Node::new(name, NodeKind::Function,
+        name, name, "flow.rs", Language::Rust, 1, 1, 0, 0, 1)).collect();
+    store.insert_nodes(&nodes).unwrap();
+    store.insert_edge(&Edge::new("入口", "末端", EdgeKind::Calls)).unwrap();
+    let flow = resolve_named_symbol_flow(&store, &store, "入口 末端", &Default::default(), None).unwrap();
+    assert_eq!(flow.chains[0].steps.len(), 2);
+}
+
+#[test]
+fn qualified_lookup_requires_a_whole_scope_even_in_a_matching_filename() {
+    use codegraph_graph::symbol_lookup::matches_symbol;
+    let node = Node::new("price", NodeKind::Method, "Price", "LegacyFormat::Price",
+        "src/Format.cs", Language::CSharp, 1, 1, 0, 0, 1);
+    assert!(!matches_symbol(&node, "Format.Price", None));
+    assert!(matches_symbol(&node, "LegacyFormat.Price", None));
+    let mut node = node;
+    node.qualified_name = "Billing::Format::Price".into();
+    assert!(matches_symbol(&node, "Format.Price", None));
+}
+
+#[test]
+fn longer_named_route_survives_a_shortcut_and_never_repeats_a_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::initialize(dir.path().join("codegraph.db")).unwrap();
+    let nodes: Vec<_> = ["entry", "mid1", "mid2", "deep", "leaf"].into_iter()
+        .map(|name| Node::new(name, NodeKind::Function, name, name, "src/flow.rs",
+            Language::Rust, 1, 1, 0, 0, 1)).collect();
+    store.insert_nodes(&nodes).unwrap();
+    store.insert_edges(&[("entry", "mid1"), ("entry", "mid2"), ("mid1", "deep"),
+        ("deep", "leaf"), ("mid2", "leaf"), ("leaf", "entry")].map(|(a,b)| Edge::new(a,b,EdgeKind::Calls))).unwrap();
+    let flow = resolve_named_symbol_flow(&store, &store, "entry deep leaf", &Default::default(), None).unwrap();
+    let names: Vec<_> = flow.chains[0].steps.iter().map(|s| s.node.name.as_str()).collect();
+    assert_eq!(names, ["entry", "mid1", "deep", "leaf"]);
+    for chain in flow.chains {
+        let ids: std::collections::HashSet<_> = chain.steps.iter().map(|s| &s.node.id).collect();
+        assert_eq!(ids.len(), chain.steps.len());
+    }
+}
+
+#[test]
 fn flow_uses_native_search_and_keeps_a_miss_distinct_from_fuzzy_suggestions() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::initialize(dir.path().join("codegraph.db")).unwrap();
