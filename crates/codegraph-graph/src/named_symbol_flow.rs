@@ -6,7 +6,7 @@ use crate::{go_package::GoPackageOf, symbol_lookup::*, GraphTraverser, PathStep,
 use codegraph_db::Store;
 use codegraph_jsre::re;
 use codegraph_types::{
-    jscompat::{js_trim, utf16_len},
+    jscompat::js_trim,
     Edge, EdgeKind, IndexMap, Language, Node, NodeKind, Provenance,
 };
 use indexmap::IndexSet;
@@ -162,9 +162,8 @@ pub fn flow_tokens(query: &str) -> Vec<String> {
     let mut tokens = IndexSet::new();
     for token in re!(r"[\s,()[\]]+").split(query) {
         let token = normalize_token(token);
-        if utf16_len(&token) >= 3 && re!(r"^[A-Za-z_$][\w$]*(?:(?:::|\.)[\w$]+)*$").is_match(&token)
-        {
-            tokens.insert(token);
+        for part in codegraph_search::query_utils::split_at_cjk_switches(&token) {
+            if codegraph_search::query_utils::is_query_name_token(part) { tokens.insert(part.to_owned()); }
         }
     }
     tokens.into_iter().take(MAX_TOKENS).collect()
@@ -296,76 +295,77 @@ struct WalkStep {
     named: usize,
 }
 
+// Keep non-dominated routes, rather than only the first visit to each node
+// (upstream a3e9e760). Otherwise a shorter unnamed branch hides a named waypoint.
 fn walk_calls(
     store: &Store,
     seed: &Node,
     named: &HashSet<String>,
     max_hops: usize,
     max_bridge: u32,
+    callees: &mut HashMap<String, Vec<codegraph_types::Ref>>,
 ) -> Result<(IndexMap<String, WalkStep>, Vec<String>)> {
     let traverser = GraphTraverser::new(store);
-    let mut parent = IndexMap::from([(
-        seed.id.clone(),
-        WalkStep {
-            prev: None,
-            edge: None,
-            node: seed.clone(),
-            depth: 0,
-            streak: 0,
-            named: usize::from(named.contains(&seed.id)),
-        },
-    )]);
-    let mut queue = vec![seed.id.clone()];
+    let mut parent = IndexMap::<String, WalkStep>::new();
+    let mut routes = HashMap::<String, Vec<String>>::new();
+    let mut beaten = HashSet::new();
+    let mut queue = Vec::new();
+    let mut slots = HashMap::new();
+    let beats = |a: &WalkStep, b: &WalkStep| {
+        a.depth <= b.depth && a.named >= b.named && a.streak <= b.streak
+    };
+    fn on_route(parent: &IndexMap<String, WalkStep>, key: &str, id: &str) -> bool {
+        let mut key = Some(key);
+        while let Some(k) = key {
+            let step = &parent[k];
+            if step.node.id == id { return true; }
+            key = step.prev.as_deref();
+        }
+        false
+    }
+    let mut pending = vec![WalkStep { prev: None, edge: None, node: seed.clone(),
+        depth: 0, streak: 0, named: usize::from(named.contains(&seed.id)) }];
     let mut reached = Vec::new();
     let mut head = 0;
-    while head < queue.len() && parent.len() < NAMED_VISIT_CAP {
-        let id = queue[head].clone();
+    loop {
+        for step in pending.drain(..) {
+            let kept = routes.entry(step.node.id.clone()).or_default();
+            if kept.iter().any(|k| beats(&parent[k], &step)) { continue; }
+            // Bound route states as well as distinct nodes on dense cyclic graphs.
+            if parent.len() >= NAMED_VISIT_CAP.saturating_mul(max_hops.max(1)) { continue; }
+            let key = parent.len().to_string();
+            let mut place: Option<usize> = None;
+            kept.retain(|other| {
+                if !beats(&step, &parent[other]) { return true; }
+                beaten.insert(other.clone());
+                let at = slots[other];
+                place = Some(place.map_or(at, |p| p.min(at)));
+                false
+            });
+            parent.insert(key.clone(), step);
+            kept.push(key.clone());
+            let at = place.unwrap_or(queue.len());
+            if at == queue.len() { queue.push(key.clone()); } else { queue[at] = key.clone(); }
+            slots.insert(key, at);
+        }
+        if head >= queue.len() || routes.len() >= NAMED_VISIT_CAP { break; }
+        let key = queue[head].clone();
         head += 1;
-        let at = parent[&id].clone();
-        if id != seed.id && named.contains(&id) {
-            reached.push(id.clone());
+        if beaten.contains(&key) { continue; }
+        let at = &parent[&key];
+        if at.node.id != seed.id && named.contains(&at.node.id) { reached.push(key.clone()); }
+        if at.depth.saturating_add(1) >= max_hops { continue; }
+        if !callees.contains_key(&at.node.id) {
+            callees.insert(at.node.id.clone(), traverser.get_callees(&at.node.id, 1)?);
         }
-        if at.depth.saturating_add(1) >= max_hops {
-            continue;
-        }
-        for c in traverser.get_callees(&id, 1)? {
-            if !is_flow_edge(c.edge.kind) {
-                continue;
-            }
+        for c in &callees[&at.node.id] {
+            if !is_flow_edge(c.edge.kind) || on_route(&parent, &key, &c.node.id) { continue; }
             let is_named = named.contains(&c.node.id);
-            let streak = if is_named {
-                0
-            } else if c.node.kind == NodeKind::Route {
-                at.streak
-            } else {
-                at.streak + 1
-            };
-            if streak > max_bridge {
-                continue;
-            }
-            let depth = at.depth + 1;
-            let named_on_route = at.named + usize::from(is_named);
-            if let Some(prior) = parent.get(&c.node.id) {
-                if prior.depth != depth
-                    || streak > prior.streak
-                    || (streak == prior.streak && named_on_route <= prior.named)
-                {
-                    continue;
-                }
-            } else {
-                queue.push(c.node.id.clone());
-            }
-            parent.insert(
-                c.node.id.clone(),
-                WalkStep {
-                    prev: Some(id.clone()),
-                    edge: Some(c.edge),
-                    node: c.node,
-                    depth,
-                    streak,
-                    named: named_on_route,
-                },
-            );
+            let streak = if is_named { 0 } else if c.node.kind == NodeKind::Route { at.streak } else { at.streak + 1 };
+            if streak > max_bridge { continue; }
+            pending.push(WalkStep { prev: Some(key.clone()), edge: Some(c.edge.clone()),
+                node: c.node.clone(), depth: at.depth + 1, streak,
+                named: at.named + usize::from(is_named) });
         }
     }
     Ok((parent, reached))
@@ -546,19 +546,20 @@ pub fn resolve_named_symbol_flow(
             }
         }
     } else {
+        let mut callees = HashMap::new();
         for seed in flow.named.values().take(MAX_SEEDS) {
-            let (parent, reached) = walk_calls(store, seed, &named_ids, max_hops, max_bridge)?;
-            let mut deepest: Option<&WalkStep> = None;
-            for id in reached {
-                let at = &parent[&id];
-                if deepest.is_none_or(|d| {
+            let (parent, reached) = walk_calls(store, seed, &named_ids, max_hops, max_bridge, &mut callees)?;
+            let mut deepest: Option<(&str, &WalkStep)> = None;
+            for id in &reached {
+                let at = &parent[id];
+                if deepest.is_none_or(|(_, d)| {
                     at.depth > d.depth || (at.depth == d.depth && at.named > d.named)
                 }) {
-                    deepest = Some(at);
+                    deepest = Some((id, at));
                 }
             }
-            if let Some(deepest) = deepest {
-                found.push(chain_to(&parent, &deepest.node.id));
+            if let Some((key, _)) = deepest {
+                found.push(chain_to(&parent, key));
             }
         }
     }

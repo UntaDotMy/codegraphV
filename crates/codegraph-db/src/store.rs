@@ -158,6 +158,17 @@ impl Store {
     /// window rides out a normal incremental sync; with WAL, reads never block on
     /// a writer, so this only governs cross-process write contention.
     fn configure_connection(conn: &Connection, read_only: bool) -> Result<()> {
+        // Field filters must run before SQL LIMIT. SQLite lower() is ASCII-only;
+        // retain the search API's Unicode lowercase + literal-substring semantics.
+        conn.create_scalar_function("codegraph_contains", 2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            |ctx| {
+                let value = ctx.get::<String>(0)?;
+                let needle = ctx.get::<String>(1)?;
+                Ok(value.to_lowercase().contains(&needle))
+            })?;
         Self::pragma(conn, "PRAGMA busy_timeout = 5000")?;
         Self::pragma(conn, "PRAGMA foreign_keys = ON")?;
         if !read_only {

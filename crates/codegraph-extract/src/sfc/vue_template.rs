@@ -195,7 +195,7 @@ fn keyword(name: &str) -> bool {
 pub fn template_calls(source: &str) -> Result<Vec<TemplateCall>, String> {
     let mut masked = source.as_bytes().to_vec();
     for pattern in [
-        re!(r"<(script|style)(\s[^>]*)?>[\s\S]*?</\1\s*>", "g"),
+        re!(r"<(script|style)(\s[^>]*?)?(?:/>|>[\s\S]*?</\1\s*>)", "g"),
         re!(r"<!--[\s\S]*?-->", "g"),
     ] {
         // The second scan sees the first scan's mask, as String.replace does.

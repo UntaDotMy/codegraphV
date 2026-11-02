@@ -166,21 +166,25 @@ impl Store {
                 languages.push(language);
             }
         }
+        let fields = FieldFilters {
+            paths: parsed.path_filters.iter().map(|s| s.to_lowercase()).collect(),
+            names: parsed.name_filters.iter().map(|s| s.to_lowercase()).collect(),
+        };
         let mut results = if !parsed.text.is_empty() {
             if self.fts5_available() {
-                self.search_fts(&parsed.text, &kinds, &languages, limit, offset)
+                self.search_fts(&parsed.text, &kinds, &languages, limit, offset, &fields)
                     .unwrap_or_default()
             } else {
                 Vec::new()
             }
         } else {
-            self.search_all_filters(&kinds, &languages, limit.saturating_mul(5))?
+            self.search_all_filters(&kinds, &languages, limit.saturating_mul(5), offset, &fields)?
         };
         if results.is_empty() && utf16_len(&parsed.text) >= 2 {
-            results = self.search_like(&parsed.text, &kinds, &languages, limit, offset)?;
+            results = self.search_like(&parsed.text, &kinds, &languages, limit, offset, &fields)?;
         }
         if results.is_empty() && utf16_len(&parsed.text) >= 3 {
-            results = self.search_fuzzy(&parsed.text, &kinds, &languages, limit)?;
+            results = self.search_fuzzy(&parsed.text, &kinds, &languages, limit, &fields)?;
         }
         if !results.is_empty() && !query.is_empty() {
             let mut seen: HashSet<_> = results.iter().map(|r| r.node.id.clone()).collect();
@@ -194,6 +198,7 @@ impl Store {
                 );
                 let mut params = vec![Value::Text(term.to_owned())];
                 append_filters(&mut sql, &mut params, &kinds, &languages, "");
+                fields.append(&mut sql, &mut params, "");
                 sql.push_str(" LIMIT 20");
                 for mut r in self.search_rows(&sql, params)? {
                     if seen.insert(r.node.id.clone()) {
@@ -239,30 +244,6 @@ impl Store {
             results.sort_by(|a, b| b.score.total_cmp(&a.score));
             results.truncate(limit);
         }
-        if !parsed.path_filters.is_empty() {
-            let filters: Vec<_> = parsed
-                .path_filters
-                .iter()
-                .map(|p| p.to_lowercase())
-                .collect();
-            results.retain(|r| {
-                filters
-                    .iter()
-                    .any(|f| r.node.file_path.to_lowercase().contains(f))
-            });
-        }
-        if !parsed.name_filters.is_empty() {
-            let filters: Vec<_> = parsed
-                .name_filters
-                .iter()
-                .map(|p| p.to_lowercase())
-                .collect();
-            results.retain(|r| {
-                filters
-                    .iter()
-                    .any(|f| r.node.name.to_lowercase().contains(f))
-            });
-        }
         Ok(results)
     }
 
@@ -285,12 +266,15 @@ impl Store {
         kinds: &[NodeKind],
         languages: &[Language],
         limit: usize,
+        offset: usize,
+        fields: &FieldFilters,
     ) -> Result<Vec<SearchResult>> {
         let mut sql = format!("SELECT {NODE_COLS}, 1.0 AS score FROM nodes WHERE 1=1");
         let mut params = Vec::new();
         append_filters(&mut sql, &mut params, kinds, languages, "");
-        sql.push_str(" ORDER BY name LIMIT ?");
-        params.push(integer(limit));
+        fields.append(&mut sql, &mut params, "");
+        sql.push_str(" ORDER BY name LIMIT ? OFFSET ?");
+        params.extend([integer(limit), integer(offset)]);
         self.search_rows(&sql, params)
     }
 
@@ -301,9 +285,10 @@ impl Store {
         languages: &[Language],
         limit: usize,
         offset: usize,
+        fields: &FieldFilters,
     ) -> Result<Vec<SearchResult>> {
         let stripped = query.replace("::", " ");
-        let stripped = re!(r#"['"*():^]"#).replace_all_str(&stripped, "");
+        let stripped = re!(r#"['"*():^]"#).replace_all_str(&stripped, " ");
         let terms: Vec<_> = stripped
             .split(is_js_space)
             .filter(|t| !t.is_empty() && !re!(r"^(AND|OR|NOT|NEAR)$", "i").is_match(t))
@@ -322,6 +307,7 @@ impl Store {
         let mut sql = format!("SELECT {columns}, nodes_fts.rank AS score FROM nodes_fts JOIN nodes ON nodes_fts.id = nodes.id WHERE nodes_fts MATCH ? AND nodes_fts.rank MATCH 'bm25(0, 20, 5, 1, 2)'");
         let mut params = vec![Value::Text(terms.join(" OR "))];
         append_filters(&mut sql, &mut params, kinds, languages, "nodes.");
+        fields.append(&mut sql, &mut params, "nodes.");
         sql.push_str(" ORDER BY nodes_fts.rank LIMIT ? OFFSET ?");
         params.extend([integer(limit.saturating_mul(5).max(100)), integer(offset)]);
         let mut results = self.search_rows(&sql, params)?;
@@ -338,6 +324,7 @@ impl Store {
         languages: &[Language],
         limit: usize,
         offset: usize,
+        fields: &FieldFilters,
     ) -> Result<Vec<SearchResult>> {
         let mut sql = format!("SELECT {NODE_COLS}, CASE WHEN name = ? THEN 1.0 WHEN name LIKE ? THEN 0.9 WHEN name LIKE ? THEN 0.8 WHEN qualified_name LIKE ? THEN 0.7 ELSE 0.5 END AS score FROM nodes WHERE (name LIKE ? OR qualified_name LIKE ? OR name LIKE ?)");
         let starts = format!("{query}%");
@@ -349,6 +336,7 @@ impl Store {
         .map(|p| Value::Text(p.to_owned()))
         .collect();
         append_filters(&mut sql, &mut params, kinds, languages, "");
+        fields.append(&mut sql, &mut params, "");
         sql.push_str(" ORDER BY score DESC, length(name) ASC LIMIT ? OFFSET ?");
         params.extend([integer(limit), integer(offset)]);
         self.search_rows(&sql, params)
@@ -360,6 +348,7 @@ impl Store {
         kinds: &[NodeKind],
         languages: &[Language],
         limit: usize,
+        fields: &FieldFilters,
     ) -> Result<Vec<SearchResult>> {
         let lowered = text.to_lowercase();
         let max_dist = if utf16_len(&lowered) <= 4 { 1 } else { 2 };
@@ -368,11 +357,14 @@ impl Store {
         // least as many characters, and a character is at least one UTF-16 unit, so SQLite's
         // character `length()` bounds it exactly without reading every name. Ties keep the
         // name index's binary order, which the unfiltered DISTINCT scan produced.
-        let mut stmt = self
-            .conn()
-            .prepare_cached("SELECT DISTINCT name FROM nodes WHERE length(name) <= ? ORDER BY name")?;
+        let mut sql = String::from("SELECT DISTINCT name FROM nodes WHERE length(name) <= ?");
+        let mut params = vec![integer(target_len + max_dist)];
+        append_filters(&mut sql, &mut params, kinds, languages, "");
+        fields.append(&mut sql, &mut params, "");
+        sql.push_str(" ORDER BY name");
+        let mut stmt = self.conn().prepare_cached(&sql)?;
         let names = stmt
-            .query_map([(target_len + max_dist) as i64], |r| r.get::<_, String>(0))?
+            .query_map(params_from_iter(params), |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut candidates = Vec::new();
         for name in names {
@@ -396,6 +388,7 @@ impl Store {
             let mut sql = format!("SELECT {NODE_COLS}, 1.0 AS score FROM nodes WHERE name = ?");
             let mut params = vec![Value::Text(name)];
             append_filters(&mut sql, &mut params, kinds, languages, "");
+            fields.append(&mut sql, &mut params, "");
             sql.push_str(" LIMIT 5");
             for mut r in self.search_rows(&sql, params)? {
                 if !seen.insert(r.node.id.clone()) {
@@ -494,5 +487,22 @@ fn append_filters(
             vec!["?"; languages.len()].join(",")
         ));
         params.extend(languages.iter().map(|l| Value::Text(l.as_str().to_owned())));
+    }
+}
+
+/// OR within a field, AND between fields; values are always bound parameters.
+struct FieldFilters { paths: Vec<String>, names: Vec<String> }
+impl FieldFilters {
+    fn append(&self, sql: &mut String, params: &mut Vec<Value>, prefix: &str) {
+        for (column, filters) in [("file_path", &self.paths), ("name", &self.names)] {
+            if filters.is_empty() { continue; }
+            sql.push_str(" AND (");
+            for (i, filter) in filters.iter().enumerate() {
+                if i > 0 { sql.push_str(" OR "); }
+                sql.push_str(&format!("codegraph_contains({prefix}{column}, ?)"));
+                params.push(Value::Text(filter.clone()));
+            }
+            sql.push(')');
+        }
     }
 }

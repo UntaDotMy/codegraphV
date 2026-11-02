@@ -98,7 +98,7 @@ pub fn last_qualifier_part(symbol: &str) -> String {
 }
 
 fn canonical_scope(s: &str) -> String {
-    s.replace("::", ".").replace('/', ".")
+    s.replace("::", ".").replace(['/', '\\'], ".")
 }
 fn without_extension(s: &str) -> String {
     re!(r"\.[^.]+$").replace_first(s, |_| String::new())
@@ -132,11 +132,8 @@ pub fn matches_symbol(node: &Node, symbol: &str, go_package_of: Option<GoPackage
     if parts.len() < 2 || node.name != *parts.last().unwrap() {
         return false;
     }
-    if node.qualified_name.contains(&parts.join("::")) {
-        return true;
-    }
     let canonical_query = canonical_scope(symbol);
-    let canonical_node = canonical_scope(&node.qualified_name);
+    let canonical_node = canonical_scope(&re!(r"/\d{1,3}$").replace_first(&node.qualified_name, |_| String::new()));
     if canonical_node == canonical_query || canonical_node.ends_with(&format!(".{canonical_query}"))
     {
         return true;
@@ -159,7 +156,11 @@ pub fn matches_symbol(node: &Node, symbol: &str, go_package_of: Option<GoPackage
             .iter()
             .any(|seg| seg == hint || without_extension(seg) == *hint)
     };
-    if hints.iter().all(in_path) {
+    let scope: Vec<_> = canonical_node.split('.').take(canonical_node.split('.').count().saturating_sub(1)).collect();
+    let path_can_name = !matches!(node.kind, NodeKind::Method | NodeKind::Property | NodeKind::Field | NodeKind::EnumMember)
+        || matches!(node.language, Language::Rust | Language::Python | Language::Go)
+        || scope.is_empty() || scope.last() == hints.last();
+    if path_can_name && hints.iter().all(in_path) {
         return true;
     }
     let canonical_scope = canonical_scope(&node.qualified_name);

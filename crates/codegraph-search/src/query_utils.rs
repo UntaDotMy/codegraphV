@@ -284,6 +284,57 @@ pub fn get_stem_variants(term: &str) -> Vec<String> {
         .collect()
 }
 
+/// Script-aware query words shared by search, context and named flows (upstream #3031).
+pub fn has_cjk(text: &str) -> bool {
+    !text.is_ascii() && codegraph_jsre::re!(r"[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}]", "u").is_match(text)
+}
+
+pub fn is_query_word_char(ch: char) -> bool {
+    use unicode_general_category::{get_general_category, GeneralCategory::*};
+    matches!(get_general_category(ch), UppercaseLetter | LowercaseLetter | TitlecaseLetter
+        | ModifierLetter | OtherLetter | DecimalNumber | LetterNumber | OtherNumber
+        | NonspacingMark | SpacingMark | EnclosingMark)
+}
+
+pub fn split_at_cjk_switches(text: &str) -> Vec<&str> {
+    if !has_cjk(text) { return vec![text]; }
+    use unicode_general_category::{get_general_category, GeneralCategory::*};
+    let mut parts = Vec::new();
+    let (mut start, mut previous) = (0, None);
+    for (offset, ch) in text.char_indices() {
+        match get_general_category(ch) {
+            UppercaseLetter | LowercaseLetter | TitlecaseLetter | ModifierLetter | OtherLetter
+            | DecimalNumber | LetterNumber | OtherNumber => {
+                let mut encoded = [0u8; 4];
+                let cjk = has_cjk(ch.encode_utf8(&mut encoded));
+                if previous.is_some_and(|p| p != cjk) { parts.push(&text[start..offset]); start = offset; }
+                previous = Some(cjk);
+            }
+            NonspacingMark | SpacingMark | EnclosingMark => {}
+            _ => previous = None,
+        }
+    }
+    if start < text.len() { parts.push(&text[start..]); }
+    parts
+}
+
+pub fn meets_query_word_floor(word: &str) -> bool {
+    if has_cjk(word) { word.chars().count() >= 2 } else { utf16_len(word) >= 3 }
+}
+
+pub fn is_query_name_token(token: &str) -> bool {
+    meets_query_word_floor(token) && codegraph_jsre::re!(r"^[\p{L}\p{Nl}_$][\p{L}\p{N}\p{M}_$]*(?:(?:::|\.)[\p{L}\p{N}\p{M}_$]+)*$", "u").is_match(token)
+}
+
+pub fn blank_non_ascii_words(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() { return std::borrow::Cow::Borrowed(text); }
+    std::borrow::Cow::Owned(codegraph_jsre::re!(r"[\p{L}\p{N}\p{M}]+", "gu").replace_all(text, |m| {
+        Some(split_at_cjk_switches(m.text(0).unwrap()).into_iter().map(|p| {
+            if !p.is_ascii() && !has_cjk(p) { " ".repeat(utf16_len(p)) } else { p.to_owned() }
+        }).collect::<String>())
+    }))
+}
+
 static COMPOUND: LazyLock<Regex> = LazyLock::new(|| {
     // ASCII word boundaries, as in the JavaScript original.
     Regex::new(
@@ -298,7 +349,7 @@ static LOWER_UPPER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([a-z])([A-Z
 static ACRONYM_END: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([A-Z]+)([A-Z][a-z])").unwrap());
 static UNDERSCORE_DOT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[_.]+").unwrap());
-static NON_ALNUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9]+").unwrap());
+static NON_ALNUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\p{L}\p{N}\p{M}]+").unwrap());
 
 /// Extract meaningful search terms from a natural language query. Splits
 /// camelCase, PascalCase, snake_case, SCREAMING_SNAKE, and dot.notation into
@@ -311,10 +362,11 @@ static NON_ALNUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9]+"
 /// symbols. Path scoring passes `stems: false` — stems inflate path scores.
 pub fn extract_search_terms(query: &str, stems: bool) -> Vec<String> {
     let mut tokens: IndexSet<String> = IndexSet::new();
+    let ascii_view = blank_non_ascii_words(query);
 
     // First, extract and preserve compound identifiers before splitting
     // CamelCase: scrapeLoop, UserService, getCallGraph
-    for m in COMPOUND.captures_iter(query) {
+    for m in COMPOUND.captures_iter(&ascii_view) {
         let g = &m[1];
         if g.len() >= 3 {
             tokens.insert(g.to_lowercase());
@@ -322,7 +374,7 @@ pub fn extract_search_terms(query: &str, stems: bool) -> Vec<String> {
     }
 
     // snake_case: scrape_loop, user_service
-    for m in SNAKE.captures_iter(query) {
+    for m in SNAKE.captures_iter(&ascii_view) {
         let g = &m[1];
         if g.len() >= 3 {
             tokens.insert(g.to_lowercase());
@@ -335,9 +387,9 @@ pub fn extract_search_terms(query: &str, stems: bool) -> Vec<String> {
     // Replace underscores and dots with spaces (snake_case, dot.notation)
     let normalised = UNDERSCORE_DOT.replace_all(&camel_split, " ");
     // Split on any non-alphanumeric character
-    for word in NON_ALNUM.split(&normalised).filter(|w| !w.is_empty()) {
+    for word in NON_ALNUM.split(&normalised).filter(|w| !w.is_empty()).flat_map(split_at_cjk_switches) {
         let lower = word.to_lowercase();
-        if lower.len() < 3 || STOP_WORDS.contains(lower.as_str()) {
+        if !meets_query_word_floor(&lower) || STOP_WORDS.contains(lower.as_str()) {
             continue;
         }
         tokens.insert(lower);
@@ -639,6 +691,7 @@ pub fn kind_bonus(kind: NodeKind) -> i32 {
 /// word — sentence-start capitalization and proper nouns aren't reliable
 /// identifier signals.
 pub fn is_distinctive_identifier(token: &str) -> bool {
+    if has_cjk(token) { return true; }
     if token.is_empty() {
         return false;
     }

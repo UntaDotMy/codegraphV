@@ -1,0 +1,101 @@
+{
+  "scope": "Inventory, not a claim of exhaustive correctness or coverage.",
+  "crates": [
+    {
+      "crate": "codegraph-cli",
+      "sourceFiles": 6,
+      "testFiles": 13,
+      "functionDeclarations": 68
+    },
+    {
+      "crate": "codegraph-context",
+      "sourceFiles": 5,
+      "testFiles": 3,
+      "functionDeclarations": 37
+    },
+    {
+      "crate": "codegraph-core",
+      "sourceFiles": 17,
+      "testFiles": 23,
+      "functionDeclarations": 299
+    },
+    {
+      "crate": "codegraph-db",
+      "sourceFiles": 13,
+      "testFiles": 4,
+      "functionDeclarations": 283
+    },
+    {
+      "crate": "codegraph-extract",
+      "sourceFiles": 70,
+      "testFiles": 3,
+      "functionDeclarations": 1962
+    },
+    {
+      "crate": "codegraph-graph",
+      "sourceFiles": 13,
+      "testFiles": 9,
+      "functionDeclarations": 337
+    },
+    {
+      "crate": "codegraph-installer",
+      "sourceFiles": 5,
+      "testFiles": 1,
+      "functionDeclarations": 80
+    },
+    {
+      "crate": "codegraph-jsre",
+      "sourceFiles": 2,
+      "testFiles": 0,
+      "functionDeclarations": 67
+    },
+    {
+      "crate": "codegraph-mcp",
+      "sourceFiles": 10,
+      "testFiles": 7,
+      "functionDeclarations": 138
+    },
+    {
+      "crate": "codegraph-resolve",
+      "sourceFiles": 175,
+      "testFiles": 0,
+      "functionDeclarations": 3644
+    },
+    {
+      "crate": "codegraph-search",
+      "sourceFiles": 6,
+      "testFiles": 2,
+      "functionDeclarations": 95
+    },
+    {
+      "crate": "codegraph-sync",
+      "sourceFiles": 7,
+      "testFiles": 8,
+      "functionDeclarations": 94
+    },
+    {
+      "crate": "codegraph-text",
+      "sourceFiles": 1,
+      "testFiles": 0,
+      "functionDeclarations": 25
+    },
+    {
+      "crate": "codegraph-types",
+      "sourceFiles": 11,
+      "testFiles": 1,
+      "functionDeclarations": 137
+    },
+    {
+      "crate": "codegraph-ui-server",
+      "sourceFiles": 5,
+      "testFiles": 4,
+      "functionDeclarations": 50
+    },
+    {
+      "crate": "codegraph-viewer",
+      "sourceFiles": 2,
+      "testFiles": 0,
+      "functionDeclarations": 32
+    }
+  ]
+}

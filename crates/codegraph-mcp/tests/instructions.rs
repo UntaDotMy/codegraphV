@@ -5,6 +5,15 @@ use codegraph_mcp::tools::{INSTRUCTIONS, NO_INDEX_INSTRUCTIONS};
 /// (JavaScript string length, i.e. UTF-16 code units), dropping whatever comes last.
 const HOST_INSTRUCTIONS_LIMIT: usize = 4096;
 
+#[test]
+fn routine_guidance_stays_compact() {
+    assert!(INSTRUCTIONS.chars().count() < 1600);
+    assert!(NO_INDEX_INSTRUCTIONS.chars().count() < 600);
+    let definitions: Vec<serde_json::Value> = serde_json::from_str(codegraph_mcp::tools::TOOLS_JSON).unwrap();
+    let explore = definitions.iter().find(|t| t["name"] == "codegraphV_explore").unwrap();
+    assert!(serde_json::to_string(explore).unwrap().chars().count() < 2000);
+}
+
 fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }

@@ -564,8 +564,9 @@ fn declaration_lines(lines: &[&str], names: &[String]) -> Vec<u32> {
 fn query_tokens(query: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     query
-        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':' | '#')))
+        .split(|c: char| !(codegraph_search::query_utils::is_query_word_char(c) || matches!(c, '_' | '$' | '.' | ':' | '#')))
         .map(|t| t.trim_matches(|c| matches!(c, '.' | ':')))
+        .flat_map(codegraph_search::query_utils::split_at_cjk_switches)
         .filter(|t| t.chars().any(|c| c.is_alphabetic() || c == '_'))
         .filter(|t| seen.insert(t.to_string()))
         .map(str::to_string)
@@ -787,6 +788,9 @@ pub fn explore(
                 n.end_line,
                 n.signature
                     .as_deref()
+                    // A focused definition's signature is in its verbatim source.
+                    // Keep signatures for context-only symbols whose body isn't shown.
+                    .filter(|_| !focus.iter().any(|f| f.start == n.start_line))
                     .map(|s| format!(" `{}`", metadata_preview(s.lines().next().unwrap_or(""), 160)))
                     .unwrap_or_default()
             );

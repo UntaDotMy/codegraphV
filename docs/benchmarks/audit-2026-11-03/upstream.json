@@ -1,0 +1,1703 @@
+{
+  "previousPort": "8bd55fa7",
+  "reviewedThrough": "f72c9d2efb14454ff4f9fd7b8460abd82f19a287",
+  "commits": [
+    {
+      "revision": "57dc7ae4813c85ac70d429165e5f3ab403c11488",
+      "subject": "fix(search): path: and name: filters find their matches at any limit (#3018)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/search-field-filters.test.ts",
+        "src/db/queries.ts"
+      ]
+    },
+    {
+      "revision": "787eafbffa747e4a0b7d5761dd0aa28d7ed44eb1",
+      "subject": "fix(jvm): a call through an import reaches the Java or Kotlin class it names (#3023)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/jvm-cross-language-imports.test.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "38dc3741aa807f54498b7fec70e6c4416634a9d3",
+      "subject": "fix(lookup): a qualified symbol query names its scope whole (#3024)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/qualified-lookup-boundary.test.ts",
+        "src/graph/symbol-lookup.ts"
+      ]
+    },
+    {
+      "revision": "f1da755a918b94c3d148c1ec824978724558bdf6",
+      "subject": "fix(resolution): calls on the browser's own objects link no project method (#3026)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/browser-host-globals.test.ts",
+        "src/resolution/js-builtins.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "a38a1ec0c0bf33d2c9963888ae0f16e2312f948b",
+      "subject": "fix(paths): a folder named like ..generated is inside the project, not outside it (#3028)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/dotdot-folder-names.test.ts",
+        "src/extraction/index.ts",
+        "src/index.ts",
+        "src/resolution/path-aliases.ts",
+        "src/sync/watcher.ts",
+        "src/utils.ts"
+      ]
+    },
+    {
+      "revision": "8e854d11e552f724ffe16ee32cfe45b642826d45",
+      "subject": "fix(js,ts): a function exported as exports[\"name\"] is a symbol named after its export (#3032)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/commonjs-exports.test.ts",
+        "codegraph-kernel/src/tsjs/extractors.rs",
+        "src/extraction/tree-sitter.ts"
+      ]
+    },
+    {
+      "revision": "3d19da2f59ff7485f1515a4d4c45bc9f7e21a7bf",
+      "subject": "fix(spring): a route links the method it annotates, including a package-private one (#3009)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/frameworks.test.ts",
+        "__tests__/spring-route-handlers.test.ts",
+        "src/resolution/frameworks/java.ts"
+      ]
+    },
+    {
+      "revision": "60b0d7a92dc001de1be37943ef3cd1cc955d693d",
+      "subject": "fix(affected): a --filter glob matches whole names, from any folder boundary (#3029)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/cli-affected-filter-globs.test.ts",
+        "src/bin/codegraph.ts"
+      ]
+    },
+    {
+      "revision": "9f379af79bcef8f37ae83bb0bbc15ef4697a9861",
+      "subject": "fix(node): every language and folder of an overloaded name shows in codegraph_node (#3030)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/node-overload-spread.test.ts",
+        "src/mcp/tools.ts"
+      ]
+    },
+    {
+      "revision": "c12a7b6a74533f6ecc3644471dded64f52e48996",
+      "subject": "fix(explore): Chinese, Japanese and Korean names reach explore, its Flow and context (#3031)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/cjk-query-tokens.test.ts",
+        "src/context/index.ts",
+        "src/graph/named-symbol-flow.ts",
+        "src/mcp/tools.ts",
+        "src/search/query-utils.ts"
+      ]
+    },
+    {
+      "revision": "37052b182549bba59d53c7fe3bd6772ca7b02e40",
+      "subject": "fix(go): a package-level var or const named in uppercase is exported (#3043)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/go-package-value-exported.test.ts",
+        "codegraph-kernel/src/go.rs",
+        "src/extraction/languages/go.ts",
+        "src/extraction/tree-sitter.ts"
+      ]
+    },
+    {
+      "revision": "407ec4fba2b0d2714e065f0d356542272a506d6c",
+      "subject": "chore: keep the kernel's vendored grammars out of GitHub's language stats (#3045)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        ".gitattributes"
+      ]
+    },
+    {
+      "revision": "b700a3eec2b4c4ee7a7c8b0051e11943a1147834",
+      "subject": "fix(python): a parameter or local named like an imported module is not that module (#3046)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-receiver-rebinding.test.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "3a4cd3bf6511f0eadbfe6f86ae03c0d78a212aee",
+      "subject": "fix(ruby): calls to `!`/`?` methods and calls on what `.new` made link their method (#3049)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/kernel-ruby-parity.test.ts",
+        "__tests__/ruby-constructed-receivers.test.ts",
+        "codegraph-kernel/src/ruby.rs",
+        "src/extraction/tree-sitter.ts",
+        "src/resolution/name-matcher.ts",
+        "src/resolution/ruby-constant-paths.ts"
+      ]
+    },
+    {
+      "revision": "4e7a2210893bacbdbf3dd5df6525767f6d567917",
+      "subject": "chore(deps): take the security fixes for devalue and postcss, drop an unused types package (#3044)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        "package-lock.json",
+        "package.json",
+        "site/package-lock.json"
+      ]
+    },
+    {
+      "revision": "1941caf7bc5d56134c54361452b596e708536dcc",
+      "subject": "fix(add-lang): the extraction check finds codegraph's npm shim on Windows, and takes CODEGRAPH_BIN (#3047)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        "__tests__/add-lang-verify-extraction.test.ts",
+        "scripts/add-lang/bench.sh",
+        "scripts/add-lang/verify-extraction.mjs"
+      ]
+    },
+    {
+      "revision": "25144678012b153fafc6f1d799970d8ae0ed3c98",
+      "subject": "fix(jvm): a dotted supertype names its nested type, and a Kotlin object expression is an anonymous class (#3051)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/fixtures/kernel-parity/Torture.java",
+        "__tests__/fixtures/kernel-parity/torture.kt",
+        "__tests__/jvm-dotted-supertypes.test.ts",
+        "codegraph-kernel/src/java.rs",
+        "codegraph-kernel/src/kotlin.rs",
+        "src/extraction/tree-sitter.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "19b74d10f3a0d7a9cd67807f54109486006aff7b",
+      "subject": "fix(deps): read .gitignore rules the way git does, with ignore 7.0.14 (#3050)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/gitignore-pattern-parity.test.ts",
+        "package-lock.json",
+        "package.json"
+      ]
+    },
+    {
+      "revision": "6d3804cf577689811f54d8fc070589c0bf830cfa",
+      "subject": "fix(resolution): C, C++ and Objective-C rank as one language, and a lone candidate is judged by family (#3052)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/name-match-language-family.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "cdfa31be547f0896c23dd0dd00381b150b75e11d",
+      "subject": "fix(ruby): a call on an instance variable that initialize types links to its class's method (#3053)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/ruby-ivar-receivers.test.ts",
+        "src/resolution/ruby-constant-paths.ts"
+      ]
+    },
+    {
+      "revision": "7021de5c3082e548277e26c3c7a47f73a9b027d1",
+      "subject": "fix(rust): calls through a type a path or a use names reach that type's own function (#3025)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/rust-cross-crate.test.ts",
+        "__tests__/rust-manifest-paths.test.ts",
+        "__tests__/rust-type-member-paths.test.ts",
+        "src/resolution/frameworks/cargo-workspace.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "bc9291afe6e6b4a96e44456e0b1f96764fac2168",
+      "subject": "fix(java): a call on a value a type holds in a static field reaches the method of the field's type (#3055)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/fixtures/kernel-parity/Torture.java",
+        "__tests__/java-static-field-receivers.test.ts",
+        "codegraph-kernel/src/java.rs",
+        "src/extraction/languages/java.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "29ce0149cfba3222198a43b2e28aa1068716ff64",
+      "subject": "fix(lock): only one process takes over a stale write lock (#3056)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/filelock-stale-takeover.test.ts",
+        "__tests__/fixtures/filelock-contender.cjs",
+        "src/utils.ts"
+      ]
+    },
+    {
+      "revision": "80f6b505042fd85e933946a3e808b690bb7848d2",
+      "subject": "fix(sync): a tsconfig, jsconfig or go.mod change re-resolves the imports it governs",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/sync-module-config-change.test.ts",
+        "src/index.ts",
+        "src/resolution/index.ts",
+        "src/resolution/path-aliases.ts"
+      ]
+    },
+    {
+      "revision": "d139865f9fbe3276c05bce2d88fe679cf9d51a3f",
+      "subject": "fix(db): processes opening an index that needs a migration all open it (#3058)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/migration-concurrent-opens.test.ts",
+        "src/db/migrations.ts",
+        "src/db/sqlite-adapter.ts"
+      ]
+    },
+    {
+      "revision": "664492551de2181d9ff0b11b2e1827d44e7428c4",
+      "subject": "fix(sync): a barrel whose re-export points elsewhere re-links its importers",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/sync-barrel-retarget.test.ts",
+        "src/db/queries.ts",
+        "src/extraction/index.ts",
+        "src/index.ts",
+        "src/resolution/module-importers.ts"
+      ]
+    },
+    {
+      "revision": "e43149197272d8940c18e203f5fb0a7036733090",
+      "subject": "fix(mcp): a session whose host stops reading its output shuts down cleanly (#3060)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/mcp-stdout-failure.test.ts",
+        "__tests__/stdout-teardown.test.ts",
+        "src/mcp/proxy.ts",
+        "src/mcp/stdout-teardown.ts",
+        "src/mcp/transport.ts"
+      ]
+    },
+    {
+      "revision": "2d98c1b69a05a157cf8b8a7d935340cce8ceb3d7",
+      "subject": "fix(sync): a call left with one candidate links after a delete or a rename",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/sync-removed-competitor.test.ts",
+        "docs/benchmarks/index-drift-cg33.md",
+        "src/index.ts"
+      ]
+    },
+    {
+      "revision": "4b0f72b7a75a41f51b89155935ae1d8c6e81edc0",
+      "subject": "fix(sync): a skipped file that now indexes re-links its importers",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/sync-size-cap-shrink.test.ts",
+        "src/extraction/index.ts"
+      ]
+    },
+    {
+      "revision": "617769279de0247a04d3a5917ce0d99c6a5cd801",
+      "subject": "fix(astro,svelte): a self-closing <script /> no longer swallows the next script",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/extraction.test.ts",
+        "__tests__/svelte-self-closing-script.test.ts",
+        "__tests__/ui-highlight.test.ts",
+        "src/extraction/astro-extractor.ts",
+        "src/extraction/svelte-extractor.ts",
+        "src/extraction/syntax-tokens.ts"
+      ]
+    },
+    {
+      "revision": "ed6b88e53a4247316829a2e7f2d0d60202abce86",
+      "subject": "fix(js): an export default line inside a template literal no longer names the default (#3068)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/default-export-declaration.test.ts",
+        "__tests__/strip-comments.test.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/strip-comments.ts"
+      ]
+    },
+    {
+      "revision": "cc17978174f4c460ea61acd0b85d628ae4b7d151",
+      "subject": "fix(rust): a module a #[path] attribute loads is the module that declares it (#3064)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/rust-path-attribute-modules.test.ts",
+        "__tests__/rust-path-super-glob.test.ts",
+        "src/resolution/frameworks/cargo-workspace.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "f67eafcbc5ab523d48bf50b7bf1415cf401c7a11",
+      "subject": "fix(search): a pasted call like leaf(entry) finds both names instead of nothing (#3069)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/search-special-characters.test.ts",
+        "src/db/queries.ts"
+      ]
+    },
+    {
+      "revision": "cb7fb61e76c2762b3027d3bdd5968c4c75b9a80b",
+      "subject": "fix(docs): agent and command lists match the code; worktree warning drops init -i (#3067)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        ".claude/skills/add-lang/SKILL.md",
+        ".cursor/rules/codegraph.mdc",
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/worktree-detection.test.ts",
+        "docs/SEARCH_QUALITY_LOOP.md",
+        "docs/design/callback-edge-synthesis.md",
+        "docs/design/dynamic-dispatch-coverage-playbook.md",
+        "scripts/add-lang/bench.sh",
+        "scripts/agent-eval/audit.sh",
+        "src/mcp/tools.ts",
+        "src/sync/worktree.ts"
+      ]
+    },
+    {
+      "revision": "de0a4eb362bbe4deb412f79aedcce11ee036dfbc",
+      "subject": "fix(vue): a self-closing <script /> no longer swallows the next script (#3070)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/vue-self-closing-script.test.ts",
+        "src/extraction/astro-extractor.ts",
+        "src/extraction/sfc-script.ts",
+        "src/extraction/svelte-extractor.ts",
+        "src/extraction/syntax-tokens.ts",
+        "src/extraction/vue-extractor.ts",
+        "src/extraction/vue-template-calls.ts"
+      ]
+    },
+    {
+      "revision": "fd57eaaa456e02fba3b5a4e1cd0ac63ba46d4b03",
+      "subject": "fix(mcp): a tools/call whose arguments aren't an object gets invalid params, not a crash (#3071)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/mcp-tool-call-arguments.test.ts",
+        "src/mcp/proxy.ts",
+        "src/mcp/session.ts"
+      ]
+    },
+    {
+      "revision": "063708ba535653659560e7e75bc511b9dc485068",
+      "subject": "fix(pascal): Delphi chained calls and method pointers follow declared types (#3065)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/pascal-chained-calls.test.ts",
+        "__tests__/pascal-for-in-var.test.ts",
+        "__tests__/pascal-reference-boundaries.test.ts",
+        "src/extraction/tree-sitter.ts",
+        "src/resolution/name-matcher.ts",
+        "src/resolution/pascal-scope.ts"
+      ]
+    },
+    {
+      "revision": "5526e33d1d69ecf7ce3243a6ba9b0ad7e110fe15",
+      "subject": "fix(status): recommend a re-index when package.json alone adds or drops a framework",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/framework-hint-resolver-only.test.ts",
+        "src/bin/codegraph.ts",
+        "src/index.ts"
+      ]
+    },
+    {
+      "revision": "1c40e34141c4b43b80e02ecba3d53d223ec71396",
+      "subject": "fix(mcp): a projectPath naming a file resolves through its directory",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/mcp-nested-repo-projectpath.test.ts",
+        "__tests__/mcp-projectpath-file.test.ts",
+        "src/mcp/tools.ts"
+      ]
+    },
+    {
+      "revision": "59eb0d282048bd15e5f5cdec8c3b8a9bbe98d3d9",
+      "subject": "fix(resolution): an import no longer lands on a same-named method of an exported object",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/import-object-member-namesake.test.ts",
+        "src/resolution/import-resolver.ts"
+      ]
+    },
+    {
+      "revision": "fa03fa6bb4b26b350a5d7cb4201aa1be6139627b",
+      "subject": "fix(callers): list every call site of a caller, and a function that calls itself (#3077)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/callers-call-sites.test.ts",
+        "src/bin/codegraph.ts",
+        "src/graph/call-sites.ts",
+        "src/graph/index.ts",
+        "src/graph/traversal.ts",
+        "src/index.ts",
+        "src/mcp/tools.ts"
+      ]
+    },
+    {
+      "revision": "0d7480f83b09098efb4f46556a7de3e98c038688",
+      "subject": "fix(cpp): an overload chosen by arguments that call it again no longer overflows the stack",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/cpp-overload-argument-reentry.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "03c10ada870b4ba34a482c62694e43778a36e6b8",
+      "subject": "ci(site): move the site deploy off the Node 20 action runtime (#3048)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        ".github/workflows/deploy-site.yml"
+      ]
+    },
+    {
+      "revision": "910e9bd86f1d5ae2e443e2cf64d1d722c1a75593",
+      "subject": "fix(site): agent lists include GitHub Copilot, and Codex notes its IDE extension (#3066)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        "site/src/content/docs/getting-started/installation.md",
+        "site/src/content/docs/getting-started/introduction.md",
+        "site/src/content/docs/getting-started/quickstart.md",
+        "site/src/content/docs/guides/indexing.md",
+        "site/src/content/docs/reference/integrations.md",
+        "site/src/pages/index.astro"
+      ]
+    },
+    {
+      "revision": "a3e9e760b1c6a304c3680b9a268c49d509a6bf10",
+      "subject": "fix(explore): Flow reaches a named symbol a shorter route gets to first (#3079)",
+      "status": "ported",
+      "note": "Native implementation and regression coverage included in v0.0.9.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/explore-exact-target.test.ts",
+        "__tests__/flow-named-longer-route.test.ts",
+        "src/graph/named-symbol-flow.ts"
+      ]
+    },
+    {
+      "revision": "a0c6c1b17c716907d1c642cf265a57a8c69698be",
+      "subject": "fix(liquid): a variable named with a hyphen is indexed under its whole name (#3080)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/extraction.test.ts",
+        "src/extraction/liquid-extractor.ts"
+      ]
+    },
+    {
+      "revision": "3f66df358e97d10a4ed24577cf1f735b4441fbb0",
+      "subject": "docs: add a contributing guide and a documentation index (#3081)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        "CONTRIBUTING.md",
+        "README.md",
+        "docs/README.md"
+      ]
+    },
+    {
+      "revision": "cd04b21a314757b867de36ba5992ffc32eb3cb1c",
+      "subject": "fix(python): a base's type argument is no supertype, so Repo.save() is not User.save",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-supertype-type-arguments.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "17d5426d631cf19702e7113aab347d452c7c1580",
+      "subject": "feat(files): list a project's files by the package that owns them (#3090)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/owning-package.test.ts",
+        "site/src/content/docs/reference/cli.md",
+        "src/bin/codegraph.ts",
+        "src/graph/owning-package.ts",
+        "src/mcp/tools.ts"
+      ]
+    },
+    {
+      "revision": "22cf7d3aa15e438fca110c86f4418b58bf737df7",
+      "subject": "fix(watch): a watch callback that throws no longer ends the host's process (#3092)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/watcher.test.ts",
+        "src/sync/watcher.ts"
+      ]
+    },
+    {
+      "revision": "f4c4dae91cc7d4e7a52198b27e4b0457069c8e58",
+      "subject": "feat(mcp): the server gives hosts its title and icon (#3095)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/mcp-daemon.test.ts",
+        "__tests__/mcp-initialize.test.ts",
+        "src/mcp/session.ts"
+      ]
+    },
+    {
+      "revision": "7889da6697e843bdff9fda737d62dc3d15c9ba40",
+      "subject": "feat(status): show files parsed beside files found, and add --strict (#3096)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/status-language-coverage.test.ts",
+        "site/src/content/docs/reference/cli.md",
+        "src/bin/codegraph.ts",
+        "src/db/queries.ts",
+        "src/extraction/grammars.ts",
+        "src/index.ts",
+        "src/mcp/tools.ts",
+        "src/types.ts"
+      ]
+    },
+    {
+      "revision": "47526d2078e578deed8dae1c9db87f7df89f9de8",
+      "subject": "feat(serve): --no-telemetry turns telemetry off for one MCP server entry",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "TELEMETRY.md",
+        "__tests__/serve-no-telemetry.test.ts",
+        "src/bin/codegraph.ts"
+      ]
+    },
+    {
+      "revision": "9bfdd092386e6652fb086b8e8b079cffe7bc49c5",
+      "subject": "feat(cli): codegraph cycles lists the files that import each other in a circle (#3099)",
+      "status": "partial",
+      "note": "Import SCC derivation ported; new cycles CLI options remain pending.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/cli-cycles.test.ts",
+        "__tests__/file-cycles.test.ts",
+        "__tests__/read-commands-during-rebuild.test.ts",
+        "site/src/content/docs/reference/cli.md",
+        "src/bin/codegraph.ts",
+        "src/db/queries.ts",
+        "src/graph/file-cycles.ts",
+        "src/graph/queries.ts",
+        "src/index.ts",
+        "src/ui-server/api/map.ts"
+      ]
+    },
+    {
+      "revision": "3fca009e7bca885c54ffcfd3d2380fd96d1a91c9",
+      "subject": "fix(python): a parameterized base links its class, like class Leaf(Base[str])",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-generic-bases.test.ts",
+        "codegraph-kernel/src/python.rs",
+        "src/extraction/tree-sitter.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "08b187aaf6f1fce416d9fcf5947c4d9ef810a3e0",
+      "subject": "feat(cli): codegraph implementations <name> lists the types that implement or extend a type",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/cli-implementations.test.ts",
+        "__tests__/read-commands-during-rebuild.test.ts",
+        "src/bin/codegraph.ts",
+        "src/graph/test-code.ts"
+      ]
+    },
+    {
+      "revision": "27c904b011630bc02566f9263e36e8c90c55845b",
+      "subject": "fix(python): a base list wrapped over several lines is read whole",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-multiline-bases.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "fb71a9f4b38222891a1e06471b7c543c3fdd0cd3",
+      "subject": "feat(init): --local-only keeps .codegraph/ out of git entirely (#3104)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/local-only-gitignore.test.ts",
+        "site/src/content/docs/reference/cli.md",
+        "src/bin/codegraph.ts",
+        "src/directory.ts"
+      ]
+    },
+    {
+      "revision": "173953824d2d64ca573888de328b482be2490911",
+      "subject": "feat(sync): CODEGRAPH_SYNTH_MIN_INTERVAL_MS bounds how often live syncs rebuild the synthesized edges",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/sync-synthesis-interval.test.ts",
+        "src/index.ts"
+      ]
+    },
+    {
+      "revision": "274b43c44b12df401ed44206afe0320868335451",
+      "subject": "fix(python): a base imported from outside the project is not a project class of that name (#3109)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-outside-bases.test.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/index.ts"
+      ]
+    },
+    {
+      "revision": "b1e6c9767d2967f01df61a2fa9a768365d77372d",
+      "subject": "test: move the test workspace to Vitest 4 and align the Vite toolchain",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "__tests__/git-index-currency.test.ts",
+        "__tests__/global-setup-home-sandbox.ts",
+        "__tests__/test-home-sandbox.test.ts",
+        "__tests__/vitest-worker-flags.test.ts",
+        "package-lock.json",
+        "package.json",
+        "ui/package.json",
+        "vitest.config.mts",
+        "vitest.workspace.mts"
+      ]
+    },
+    {
+      "revision": "bea5e205f484bb1fd0c5c30790600fd67ed4db21",
+      "subject": "fix(python): a class with PEP 695 type parameters reads its base list",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-pep695-bases.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "002dd4d51766c5191ca1a68ba739c413a5126c7a",
+      "subject": "feat(frameworks): CodeIgniter 3 routes, and calls through what $this->load loads (#3112)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/codeigniter.test.ts",
+        "docs/design/framework-coverage.md",
+        "src/resolution/frameworks/codeigniter.ts",
+        "src/resolution/frameworks/index.ts"
+      ]
+    },
+    {
+      "revision": "61e1621813642f5368ece15bc5fd8df893abe85d",
+      "subject": "feat(installer): nine more agents: Bob, Droid, Windsurf, Qwen, dsh, Grok, Kimi, Qoder, Pi (#3113)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/installer-targets.test.ts",
+        "__tests__/setup-home-sandbox.ts",
+        "src/bin/codegraph.ts",
+        "src/installer/index.ts",
+        "src/installer/instructions-template.ts",
+        "src/installer/targets/bob.ts",
+        "src/installer/targets/codex.ts",
+        "src/installer/targets/droid.ts",
+        "src/installer/targets/dsh.ts",
+        "src/installer/targets/grok.ts",
+        "src/installer/targets/hermes.ts",
+        "src/installer/targets/json-config.ts",
+        "src/installer/targets/kimi.ts",
+        "src/installer/targets/pi.ts",
+        "src/installer/targets/qoder.ts",
+        "src/installer/targets/qwen.ts",
+        "src/installer/targets/registry.ts",
+        "src/installer/targets/shared.ts",
+        "src/installer/targets/toml.ts",
+        "src/installer/targets/types.ts",
+        "src/installer/targets/windsurf.ts"
+      ]
+    },
+    {
+      "revision": "c0b490626bb6dfb5c38ed342639b11fc34f5d54a",
+      "subject": "fix(python): a class-name call doesn't follow a base imported from outside the project (#3115)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-outside-bases.test.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "d494e432eded708b061a75dadc6f6c0306cad40f",
+      "subject": "fix(graph): a path search keeps one predecessor per node, so it stays linear",
+      "status": "already-native",
+      "note": "Native find_path already uses one predecessor per node and enqueues each node once.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/graph.test.ts",
+        "src/graph/traversal.ts"
+      ]
+    },
+    {
+      "revision": "a2870563d779914306da0ae8f90a41dfeb574011",
+      "subject": "feat(drupal): services, plugin definitions and #[Hook] methods are part of the graph (#3118)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/drupal-services.test.ts",
+        "src/resolution/frameworks/drupal.ts"
+      ]
+    },
+    {
+      "revision": "446d08c272f18e8ce9e61ea537228240893fc131",
+      "subject": "feat(nextjs): a route links to the proxy that runs before it (#3119)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "__tests__/nextjs-proxy.test.ts",
+        "__tests__/nextjs.test.ts",
+        "docs/design/framework-coverage.md",
+        "src/graph/synthesized-hop.ts",
+        "src/resolution/callback-synthesizer.ts",
+        "src/resolution/frameworks/next-proxy.ts",
+        "src/resolution/next-router-synthesizer.ts",
+        "src/ui-server/api/route-roots.ts",
+        "src/ui-server/api/screens.ts"
+      ]
+    },
+    {
+      "revision": "0603ad9e9ed84abb417a9ed34360575b15481797",
+      "subject": "fix(cli): sync warns about an index from an older engine, and still runs",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/cli-sync-stale-index.test.ts",
+        "src/bin/codegraph.ts"
+      ]
+    },
+    {
+      "revision": "737ee961537cf2a52d1b2948cb11fc7fbcd4f705",
+      "subject": "feat(mcp): warn once when a project's index predates the running engine",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/mcp-daemon.test.ts",
+        "__tests__/mcp-index-version-warning.test.ts",
+        "src/mcp/index-version-warning.ts",
+        "src/mcp/proxy.ts",
+        "src/mcp/session.ts",
+        "src/mcp/tools.ts"
+      ]
+    },
+    {
+      "revision": "0410b31084630da57a665c84894fc8c012650c1d",
+      "subject": "fix(cli): after an upgrade, status and the reminder name only codegraph index (#3123)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/status-during-rebuild.test.ts",
+        "__tests__/upgrade.test.ts",
+        "src/bin/codegraph.ts",
+        "src/upgrade/index.ts"
+      ]
+    },
+    {
+      "revision": "b6ea6179ff36106ec9f58403ee938614b1f61e6a",
+      "subject": "feat(cli): files --json marks test files, with --tests and --no-tests filters",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/cli-files-test-classification.test.ts",
+        "__tests__/owning-package.test.ts",
+        "src/bin/codegraph.ts",
+        "src/mcp/tools.ts"
+      ]
+    },
+    {
+      "revision": "cc8636167b66a7fd80e3732ac4a4e58004c8f570",
+      "subject": "fix(graph): impact stops at a safety budget and says it was truncated",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/cli-definition-grouping.test.ts",
+        "__tests__/graph.test.ts",
+        "src/bin/codegraph.ts",
+        "src/db/queries.ts",
+        "src/graph/traversal.ts",
+        "src/index.ts",
+        "src/mcp/tools.ts",
+        "src/types.ts"
+      ]
+    },
+    {
+      "revision": "f92bdcae05038b74e63346ec4900a5f7cc408157",
+      "subject": "fix(mcp): idle query workers are recycled, so a burst's memory is given back",
+      "status": "runtime-specific",
+      "note": "JavaScript/V8/module-loading or JS worker-pool mechanism; no direct native equivalent to cherry-pick.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/query-pool.test.ts",
+        "src/mcp/query-pool.ts",
+        "src/mcp/query-worker.ts"
+      ]
+    },
+    {
+      "revision": "84c7fbae0504847c87b54cadef38f673bd89a8ee",
+      "subject": "feat(csharp): MediatR reaches a handler behind any interface, with no config (#3127)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/mediatr-dispatch-synthesizer.test.ts",
+        "docs/design/dispatch-synthesizer-backlog.md",
+        "src/resolution/callback-synthesizer.ts"
+      ]
+    },
+    {
+      "revision": "974920565675800f56be94cc8aeee9a30e1282e3",
+      "subject": "feat(razor): a view's inline script links to the JavaScript it calls (#3128)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/explore-blast-radius.test.ts",
+        "__tests__/extraction.test.ts",
+        "__tests__/razor-script.test.ts",
+        "docs/design/template-markup-parser.md",
+        "src/extraction/grammars.ts",
+        "src/extraction/razor-extractor.ts",
+        "src/extraction/razor-script.ts",
+        "src/mcp/tools.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "2008e2f33fba48c07d3f08baad519015ba80bce1",
+      "subject": "feat(tauri): a frontend's invoke and events link across to the Rust that answers (#3129)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "__tests__/tauri-ipc.test.ts",
+        "docs/design/dynamic-dispatch-coverage-playbook.md",
+        "src/db/queries.ts",
+        "src/graph/synthesized-hop.ts",
+        "src/resolution/callback-synthesizer.ts",
+        "src/resolution/tauri-synthesizer.ts"
+      ]
+    },
+    {
+      "revision": "0f93575c8393dcbae1dc7fbd32fa817ccf31f0c2",
+      "subject": "fix(python): a script's import of a module in a folder above it links again (#3141)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-module-resolution.test.ts",
+        "src/index.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/index.ts"
+      ]
+    },
+    {
+      "revision": "9d3abb843a84d7610bf987bda7a1db4a6fe3eee3",
+      "subject": "fix(resolution): a flow carries on through a const that hands a function on (#3142)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/const-alias-flow.test.ts",
+        "src/db/queries.ts",
+        "src/graph/named-symbol-flow.ts",
+        "src/graph/synthesized-hop.ts",
+        "src/index.ts",
+        "src/resolution/callback-synthesizer.ts",
+        "src/resolution/const-alias-synthesizer.ts",
+        "src/resolution/frameworks/react.ts",
+        "src/resolution/import-resolver.ts"
+      ]
+    },
+    {
+      "revision": "6ad8beccf7aca0b5cd287e31026988b634c7847a",
+      "subject": "perf(cli): read commands no longer load the indexing code, and start in half the time (#3143)",
+      "status": "runtime-specific",
+      "note": "JavaScript/V8/module-loading or JS worker-pool mechanism; no direct native equivalent to cherry-pick.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "__tests__/index-recovery-off-thread.test.ts",
+        "__tests__/lazy-engine-eager.ts",
+        "__tests__/lazy-engine.test.ts",
+        "src/engine.ts",
+        "src/errors.ts",
+        "src/index.ts",
+        "src/lazy-engine.ts",
+        "src/mcp/daemon-paths.ts",
+        "src/mcp/daemon-registry.ts",
+        "src/mcp/project-lifecycle.ts",
+        "src/sync/watcher.ts",
+        "src/telemetry/index.ts",
+        "vitest.config.mts"
+      ]
+    },
+    {
+      "revision": "a0174cee3114046e7c0c6e15c2c9a2893fa25911",
+      "subject": "fix(c,cpp): a struct links the types its members are declared with (#3144)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/c-cpp-member-type-refs.test.ts",
+        "__tests__/fixtures/kernel-parity/torture.c",
+        "__tests__/fixtures/kernel-parity/torture.cpp",
+        "codegraph-kernel/src/ccpp/mod.rs",
+        "docs/design/ccpp-kernel-port-checklist.md",
+        "src/extraction/languages/c-cpp.ts",
+        "src/extraction/tree-sitter.ts",
+        "src/mcp/tools.ts",
+        "src/resolution/cpp-supertypes.ts",
+        "src/resolution/cpp-type-aliases.ts",
+        "src/resolution/index.ts"
+      ]
+    },
+    {
+      "revision": "d087b942394ea21a2d328200833ec8e193f3454c",
+      "subject": "perf(resolution): read C++ names and receiver types with one pattern per language (#3145)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "src/resolution/cpp-raw-strings.ts",
+        "src/resolution/cpp-type-aliases.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "aaba9297efa10ab634c98d3aa5966b577c9d49e3",
+      "subject": "perf(resolution): read a Rust or Java reference's line once, not once per candidate (#3146)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "src/resolution/name-matcher.ts",
+        "src/utils.ts"
+      ]
+    },
+    {
+      "revision": "f76b46885776910ef37ab2397f9f17ac01452be5",
+      "subject": "perf(resolution): strip comments by slices, not an array of characters (#3147)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/strip-comments.test.ts",
+        "src/resolution/strip-comments.ts"
+      ]
+    },
+    {
+      "revision": "d54fc43a1f31e40d7761c460cfe23b6743de2a36",
+      "subject": "perf(resolution): a cache hit moves one entry, without touching the Map (#3148)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/integration/lru-cache.test.ts",
+        "src/resolution/lru-cache.ts"
+      ]
+    },
+    {
+      "revision": "fc7dd0d94601fbdddab5bcd120259d244361facb",
+      "subject": "perf(resolution): look for a JS binding only where a mention of the name could be one (#3149)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "195faa97a7aa5a21388460f45881d009c3c5f0bd",
+      "subject": "perf(resolution): resolver workers keep their young generation to 48 MB (#3150)",
+      "status": "runtime-specific",
+      "note": "JavaScript/V8/module-loading or JS worker-pool mechanism; no direct native equivalent to cherry-pick.",
+      "files": [
+        "CHANGELOG.md",
+        "src/resolution/resolver-pool.ts"
+      ]
+    },
+    {
+      "revision": "1b0e351dfaad787246100e409df12041b36bc3a8",
+      "subject": "perf(resolution): a full index detects frameworks once, and remembers which paths are tests (#3151)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/resolver-shared-frameworks.test.ts",
+        "src/index.ts",
+        "src/resolution/index.ts",
+        "src/resolution/resolver-pool.ts",
+        "src/resolution/resolver-worker.ts",
+        "src/search/query-utils.ts"
+      ]
+    },
+    {
+      "revision": "fe783cb0618a93d86b00c4d5aa92e37c71a787e6",
+      "subject": "fix(cli): a temp folder on a missing drive no longer hangs every command (#3152)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/compile-cache-missing-drive.test.ts",
+        "src/bin/codegraph.ts",
+        "src/compile-cache.ts",
+        "src/extraction/parse-worker.ts",
+        "src/extraction/store-worker.ts",
+        "src/resolution/resolver-worker.ts"
+      ]
+    },
+    {
+      "revision": "d87ec3602d1f2809f284ed03f45c8d8fb9050eff",
+      "subject": "build: the built JavaScript carries no comments (#3153)",
+      "status": "reference-only",
+      "note": "Documentation, reference dependencies/tests, or upstream website/release changes; not native runtime code.",
+      "files": [
+        "package.json",
+        "tsconfig.json"
+      ]
+    },
+    {
+      "revision": "0576044b7587dabc5aed881ac87bda912e01f7ec",
+      "subject": "fix(python): a script's import of a module beside it in a package folder links again (#3155)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-module-resolution.test.ts",
+        "src/index.ts",
+        "src/resolution/import-resolver.ts"
+      ]
+    },
+    {
+      "revision": "4499d00758ca56075ef35678caa71f7b26aba7e2",
+      "subject": "fix(js,ts): a declare module answers its own package, behind a real module (#3157)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/ambient-module-imports.test.ts",
+        "src/db/queries.ts",
+        "src/resolution/ambient-modules.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/module-importers.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "3ea6d235be15cb36e65b15c2eb6c1abe5a825926",
+      "subject": "fix(mcp): a quiet pool keeps one trimmed worker, so the next call stays warm (#3167)",
+      "status": "runtime-specific",
+      "note": "JavaScript/V8/module-loading or JS worker-pool mechanism; no direct native equivalent to cherry-pick.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/dominant-file-cache.test.ts",
+        "__tests__/query-pool.test.ts",
+        "src/db/index.ts",
+        "src/index.ts",
+        "src/mcp/query-pool.ts",
+        "src/mcp/query-worker.ts",
+        "src/mcp/tools.ts"
+      ]
+    },
+    {
+      "revision": "9c5cf97e546947b7413eef97e5ea2fa541785db1",
+      "subject": "fix(js,ts): a function inside an object literal's method is a local, not a member (#3161)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/js-object-literal-members.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "39fc08395d22a925aa6bc476dc2d3353bfad0c9f",
+      "subject": "fix(js,ts): a member of a required or default-imported module is that module's export (#3162)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/js-default-binding-members.test.ts",
+        "src/resolution/import-resolver.ts"
+      ]
+    },
+    {
+      "revision": "206449b228d70ea21ff5c5559c54fd37a2e57963",
+      "subject": "fix(python): a dotted chain through an imported class links its last link (#3163)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/python-dotted-chain-target.test.ts",
+        "src/resolution/import-resolver.ts"
+      ]
+    },
+    {
+      "revision": "2393ea2f0ba00f070a8a992f905438b25c0cf10a",
+      "subject": "fix(ts): a receiver typed by a type alias calls the class the alias names (#3164)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/ts-alias-typed-receivers.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "6473f6098f6b8e0dde121c836c207ebe7876beea",
+      "subject": "fix(flow): a Flow library's declarations are globals of the files Flow reads (#3165)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/flow-library-globals.test.ts",
+        "src/resolution/ambient-modules.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "3bd99495caddd975bbb3f9ad6558249a014fbe85",
+      "subject": "fix(js,ts): a package import follows the page, and stops at a monorepo's own edge (#3166)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/workspace-browser-and-nested-roots.test.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts",
+        "src/resolution/workspace-packages.ts"
+      ]
+    },
+    {
+      "revision": "14c25e37a165805a365f29b7591b788481817c41",
+      "subject": "fix(php): a receiver reaches the class PHP means, through its real parents and traits (#3168)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/php-receiver-class-ancestry.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "087de4ca34b72bd64b59b49fd6edda2636c526c6",
+      "subject": "fix(ruby): a call follows a class's real ancestors, in Ruby's order (#3169)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/ruby-receiver-class-ancestry.test.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts",
+        "src/resolution/ruby-constant-paths.ts"
+      ]
+    },
+    {
+      "revision": "b23c88057019b35c5bf77bec9a4f9cc96b065c9d",
+      "subject": "fix(c): a function that writes a macro before a block still uses the macro (#3172)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/c-statement-macro-names.test.ts",
+        "__tests__/cpp-raw-string-preparse-1505.test.ts",
+        "__tests__/extraction.test.ts",
+        "src/extraction/languages/c-cpp.ts"
+      ]
+    },
+    {
+      "revision": "cb1e13d8d247567f6219b52d14ffe8c913c69fd5",
+      "subject": "fix(c,cpp): a member whose type a macro renames links what the macro names (#3173)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/c-macro-renames.test.ts",
+        "src/resolution/c-macro-renames.ts",
+        "src/resolution/cpp-macro-visibility.ts",
+        "src/resolution/cpp-supertypes.ts",
+        "src/resolution/index.ts"
+      ]
+    },
+    {
+      "revision": "79c25b76972f999ad84c7f986968442fb80c0087",
+      "subject": "fix(objc): a struct links the types its members are declared with (#3174)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/objc-member-type-refs.test.ts",
+        "src/extraction/tree-sitter.ts",
+        "src/mcp/tools.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "9191ab6644cf9679b88080357d70cd07833502f5",
+      "subject": "fix(python): a call on an element of a collection links to the project's one method (#3175)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-subscript-receivers.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "e651b87238a4c3714d50335b3bf7345466ed8701",
+      "subject": "fix(index): a sparse checkout no longer reads the files it leaves out (#3176)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/sparse-checkout.test.ts",
+        "src/extraction/index.ts",
+        "src/utils.ts"
+      ]
+    },
+    {
+      "revision": "092e6cf8a57c8a95ea52b1b43dee9cc63c197a3e",
+      "subject": "fix(csharp): type arguments and keyword types decide what a name means (#3170)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/csharp-declared-receivers.test.ts",
+        "src/resolution/frameworks/csharp.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "5cd8a9a83a203f16b5260b7a0425e6498f5afe1a",
+      "subject": "fix(js): a file that gives an object a method itself takes no lone guess from elsewhere (#3171)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/js-prototype-member-guess.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "d2e0389b519be398f9bc616b6f7bea8a7edfbc6a",
+      "subject": "fix(status): a widened or narrowed sparse checkout shows in status (#3177)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/status-sparse-checkout.test.ts",
+        "src/extraction/index.ts"
+      ]
+    },
+    {
+      "revision": "4b5cb19d37fd92810f979a405c0ffed137cf14cb",
+      "subject": "perf(cli): V8's new space stays at 16 MB a side, so a sync peaks where 1.6.2 did (#3178)",
+      "status": "runtime-specific",
+      "note": "JavaScript/V8/module-loading or JS worker-pool mechanism; no direct native equivalent to cherry-pick.",
+      "files": [
+        "__tests__/bundle-launcher.test.ts",
+        "__tests__/wasm-runtime-flags.test.ts",
+        "scripts/build-bundle.sh",
+        "scripts/npm-shim.js",
+        "src/extraction/wasm-runtime-flags.ts"
+      ]
+    },
+    {
+      "revision": "3b37fb014b4bbb2d53db0e1de7489ca249328839",
+      "subject": "perf(index): start the parse workers a project needs, and let them pass a slow file (#3179)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/lazy-frameworks-eager.ts",
+        "__tests__/lazy-frameworks.test.ts",
+        "__tests__/parse-pool.test.ts",
+        "src/extraction/index.ts",
+        "src/extraction/lazy-frameworks.ts",
+        "src/extraction/parse-pool.ts",
+        "src/extraction/parse-worker.ts",
+        "src/extraction/tree-sitter.ts",
+        "vitest.config.mts"
+      ]
+    },
+    {
+      "revision": "3ee59947c0aec6cf3c771adf8244cc0e7c438485",
+      "subject": "perf(db): read node rows as arrays, and a source file through one open (#3180)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/node-rows.test.ts",
+        "__tests__/resolution-file-read.test.ts",
+        "src/db/queries.ts",
+        "src/db/sqlite-adapter.ts",
+        "src/resolution/index.ts"
+      ]
+    },
+    {
+      "revision": "1f188da1f237851a5785a07984bc95c305edcb9f",
+      "subject": "perf(cpp): read C and C++ text by char codes, and ask each question once (#3181)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/cpp-lookup-memos.test.ts",
+        "__tests__/cpp-raw-strings.test.ts",
+        "src/extraction/languages/c-cpp.ts",
+        "src/resolution/cpp-raw-strings.ts",
+        "src/resolution/cpp-supertypes.ts",
+        "src/resolution/cpp-type-aliases.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "221d80c719b409e0d9e6cf7aa1c7de3630d0c2cc",
+      "subject": "fix(rust): a use through a module with a file per cfg reaches the item one file holds (#3184)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/rust-path-attribute-modules.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "608487e210312990b479cd5cf262c644c27460e9",
+      "subject": "fix(go): an implementer's methods must take and return the interface's types (#3185)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/go-implements-types.test.ts",
+        "__tests__/go-promoted-dispatch.test.ts",
+        "src/resolution/callback-synthesizer.ts"
+      ]
+    },
+    {
+      "revision": "45ea680175ca846f5181c81166e04e81a9cb80e6",
+      "subject": "fix(swift): a closure reaches the overload that takes a function, a value the other (#3186)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/swift-overload-closure.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "be06c5e21406df1da1d1c6ab8e908be41755c846",
+      "subject": "fix(java): a call's arguments pick its overload, and a lambda's parameter is typed (#3187)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/java-overload-arguments.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "fab65e9dd6ea925fe7c69289f15f41cc60255536",
+      "subject": "fix(java): what a class inherits doesn't depend on resolve order, or on a namesake (#3188)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/java-supertype-reach.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "c344366153c24d842aff094044bb49f8c0839e2b",
+      "subject": "fix(java): reading another class's constant doesn't read the file's own (#3189)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/java-value-reads.test.ts",
+        "codegraph-kernel/src/java.rs",
+        "src/extraction/tree-sitter.ts"
+      ]
+    },
+    {
+      "revision": "41587d38ddc387a8dafdfb2054b17e106c42aa7a",
+      "subject": "fix(kotlin): a chain reads through a holder of its type argument (#3190)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/kotlin-value-holder-chains.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "59bfe6d7fd170707cff93cf4cc2bc17fed103261",
+      "subject": "fix(kotlin): a Multiplatform import reaches what the caller compiles against (#3191)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/kotlin-expect-actual-callers.test.ts",
+        "src/resolution/import-resolver.ts"
+      ]
+    },
+    {
+      "revision": "afa1e1476bb21bb21290628ed2852f700856350d",
+      "subject": "perf(resolution): resolver workers take the main thread's C++ project scans (#3182)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/resolver-project-scans.test.ts",
+        "src/resolution/cpp-includers.ts",
+        "src/resolution/cpp-namespaces.ts",
+        "src/resolution/index.ts",
+        "src/resolution/project-scans.ts",
+        "src/resolution/resolver-pool.ts",
+        "src/resolution/resolver-worker.ts"
+      ]
+    },
+    {
+      "revision": "15483713763f344ff30fb7df92bcf091c7bd9758",
+      "subject": "perf(resolution): run the resolver workers the main thread can keep busy (#3183)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/resolver-pool-pipeline.test.ts",
+        "__tests__/resolver-pool-sizing.test.ts",
+        "src/resolution/index.ts",
+        "src/resolution/resolver-pool.ts"
+      ]
+    },
+    {
+      "revision": "4e96d75946b4ffbacf3cc5c25ee5fbc8ac176d30",
+      "subject": "fix(resolution): a large run waits for its pool, so the main thread doesn't scan the project (#3192)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "__tests__/resolver-pool-pipeline.test.ts",
+        "src/resolution/index.ts",
+        "src/resolution/resolver-pool.ts"
+      ]
+    },
+    {
+      "revision": "6aa358ccbae30fbf27318f79ee183212f726f9ba",
+      "subject": "fix(java): a lambda or method reference reaches the overload that takes a function (#3193)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/java-overload-arguments.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "47a9c7d65d5c39094ef1e45ee9486561a9b298df",
+      "subject": "fix(python): whether a name is a local goes by the line reading it, not who asked first (#3194)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "CHANGELOG.md",
+        "__tests__/python-local-binding-order.test.ts",
+        "src/resolution/name-matcher.ts"
+      ]
+    },
+    {
+      "revision": "483a09884d272a334c2f279c024951e8e0504b66",
+      "subject": "fix(ruby): a call on a parameter takes its class from the method's call sites (#3195)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "__tests__/parameter-flow.test.ts",
+        "src/db/parameter-flow-queries.ts",
+        "src/db/queries.ts",
+        "src/file-limits.ts",
+        "src/index.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts",
+        "src/resolution/parameter-flow.ts",
+        "src/resolution/ruby-constant-paths.ts",
+        "src/resolution/ruby-parameter-flow.ts"
+      ]
+    },
+    {
+      "revision": "f72c9d2efb14454ff4f9fd7b8460abd82f19a287",
+      "subject": "fix(resolution): what a resolver keeps goes when what it was read from moves (#3214)",
+      "status": "pending",
+      "note": "Not claimed as ported by this release.",
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "__tests__/name-matcher-memo-clears.test.ts",
+        "__tests__/resolution.test.ts",
+        "__tests__/sync-memo-lifetime.test.ts",
+        "__tests__/sync-module-config-change.test.ts",
+        "__tests__/worker-teardown.test.ts",
+        "src/engine.ts",
+        "src/index.ts",
+        "src/resolution/frameworks/angular-router.ts",
+        "src/resolution/frameworks/cargo-workspace.ts",
+        "src/resolution/frameworks/cics.ts",
+        "src/resolution/frameworks/expo-modules.ts",
+        "src/resolution/frameworks/rust.ts",
+        "src/resolution/import-resolver.ts",
+        "src/resolution/index.ts",
+        "src/resolution/name-matcher.ts",
+        "src/resolution/resolver-pool.ts",
+        "src/resolution/types.ts"
+      ]
+    }
+  ]
+}

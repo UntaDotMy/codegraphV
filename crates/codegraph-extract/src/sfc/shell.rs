@@ -131,11 +131,11 @@ pub(super) fn script_blocks<'a>(
     lines: &Lines<'_>,
     language: Language,
 ) -> Vec<ScriptBlock<'a>> {
-    re!(r"<script(\s[^>]*)?>(?<content>[\s\S]*?)</script>", "g")
+    re!(r"<script(\s[^>]*?)?(?:/>|>(?<content>[\s\S]*?)</script>)", "g")
         .captures_iter(source)
-        .map(|c| {
+        .filter_map(|c| {
             let attrs = c.text(1).unwrap_or("");
-            let content = c.get(2).unwrap();
+            let content = c.get(2)?;
             let module = language == Language::Svelte
                 && re!(r#"context\s*=\s*["']module["']|(?:^|\s)module(?=[\s=]|$)"#).is_match(attrs);
             let typescript = language == Language::Astro
@@ -148,7 +148,7 @@ pub(super) fn script_blocks<'a>(
             } else {
                 !module
             };
-            ScriptBlock {
+            Some(ScriptBlock {
                 content: content.as_str(),
                 offset: lines.row(content.start()) as u32,
                 per_instance,
@@ -159,7 +159,7 @@ pub(super) fn script_blocks<'a>(
                 } else {
                     Language::JavaScript
                 },
-            }
+            })
         })
         .collect()
 }
@@ -190,7 +190,8 @@ fn frontmatter<'a>(lines: &Lines<'a>) -> Option<(ScriptBlock<'a>, usize, usize)>
 
 pub(super) fn covered_lines(lines: &Lines<'_>) -> Vec<bool> {
     let mut covered = vec![false; lines.starts.len()];
-    for c in re!(r"<(script|style)(\s[^>]*)?>[\s\S]*?</\1>", "g").captures_iter(lines.source) {
+    for c in re!(r"<(script|style)(\s[^>]*?)?(?:/>|>([\s\S]*?)</\1>)", "g").captures_iter(lines.source) {
+        if c.get(3).is_none() { continue; }
         let m = c.get(0).unwrap();
         covered[lines.row(m.start())..=lines.row(m.end())].fill(true);
     }

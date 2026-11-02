@@ -240,18 +240,20 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE};
         use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
         // SAFETY: plain handle open / query / close.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle.is_null() {
-                return false;
+                // An elevated/other-user process is not a stale lock holder just
+                // because this process lacks permission to inspect it.
+                return GetLastError() == ERROR_ACCESS_DENIED;
             }
             let mut code: u32 = 0;
             let ok = GetExitCodeProcess(handle, &mut code);
             CloseHandle(handle);
-            ok != 0 && code == STILL_ACTIVE as u32
+            ok == 0 || code == STILL_ACTIVE as u32
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -280,10 +282,24 @@ impl FileLock {
 
     /// Acquire the lock. Errs if the lock is held by another live process.
     pub fn acquire(&mut self) -> Result<(), String> {
+        // Serialize inspection/removal/creation, including stale-lock takeover.
+        // The OS releases this guard on a crash. Never unlink its file: replacing
+        // the inode would let two processes lock different guards (upstream #3056).
+        let mut guard_path = self.lock_path.as_os_str().to_os_string();
+        guard_path.push(".guard");
+        let guard = std::fs::OpenOptions::new().read(true).write(true).create(true)
+            .truncate(false).open(PathBuf::from(guard_path)).map_err(|e| e.to_string())?;
+        guard.try_lock().map_err(|e| format!("CodeGraphV database is locked by another process: {e}"))?;
         // Check for existing lock.
         if self.lock_path.exists() {
             match std::fs::read_to_string(&self.lock_path) {
                 Ok(content) => {
+                    // An older executable may still be filling a just-created file.
+                    if content.trim().is_empty() && std::fs::metadata(&self.lock_path)
+                        .and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok())
+                        .is_none_or(|age| age < std::time::Duration::from_secs(5)) {
+                        return Err("CodeGraphV database is locked by another process (lock being created).".into());
+                    }
                     // A long sync can hold the lock for hours. Its age says nothing about whether
                     // the writer is still alive; only a dead PID is stale.
                     if let Some(pid) = parse_int_prefix(content.trim()) {
@@ -297,9 +313,10 @@ impl FileLock {
                     // Stale lock (dead process or malformed PID) - remove it.
                     let _ = std::fs::remove_file(&self.lock_path);
                 }
-                Err(_) => {
-                    // Other errors reading lock file - try to remove it.
-                    let _ = std::fs::remove_file(&self.lock_path);
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    // An unreadable lock is not evidence its owner has died.
+                    return Err(format!("Cannot read database lock: {e}"));
                 }
             }
         }
@@ -308,7 +325,11 @@ impl FileLock {
         use std::io::Write;
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&self.lock_path) {
             Ok(mut f) => {
-                let _ = write!(f, "{}", std::process::id());
+                if let Err(e) = write!(f, "{}", std::process::id()) {
+                    drop(f);
+                    let _ = std::fs::remove_file(&self.lock_path);
+                    return Err(e.to_string());
+                }
                 self.held = true;
                 Ok(())
             }
@@ -454,6 +475,40 @@ mod tests {
         assert!(b.acquire().unwrap_err().contains(LOCKED_BY_ANOTHER));
         a.release();
         b.acquire().unwrap();
+    }
+
+    #[test]
+    fn only_one_contender_reclaims_a_stale_lock() {
+        use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codegraph.lock");
+        std::fs::write(&path, "abandoned").unwrap();
+        let barrier = Arc::new(Barrier::new(12));
+        let winners = Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..12 {
+                let (path, barrier, winners) = (path.clone(), barrier.clone(), winners.clone());
+                scope.spawn(move || {
+                    let mut lock = FileLock::new(path);
+                    barrier.wait();
+                    if lock.acquire().is_ok() { winners.fetch_add(1, Ordering::SeqCst); }
+                    // Keep the winner alive until all other contenders have tried.
+                    barrier.wait();
+                    lock.release();
+                });
+            }
+        });
+        assert_eq!(winners.load(Ordering::SeqCst), 1);
+        FileLock::new(path).acquire().unwrap();
+    }
+
+    #[test]
+    fn a_recent_empty_lock_is_not_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codegraph.lock");
+        std::fs::write(&path, "").unwrap();
+        assert!(FileLock::new(&path).acquire().unwrap_err().contains(LOCKED_BY_ANOTHER));
+        assert!(path.exists());
     }
 
     #[test]

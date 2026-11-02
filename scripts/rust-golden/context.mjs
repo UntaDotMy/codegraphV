@@ -91,6 +91,13 @@ try {
     const actual=output.stdout.trim().split('\n').map(l=>JSON.parse(l));
     if(actual.length!==tests.length)throw Error('wrong output count');
     for(let i=0;i<tests.length;i++) {
+      // The native product deliberately uses its own tool namespace. Normalize
+      // only that spelling, not graph data, whitespace, source or result order.
+      const nativeNames = value => typeof value === 'string'
+        ? value.replace(/\bcodegraph_(explore|search|files|node)\b/g, 'codegraphV_$1')
+            .replace('_codegraph_node any symbol above', '_codegraphV_node any symbol above')
+            .replace('dynamic dispatch bridged by codegraph (', 'dynamic dispatch bridged by codegraphV (') : value;
+      tests[i].expected = nativeNames(tests[i].expected);
       if(!isDeepStrictEqual(clean(actual[i]),clean(tests[i].expected))) {
         fs.writeFileSync(path.join(root,'target/context-diff.json'),JSON.stringify({scenario:s.name,query:tests[i],actual:actual[i]},null,2));
         throw Error(`${s.name} case ${i}: ${JSON.stringify(tests[i]).slice(0,200)} differs; see target/context-diff.json`);

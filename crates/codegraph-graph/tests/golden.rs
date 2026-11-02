@@ -133,6 +133,10 @@ fn named_symbol_flows() {
     check("named-flow");
 }
 #[test]
+fn november_upstream_named_routes_and_unicode() {
+    check("upstream-november-flow");
+}
+#[test]
 fn symbol_lookup() {
     check("symbol-lookup");
 }
