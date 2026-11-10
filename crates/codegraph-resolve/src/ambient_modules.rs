@@ -274,6 +274,8 @@ pub fn scan_ambient_modules(source: &str) -> AmbientModuleScan {
 pub struct GlobalScopeScan {
     pub script: bool,
     pub global_words: HashSet<String>,
+    /// A `declare` statement at the file's top level: `declare class`, never a call `declare(…)`.
+    pub declares: bool,
     pub module_blocks: Vec<AmbientModuleBlock>,
     pub import_aliases: HashSet<String>,
 }
@@ -283,6 +285,7 @@ pub fn scan_global_scope(source: &str) -> GlobalScopeScan {
     let mut global_words: HashSet<String> = HashSet::new();
     let mut import_aliases: HashSet<String> = HashSet::new();
     let mut declare = 0u8;
+    let mut declares = false;
     let mut in_global = false;
     let mut alias = 0u8;
     let mut alias_name = String::new();
@@ -314,6 +317,10 @@ pub fn scan_global_scope(source: &str) -> GlobalScopeScan {
             if script {
                 global_words.insert(format!("{line}:{column}"));
             }
+            // The word after `declare` (`class`, `interface`, `module`), not the call `declare(…)`.
+            if declare == 1 {
+                declares = true;
+            }
             declare = if text == "declare" {
                 1
             } else if declare == 1 && text == "global" {
@@ -328,7 +335,7 @@ pub fn scan_global_scope(source: &str) -> GlobalScopeScan {
         }
         declare = 0;
     });
-    GlobalScopeScan { script, global_words, module_blocks, import_aliases }
+    GlobalScopeScan { script, global_words, declares, module_blocks, import_aliases }
 }
 
 #[derive(Debug, Clone)]
@@ -664,6 +671,14 @@ struct Memo {
     declarations: RefCell<HashMap<String, Rc<Vec<Rc<AmbientModule>>>>>,
     merged: RefCell<HashMap<String, bool>>,
     namespaces: RefCell<HashMap<String, Rc<Vec<NamespaceBlock>>>>,
+    /// The package whose `package.json` sits directly in a folder, if it names a package.
+    manifests: RefCell<HashMap<String, Option<Rc<PackageManifest>>>>,
+}
+
+/// What a `package.json` says of its package. A file that only sets `"type"` is not one.
+struct PackageManifest {
+    name: Option<String>,
+    dependencies: HashSet<String>,
 }
 
 /// Cached namespace blocks of `file`.
@@ -762,6 +777,74 @@ fn block_members(m: &AmbientModule, ctx: &Ctx) -> Rc<HashMap<String, Vec<NodeRef
     members
 }
 
+fn dir_of(file: &str) -> &str {
+    match file.rfind('/') {
+        Some(i) => &file[..i],
+        None => "",
+    }
+}
+
+fn parse_manifest(text: Option<&str>) -> Option<PackageManifest> {
+    let json: serde_json::Value = serde_json::from_str(text?).ok()?;
+    let obj = json.as_object()?;
+    let name = obj.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    let mut dependencies = HashSet::new();
+    for field in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
+        if let Some(deps) = obj.get(field).and_then(|v| v.as_object()) {
+            dependencies.extend(deps.keys().cloned());
+        }
+    }
+    if name.is_none() && dependencies.is_empty() {
+        None
+    } else {
+        Some(PackageManifest { name, dependencies })
+    }
+}
+
+/// The package whose `package.json` is directly in `dir`, if that file names a package.
+fn package_manifest(dir: &str, ctx: &Ctx) -> Option<Rc<PackageManifest>> {
+    let memo = ctx.memo::<Memo>();
+    if let Some(hit) = memo.manifests.borrow().get(dir) {
+        return hit.clone();
+    }
+    let path = if dir.is_empty() { "package.json".to_string() } else { format!("{dir}/package.json") };
+    let parsed = parse_manifest(ctx.read_file(&path).as_deref()).map(Rc::new);
+    memo.manifests.borrow_mut().insert(dir.to_string(), parsed.clone());
+    parsed
+}
+
+/// The folder of the package `dir` is in. `""` is the repository's own package.
+fn package_folder(dir: &str, ctx: &Ctx) -> String {
+    if dir.is_empty() || package_manifest(dir, ctx).is_some() {
+        dir.to_string()
+    } else {
+        package_folder(dir_of(dir), ctx)
+    }
+}
+
+/// Whether a `declare module` in `file` is in the program `from_file` is in. Each package of a
+/// monorepo has a program of its own, so the block answers that package, a package nested under
+/// it, and a package that depends on it. A test's block answers only tests in its own package.
+fn reaches_program(file: &str, test: bool, from_file: &str, from_test: bool, ctx: &Ctx) -> bool {
+    if test && !from_test {
+        return false;
+    }
+    let folder = package_folder(dir_of(file), ctx);
+    if folder.is_empty() || from_file.starts_with(&format!("{folder}/")) {
+        return true;
+    }
+    if test {
+        return false;
+    }
+    let Some(name) = package_manifest(&folder, ctx).and_then(|m| m.name.clone()) else { return false };
+    package_manifest(&package_folder(dir_of(from_file), ctx), ctx).is_some_and(|m| m.dependencies.contains(&name))
+}
+
+/// Whether a `declare module` in `declaring_file` counts for a file at `from_file`.
+pub fn declaring_file_answers(declaring_file: &str, from_file: &str, ctx: &Ctx) -> bool {
+    reaches_program(declaring_file, is_test_file(declaring_file), from_file, is_test_file(from_file), ctx)
+}
+
 fn declarations_for(specifier: &str, from_file: &str, ctx: &Ctx) -> Rc<Vec<Rc<AmbientModule>>> {
     let s = scanned(ctx);
     let Some(all) = s.by_specifier.get(specifier) else { return Rc::new(Vec::new()) };
@@ -772,7 +855,8 @@ fn declarations_for(specifier: &str, from_file: &str, ctx: &Ctx) -> Rc<Vec<Rc<Am
     }
     let from_test = is_test_file(from_file);
     let dir = &from_file[..from_file.rfind('/').map_or(0, |i| i + 1)];
-    let usable: Vec<Rc<AmbientModule>> = all.iter().filter(|m| m.script && (from_test || !m.test)).cloned().collect();
+    let usable: Vec<Rc<AmbientModule>> =
+        all.iter().filter(|m| m.script && reaches_program(&m.file, m.test, from_file, from_test, ctx)).cloned().collect();
     let from: Vec<&str> = dir.split('/').collect();
     let shared = |file: &str| -> usize {
         let parts: Vec<&str> = file.split('/').collect();

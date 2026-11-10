@@ -15,7 +15,7 @@ pub mod traversal;
 pub mod type_hierarchy;
 
 pub use queries::{GraphQueryManager, NodeMetrics};
-pub use traversal::{GraphTraverser, PathStep};
+pub use traversal::{CallSiteRow, GraphTraverser, PathStep};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {

@@ -10,6 +10,7 @@
 //! class) gets no edge instead of a name-only guess, unless the project extends that type.
 
 use super::infer::infer_local_receiver_type;
+use super::reach::is_anonymous_class;
 use super::method::resolve_method_on_type;
 use super::same_language_family;
 use crate::ctx::Ctx;
@@ -467,12 +468,35 @@ pub fn kotlin_receiver_declared_type(name: &str, r: &UnresolvedRef, ctx: &Ctx, d
     if local_declared {
         return None;
     }
-    // A property of a superclass: `viewModel` declared in `BaseActivity`.
-    let owner = kotlin_enclosing_class(r, ctx)?;
-    if !kotlin_own_property_type(name, &owner, r, ctx).is_undefined() {
+    // A property of a superclass: `viewModel` declared in `BaseActivity`. In an
+    // object expression, of the class it is written in, unless the object
+    // declares the name itself.
+    let around = kotlin_enclosing_classes(r, ctx);
+    let owner = around.last().cloned()?;
+    if around.iter().any(|c| !kotlin_own_property_type(name, c, r, ctx).is_undefined()) {
         return None;
     }
     kotlin_inherited_property_type(name, &owner, r, ctx)
+}
+
+/// The Kotlin classes enclosing `r`'s line, tightest first, through the first named class.
+fn kotlin_enclosing_classes(r: &UnresolvedRef, ctx: &Ctx) -> Vec<NodeRef> {
+    let mut around: Vec<NodeRef> = ctx
+        .get_nodes_in_file(&r.file_path)
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Interface) && n.language == Language::Kotlin && n.start_line <= r.line && n.end_line >= r.line)
+        .cloned()
+        .collect();
+    around.sort_by_key(|n| std::cmp::Reverse(n.start_line));
+    let mut out = Vec::new();
+    for c in around {
+        let named = !is_anonymous_class(&c);
+        out.push(c);
+        if named {
+            break;
+        }
+    }
+    out
 }
 
 /// The 0-based lines a Kotlin local visible at `r` may be declared on, nearest first: the enclosing
@@ -584,6 +608,70 @@ pub enum KotlinChain {
     /// before it kept the chain.
     Method(String),
     Resolved(ResolvedRef),
+}
+
+/// The package a Kotlin file declares.
+fn kotlin_package_of(file_path: &str, ctx: &Ctx) -> String {
+    ctx.get_nodes_in_file(file_path)
+        .iter()
+        .find(|n| n.kind == NodeKind::Namespace)
+        .map(|n| n.name.clone())
+        .unwrap_or_default()
+}
+
+/// The receiver of a Kotlin extension function, or `None` for a member of a type declared in the
+/// same file (extension functions are extracted as `Receiver::name`, without the package).
+fn kotlin_extension_receiver(n: &Node, ctx: &Ctx) -> Option<String> {
+    if n.kind != NodeKind::Method || n.language != Language::Kotlin {
+        return None;
+    }
+    let package = kotlin_package_of(&n.file_path, ctx);
+    let prefix = if package.is_empty() { String::new() } else { format!("{package}::") };
+    // Extension functions are qualified `Receiver::name` with NO package; a declaration in a
+    // package is `pkg::Type::name` (a real member) or `pkg::name` (top-level).
+    let prefixed = !prefix.is_empty() && n.qualified_name.starts_with(&prefix);
+    let rest = if prefixed { &n.qualified_name[prefix.len()..] } else { n.qualified_name.as_str() };
+    let receiver = rest.strip_suffix(&format!("::{}", n.name))?;
+    if receiver.is_empty() {
+        return None;
+    }
+    if prefixed || package.is_empty() {
+        let type_name = if package.is_empty() { receiver.to_string() } else { format!("{package}::{receiver}") };
+        let declared_here = ctx.get_nodes_by_qualified_name(&type_name).iter().any(|t| {
+            t.file_path == n.file_path
+                && matches!(t.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Struct | NodeKind::TypeAlias)
+        });
+        if declared_here {
+            return None;
+        }
+    }
+    Some(receiver.to_string())
+}
+
+/// A Kotlin extension declared in another package is in scope only through an import of it or of
+/// its package; importing the receiver type alone does not bring it in (upstream 787eafbf).
+pub fn gate_kotlin_extension(resolved: Option<ResolvedRef>, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    let resolved = resolved?;
+    if r.language != Language::Kotlin || !r.is_kind(codegraph_types::EdgeKind::Calls) {
+        return Some(resolved);
+    }
+    let target = ctx.node_by_id(&resolved.target_node_id)?;
+    if kotlin_extension_receiver(&target, ctx).is_none() {
+        return Some(resolved);
+    }
+    let caller_package = kotlin_package_of(&r.file_path, ctx);
+    let target_package = kotlin_package_of(&target.file_path, ctx);
+    if r.file_path == target.file_path || caller_package == target_package {
+        return Some(resolved);
+    }
+    let package_import = if target_package.is_empty() { "*".to_string() } else { format!("{target_package}.*") };
+    let name_import = if target_package.is_empty() { target.name.clone() } else { format!("{target_package}.{}", target.name) };
+    let scope = super::kotlin::kotlin_file_scope(&r.file_path, ctx);
+    // `kotlin_file_scope` keeps a `pkg.*` import as a star of `pkg`, which the import mappings drop.
+    let imported = scope.imports.contains(&name_import)
+        || scope.imports.contains(&package_import)
+        || scope.stars.contains(&target_package);
+    imported.then_some(resolved)
 }
 
 /// A Kotlin call through a receiver chain (`engine.pump.drain()`), resolved on the chain's declared

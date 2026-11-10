@@ -1,5 +1,198 @@
 use codegraph_installer::*;
 use std::{collections::HashMap, fs};
+
+#[test]
+fn audit_refresh_preserves_permission_opt_out_and_narrow_permissions() {
+    for allow in [serde_json::json!([]), serde_json::json!(["mcp__codegraphV__codegraphV_explore", "Read(*)"])] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(&dir);
+        let path = env.home.join(".claude/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = serde_json::json!({"permissions": {"allow": allow}}).to_string();
+        fs::write(&path, &original).unwrap();
+        env.apply("claude", Location::Global, InstallOptions { preserve_permissions: true, ..InstallOptions::default() }, false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("mcp__codegraphV__*"));
+        env.apply("claude", Location::Global, InstallOptions { auto_allow: false, ..InstallOptions::default() }, false).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap_or_default().contains("mcp__codegraphV__"));
+    }
+}
+
+#[test]
+fn audit_hook_mentions_are_not_owned_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let path = env.home.join(".claude/settings.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let commands = ["echo codegraphV prompt-hook", "# codegraphV prompt-hook", "wrapper codegraphV prompt-hook", "codegraphV prompt-hook-extra", "codegraphV prompt-hook && echo done"];
+    let hooks: Vec<_> = commands.iter().map(|c| serde_json::json!({"type":"command", "command": c})).collect();
+    let original = serde_json::json!({"hooks":{"Stop":[{"matcher":"*", "hooks":hooks}]}});
+    fs::write(&path, original.to_string()).unwrap();
+    env.apply("claude", Location::Global, InstallOptions::default(), true).unwrap();
+    let after: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(after, original);
+}
+
+#[test]
+fn audit_claude_does_not_introduce_an_instruction_shadow() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let path = env.project.join("AGENTS.md");
+    let original = "# Existing project guidance\n";
+    fs::write(&path, original).unwrap();
+    env.apply("claude", Location::Local, InstallOptions::default(), false).unwrap();
+    assert!(!env.project.join(".claude/CLAUDE.md").exists());
+    assert!(fs::read_to_string(&path).unwrap().starts_with(original));
+    env.apply("claude", Location::Local, InstallOptions::default(), true).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+}
+
+#[test]
+fn audit_malformed_hooks_fail_before_any_write() {
+    for malformed in [r#"{"hooks":[]}"#, r#"{"hooks":{"UserPromptSubmit":{}}}"#, r#"{"hooks":{"Stop":[{"hooks":false}]}}"#, r#"{"permissions":{"allow":"custom"}}"#] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(&dir);
+        let path = env.project.join(".claude/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, malformed).unwrap();
+        assert!(env.apply("claude", Location::Local, InstallOptions { prompt_hook: Some(true), ..InstallOptions::default() }, false).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+        assert!(!env.config_path("claude", Location::Local).unwrap().exists());
+        assert!(!env.instructions_path("claude", Location::Local).unwrap().exists());
+    }
+}
+
+#[test]
+fn audit_refresh_launch_wiring_preserves_server_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let codex = env.config_path("codex", Location::Local).unwrap();
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(&codex, "[mcp_servers.codegraphV]\ncommand = 'old'\nargs = []\nenabled = false\nstartup_timeout_sec = 19\n[mcp_servers.codegraphV.env]\nUSER_SETTING = 'keep'\n").unwrap();
+    env.apply("codex", Location::Local, InstallOptions::default(), false).unwrap();
+    let text = fs::read_to_string(codex).unwrap();
+    assert!(text.contains("enabled = false") && text.contains("startup_timeout_sec = 19") && text.contains("USER_SETTING = 'keep'"));
+    let cursor = env.config_path("cursor", Location::Local).unwrap();
+    fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    fs::write(&cursor, r#"{"mcpServers":{"codegraphV":{"command":"old","args":[],"env":{"USER_SETTING":"keep"},"disabled":true,"timeout":19}}}"#).unwrap();
+    env.apply("cursor", Location::Local, InstallOptions::default(), false).unwrap();
+    let data: serde_json::Value = serde_json::from_str(&fs::read_to_string(cursor).unwrap()).unwrap();
+    assert_eq!(data["mcpServers"]["codegraphV"]["env"]["USER_SETTING"], "keep");
+    assert_eq!(data["mcpServers"]["codegraphV"]["disabled"], true);
+    assert_eq!(data["mcpServers"]["codegraphV"]["timeout"], 19);
+    assert_eq!(data["mcpServers"]["codegraphV"]["command"], env.executable);
+}
+
+#[test]
+fn audit_instruction_round_trips_preserve_bytes_existence_and_later_edits() {
+    for id in ["claude", "codex", "opencode", "gemini"] {
+        for original in ["", " \t\r\n  ", "no final newline", "\u{feff}日本語\r\n", "# Rules\n\n", "trailing spaces  \n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let env = env(&dir);
+            let path = env.instructions_path(id, Location::Local).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, original).unwrap();
+            env.apply(id, Location::Local, InstallOptions::default(), false).unwrap();
+            let installed = fs::read_to_string(&path).unwrap();
+            assert!(installed.starts_with(original));
+            env.apply(id, Location::Local, InstallOptions::default(), false).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), installed);
+            env.apply(id, Location::Local, InstallOptions::default(), true).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), original, "{id} {original:?}");
+            env.apply(id, Location::Local, InstallOptions::default(), false).unwrap();
+            let installed = fs::read_to_string(&path).unwrap();
+            fs::write(&path, format!("new user prefix\n{installed}new user suffix\n")).unwrap();
+            env.apply(id, Location::Local, InstallOptions::default(), true).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), format!("new user prefix\n{original}new user suffix\n"));
+        }
+    }
+}
+
+#[test]
+fn audit_ambiguous_markers_refuse_the_whole_target_before_writing() {
+    for text in [
+        "<!-- CODEGRAPHV_START -->\nuser text\n",
+        "<!-- CODEGRAPHV_END -->\n<!-- CODEGRAPHV_START -->\n",
+        "<!-- CODEGRAPHV_START -->\n<!-- CODEGRAPHV_START -->\n<!-- CODEGRAPHV_END -->\n",
+        "<!-- CODEGRAPHV_START -->\nx\n<!-- CODEGRAPHV_END -->\n<!-- CODEGRAPHV_START -->\ny\n<!-- CODEGRAPHV_END -->\n",
+        "```markdown\nunclosed example\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(&dir);
+        let path = env.project.join("AGENTS.md");
+        fs::write(&path, text).unwrap();
+        // Installation must inspect the whole document before writing.
+        assert!(env.apply("codex", Location::Local, InstallOptions::default(), false).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        assert!(!env.config_path("codex", Location::Local).unwrap().exists());
+        // Removal only validates a file that names an owned marker; an unrelated malformed
+        // example is left untouched rather than blocking an uninstall.
+        let mentions = text.contains("CODEGRAPHV_START") || text.contains("CODEGRAPHV_END");
+        let result = env.apply("codex", Location::Local, InstallOptions::default(), true);
+        assert_eq!(result.is_err(), mentions, "{text:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        assert!(!env.config_path("codex", Location::Local).unwrap().exists());
+    }
+}
+
+#[test]
+fn audit_exec_hook_paths_are_literal_and_extra_arguments_are_not_owned() {
+    for executable in [r"C:\space $cash`tick's\日本\codegraphV.exe", "/space $cash`tick's/日本/codegraphV"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env(&dir);
+        env.executable = executable.into();
+        env.apply("claude", Location::Local, InstallOptions { prompt_hook: Some(true), ..InstallOptions::default() }, false).unwrap();
+        let path = env.project.join(".claude/settings.json");
+        let mut data: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let hook = &mut data["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+        assert_eq!(hook["command"], executable);
+        assert_eq!(hook["args"], serde_json::json!(["prompt-hook"]));
+        hook["args"] = serde_json::json!(["prompt-hook", "user-extension"]);
+        fs::write(&path, data.to_string()).unwrap();
+        env.apply("claude", Location::Local, InstallOptions::default(), true).unwrap();
+        let after: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["hooks"], data["hooks"]);
+    }
+}
+
+#[test]
+fn audit_shared_guidance_remains_until_last_consumer_in_both_orders() {
+    for order in [["codex", "opencode"], ["opencode", "codex"]] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(&dir);
+        let path = env.project.join("AGENTS.md");
+        let original = "# User rules\n\nKeep me.\n";
+        fs::write(&path, original).unwrap();
+        for id in order { env.apply(id, Location::Local, InstallOptions::default(), false).unwrap(); }
+        env.apply(order[0], Location::Local, InstallOptions::default(), true).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains(CODEGRAPHV.start));
+        env.apply(order[0], Location::Local, InstallOptions::default(), true).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains(CODEGRAPHV.start));
+        env.apply(order[1], Location::Local, InstallOptions::default(), true).unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+}
+#[test]
+fn audit_targets_sharing_an_instructions_file_plan_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let requests = vec![
+        ("claude".to_owned(), InstallOptions::default()),
+        ("codex".to_owned(), InstallOptions::default()),
+    ];
+    let results = env.apply_many(&requests, Location::Local, false).unwrap();
+    let path = env.project.join("AGENTS.md");
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text.matches(CODEGRAPHV.start).count(), 1, "{text}");
+    let agents: Vec<_> = results.iter().flat_map(|(_, r)| &r.files).filter(|f| f.path.ends_with("AGENTS.md")).collect();
+    assert_eq!(agents.len(), 2, "both targets report the shared file");
+    assert_eq!(agents.iter().filter(|f| f.action == "created").count(), 1, "it is written once");
+    let results = env.remove_many_as(&CODEGRAPHV, &["claude".into(), "codex".into()], Location::Local, false).unwrap();
+    assert!(results.iter().flat_map(|(_, r)| &r.files).any(|f| f.path.ends_with("AGENTS.md") && f.action == "removed"));
+    assert!(!path.exists());
+}
+
 fn env(dir: &tempfile::TempDir) -> Environment {
     let home = dir.path().join("home");
     let project = dir.path().join("project");
@@ -145,7 +338,10 @@ fn claude_uninstall_restores_user_files_byte_for_byte() {
         env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
         assert_ne!(snapshot(&env.home), before);
         env.apply("claude", Location::Global, InstallOptions::default(), true).unwrap();
-        let after = snapshot(&env.home);
+        let mut after = snapshot(&env.home);
+        // The empty OS-lock file is permanent so concurrent installers always lock the
+        // same filesystem object. It contains no configuration or instruction content.
+        assert_eq!(after.remove(std::path::Path::new(".codegraphV/install.lock")), Some(Vec::new()));
         for (path, bytes) in &after {
             assert_eq!(before.get(path), Some(bytes), "{} differs:\n{}", path.display(), String::from_utf8_lossy(bytes));
         }
@@ -168,7 +364,7 @@ const ORIGINAL_HOOKS: &str = r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":
 
 /// The hook `install` writes for env()'s executable: its absolute path, so it runs whatever PATH
 /// the agent inherited (BUG-95).
-const OURS: &str = r#""C:/codegraphV native/codegraphV.exe" prompt-hook"#;
+const OURS: &str = r"C:\codegraphV native\codegraphV.exe";
 
 /// DEV-65: the Claude front-load hook (TS writePromptHookEntry / removePromptHookEntry). DEV-83:
 /// codegraphV's hook is its own; the original codegraph's hooks are another product's and stay.

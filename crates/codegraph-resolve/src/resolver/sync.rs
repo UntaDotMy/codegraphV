@@ -8,7 +8,7 @@ use crate::ctx::Ctx;
 use crate::import_resolver::python::PythonReopenScope;
 use crate::import_resolver::{
     is_esm_import_language, is_js_family_file, is_module_binding_name, js_module_file, module_default_export, python_package_importers,
-    python_reopen_scope, python_root_fingerprint, resolve_import_path,
+    python_reopen_scope, python_root_fingerprint, python_script_module_scope, resolve_import_path,
 };
 use crate::module_importers::MovedDefault;
 use crate::name_matcher::python_attr_ref_resolves;
@@ -256,6 +256,12 @@ impl ReferenceResolver {
     /// `python_reopen_scope`).
     pub fn get_python_reopen_scope(&self, changed_files: &[String]) -> PythonReopenScope {
         python_reopen_scope(&self.disk_ctx(), changed_files)
+    }
+
+    /// What a sync must re-open after these Python files were edited in place (see
+    /// `python_script_module_scope`).
+    pub fn get_python_script_module_scope(&self, edited_files: &[String]) -> PythonReopenScope {
+        python_script_module_scope(&self.disk_ctx(), edited_files)
     }
 
     /// Importers of Python packages whose `__init__.py` was edited, with the names they bind (see

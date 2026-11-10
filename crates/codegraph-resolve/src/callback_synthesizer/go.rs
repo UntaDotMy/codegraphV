@@ -155,6 +155,97 @@ pub fn go_signature_arity(signature: Option<&str>) -> Option<String> {
     go_signature_parts(signature).map(|p| format!("{}/{}", p.params.len(), p.results.len()))
 }
 
+/// Words that start a Go type, in a parameter that could otherwise read as a name and its type.
+const GO_TYPE_WORDS: [&str; 5] = ["func", "chan", "map", "struct", "interface"];
+
+/// The types of a Go parameter or result list's items: `ctx context.Context` is a
+/// `context.Context`, the `a` of `a, b int` an `int`, and in a list with no names each item is
+/// a type.
+fn go_item_types(items: &[String]) -> Vec<String> {
+    let named: Vec<Option<String>> = items
+        .iter()
+        .map(|item| {
+            re!(r"^([A-Za-z_]\w*)\s+(\S[\s\S]*)$").captures(item).and_then(|m| {
+                let head = m.text(1)?;
+                if GO_TYPE_WORDS.contains(&head) {
+                    None
+                } else {
+                    m.text(2).map(String::from)
+                }
+            })
+        })
+        .collect();
+    if named.iter().all(Option::is_none) {
+        return items.to_vec();
+    }
+    let mut types = vec![String::new(); items.len()];
+    let mut ty = String::new();
+    for i in (0..items.len()).rev() {
+        if let Some(named) = &named[i] {
+            ty = named.clone();
+        }
+        types[i] = ty.clone();
+    }
+    types
+}
+
+/// A Go type as two declarations can compare it: with no spaces or package qualifiers, as the
+/// two may sit in different packages and write `Context` and `caddy.Context`. `None` for a type
+/// that holds a list of its own (a `func`, a `struct`), whose text differs by more than that.
+fn go_comparable_type(written: &str) -> Option<String> {
+    let flat = re!(r"\s+").replace_all_str(written, "");
+    let flat = flat.replace("interface{}", "any");
+    if re!(r"\bfunc\(|\bstruct\{|\binterface\{").is_match(&flat) {
+        return None;
+    }
+    let flat = re!(r"[A-Za-z_]\w*\.").replace_all_str(&flat, "");
+    let flat = re!(r"\buint8\b").replace_all_str(&flat, "byte");
+    Some(re!(r"\bint32\b").replace_all_str(&flat, "rune"))
+}
+
+/// A Go method's parameter and result types, each as [`go_comparable_type`] gives it, one list.
+/// `None` when the signature doesn't read.
+fn go_method_types(signature: Option<&str>) -> Option<Vec<Option<String>>> {
+    let parts = go_signature_parts(signature)?;
+    let mut types = go_item_types(&parts.params);
+    types.extend(go_item_types(&parts.results));
+    Some(types.iter().map(|t| go_comparable_type(t)).collect())
+}
+
+/// The source a Go type declaration starts with: its line, and the next two for a list that
+/// wraps.
+fn go_declaration_text(n: &codegraph_types::Node, ctx: &Ctx) -> String {
+    let lines = ctx
+        .get_file_lines(&n.file_path)
+        .unwrap_or_else(|| Rc::new(ctx.read_file(&n.file_path).map(|s| crate::ctx::split_lines(&s)).unwrap_or_default()));
+    let start = (n.start_line as usize).saturating_sub(1);
+    let end = (start + 3).min(lines.len());
+    if start >= end {
+        String::new()
+    } else {
+        lines[start..end].join("\n")
+    }
+}
+
+/// The type parameters a Go type declares: `K` and `V` of `type Cache[K comparable, V any]
+/// struct`.
+fn go_type_parameter_names(n: &codegraph_types::Node, ctx: &Ctx) -> Vec<String> {
+    let text = go_declaration_text(n, ctx);
+    let Some(open) = re!(r"^\s*(?:type\s+)?[A-Za-z_]\w*\s*\[").find(&text) else { return Vec::new() };
+    let at = open.start() + open.as_str().len() - 1;
+    let chars: Vec<char> = text.chars().collect();
+    let Some((items, _)) = go_list_items(&chars, at) else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|item| re!(r"^[A-Za-z_]\w*").find(item).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+/// Whether a Go `type_alias` node is a true alias, `type A = B`, rather than a defined type.
+fn is_go_true_alias(n: &codegraph_types::Node, ctx: &Ctx) -> bool {
+    re!(r"^\s*(?:type\s+)?[A-Za-z_]\w*\s*(?:\[[^\]]*\]\s*)?=").is_match(&go_declaration_text(n, ctx))
+}
+
 /// The arity a gRPC server implements an RPC with, read off the signature the generated client has
 /// for it. `None` when it isn't a client's.
 fn go_grpc_server_arity(signature: Option<&str>) -> Option<String> {
@@ -182,6 +273,8 @@ struct Outside {
     opaque: Vec<String>,
 }
 
+type MethodTypes = HashMap<String, Option<Vec<Vec<Option<String>>>>>;
+
 struct GoImplements<'a> {
     ctx: &'a Ctx,
     own_memo: RefCell<HashMap<String, Rc<HashSet<String>>>>,
@@ -189,6 +282,9 @@ struct GoImplements<'a> {
     embed_memo: HashMap<String, Vec<String>>,
     outside: IndexMap<String, Outside>,
     arity_memo: RefCell<HashMap<String, Rc<Arities>>>,
+    method_types_memo: RefCell<HashMap<String, Rc<MethodTypes>>>,
+    parameter_memo: RefCell<HashMap<String, Rc<Vec<String>>>>,
+    aliases: HashSet<String>,
 }
 
 impl GoImplements<'_> {
@@ -354,6 +450,96 @@ impl GoImplements<'_> {
         }
         true
     }
+
+    /// Each method in a type's method set → the types of its declarations there; `None` when one
+    /// of them doesn't read or a standard-library embedding brings it, whose types the table
+    /// doesn't hold. Built only for the pairs whose counts already fit.
+    fn method_types(&self, id: &str) -> Rc<MethodTypes> {
+        if let Some(types) = self.method_types_memo.borrow().get(id) {
+            return Rc::clone(types);
+        }
+        let mut types: MethodTypes = HashMap::new();
+        for t in self.embed_closure(id) {
+            let signatures = self.signatures_of(&t);
+            for (name, signatures) in signatures.iter() {
+                if types.get(name).is_some_and(Option::is_none) {
+                    continue;
+                }
+                types.entry(name.clone()).or_insert_with(|| Some(Vec::new()));
+                let mut poisoned = false;
+                for signature in signatures {
+                    match go_method_types(signature.as_deref()) {
+                        None => {
+                            poisoned = true;
+                            break;
+                        }
+                        Some(read) => {
+                            if let Some(Some(known)) = types.get_mut(name) {
+                                known.push(read);
+                            }
+                        }
+                    }
+                }
+                if poisoned {
+                    types.insert(name.clone(), None);
+                }
+            }
+            if let Some(out) = self.outside.get(&t) {
+                for methods in &out.stdlib {
+                    for name in methods.keys() {
+                        types.insert(name.clone(), None);
+                    }
+                }
+            }
+        }
+        let types = Rc::new(types);
+        self.method_types_memo.borrow_mut().insert(id.to_string(), Rc::clone(&types));
+        types
+    }
+
+    /// The type parameters a type declares, or an embedded type does.
+    fn type_parameters(&self, id: &str) -> Rc<Vec<String>> {
+        if let Some(names) = self.parameter_memo.borrow().get(id) {
+            return Rc::clone(names);
+        }
+        let names = Rc::new(node(self.ctx, id).map(|n| go_type_parameter_names(&n, self.ctx)).unwrap_or_default());
+        self.parameter_memo.borrow_mut().insert(id.to_string(), Rc::clone(&names));
+        names
+    }
+
+    /// Go wants each method's types to be the interface's. A declaration at another count is the
+    /// gRPC server `wanted_arities` lets through: the parameters are its service's, not the
+    /// client's.
+    fn types_fit(&self, s: &NodeRef, iface: &NodeRef) -> bool {
+        let parameters: HashSet<String> = self
+            .embed_closure(&s.id)
+            .into_iter()
+            .chain(self.embed_closure(&iface.id))
+            .flat_map(|id| {
+                let names = self.type_parameters(&id);
+                names.iter().cloned().collect::<Vec<String>>()
+            })
+            .collect();
+        let open = |ty: &Option<String>| match ty {
+            None => true,
+            Some(ty) => re!(r"\W+").split(ty).into_iter().any(|word| self.aliases.contains(word) || parameters.contains(word)),
+        };
+        let same_type = |a: &Option<String>, b: &Option<String>| a == b || open(a) || open(b);
+        let have = self.method_types(&s.id);
+        for (name, wanted_types) in self.method_types(&iface.id).iter() {
+            let Some(wanted_types) = wanted_types else { continue };
+            let Some(Some(got)) = have.get(name) else { continue };
+            let fits = wanted_types.iter().any(|want| {
+                got.iter().any(|types| {
+                    types.len() != want.len() || types.iter().zip(want.iter()).all(|(a, b)| same_type(a, b))
+                })
+            });
+            if !fits {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn covers(have: &HashSet<String>, want: &HashSet<String>) -> bool {
@@ -450,6 +636,11 @@ pub fn go_implements_edges(ctx: &Ctx) -> Vec<Edge> {
         }
     }
 
+    let aliases: HashSet<String> = go_implementers
+        .iter()
+        .filter(|n| n.kind == NodeKind::TypeAlias && is_go_true_alias(n, ctx))
+        .map(|n| n.name.clone())
+        .collect();
     let st = GoImplements {
         ctx,
         own_memo: RefCell::new(HashMap::new()),
@@ -457,6 +648,9 @@ pub fn go_implements_edges(ctx: &Ctx) -> Vec<Edge> {
         embed_memo,
         outside,
         arity_memo: RefCell::new(HashMap::new()),
+        method_types_memo: RefCell::new(HashMap::new()),
+        parameter_memo: RefCell::new(HashMap::new()),
+        aliases,
     };
 
     // A type without a method, or an embedded type nothing describes, satisfies no interface this
@@ -511,7 +705,7 @@ pub fn go_implements_edges(ctx: &Ctx) -> Vec<Edge> {
                 continue;
             }
             let w = wanted.get_or_insert_with(|| st.wanted_arities(iface));
-            if !st.arities_fit(&s.id, w) {
+            if !st.arities_fit(&s.id, w) || !st.types_fit(s, iface) {
                 continue;
             }
             covering += 1;

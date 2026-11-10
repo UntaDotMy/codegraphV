@@ -29,6 +29,17 @@ pub fn installer_url(windows: bool) -> String {
     format!("https://raw.githubusercontent.com/{REPO}/{INSTALLER_BRANCH}/{file}")
 }
 
+/// The same script from the release being installed, so a pinned upgrade does not run a
+/// script that has since changed on the branch. `None` for a tag that cannot appear in a URL.
+pub fn installer_url_for_tag(tag: &str, windows: bool) -> Option<String> {
+    let tag = tag.trim();
+    if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+        return None;
+    }
+    let file = if windows { "install-rust.ps1" } else { "install-rust.sh" };
+    Some(format!("https://raw.githubusercontent.com/{REPO}/{tag}/{file}"))
+}
+
 // ---------------------------------------------------------------------------
 // Versions (pure)
 // ---------------------------------------------------------------------------
@@ -77,9 +88,35 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
     Some(match (&sa.pre, &sb.pre) {
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
-        (Some(x), Some(y)) => x.cmp(y),
+        (Some(x), Some(y)) => compare_prerelease(x, y),
         (None, None) => Ordering::Equal,
     })
+}
+
+/// SemVer 2.0.0 §11: dot-separated identifiers; numeric identifiers compare numerically and
+/// rank below alphanumeric ones; a shorter identifier list ranks below a longer one that
+/// starts with it (`rc` < `rc.1`). `rc.2` < `rc.10`, which a lexical comparison gets wrong.
+fn compare_prerelease(a: &str, b: &str) -> Ordering {
+    let mut left = a.split('.');
+    let mut right = b.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let order = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+        }
+    }
 }
 
 /// Whether `latest` is newer than `current`; differing unparseable strings count as an update
@@ -149,12 +186,13 @@ pub fn canonical_version_tag(v: &str) -> Option<String> {
     })
 }
 
-/// The re-index reminder shown after an upgrade.
+/// The re-index reminder shown after an upgrade. Incremental sync re-extracts only changed
+/// files, so it does not apply a new engine's extraction to unchanged source (A14).
 pub fn reindex_advisory() -> String {
     [
         "Your existing project indexes keep working, but were built by the previous version.",
-        "To pick up this version's extraction improvements, refresh each project:",
-        "  codegraphV sync        # incremental, fast",
+        "`sync` only reconciles changed files; this version's extraction improvements need a",
+        "full rebuild, in each project:",
         "  codegraphV index -f    # full rebuild",
     ]
     .join("\n")
@@ -410,6 +448,26 @@ mod tests {
         assert_eq!(compare_versions("v0.0.2", "0.0.1"), Some(Ordering::Greater));
         assert_eq!(compare_versions("1.0.0-rc", "1.0.0"), Some(Ordering::Less));
         assert_eq!(compare_versions("1.10.0", "1.9.9"), Some(Ordering::Greater));
+        // SemVer 2.0.0 §11 precedence, including numeric prerelease identifiers.
+        let chain = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        ];
+        for pair in chain.windows(2) {
+            assert_eq!(compare_versions(pair[1], pair[0]), Some(Ordering::Greater), "{pair:?}");
+            assert_eq!(compare_versions(pair[0], pair[1]), Some(Ordering::Less), "{pair:?}");
+        }
+        assert_eq!(compare_versions("1.0.0-rc.10", "1.0.0-rc.2"), Some(Ordering::Greater));
+        assert_eq!(compare_versions("1.0.0-rc.2", "1.0.0-rc.2"), Some(Ordering::Equal));
+        // Build metadata does not affect precedence, and a malformed tag is not an update.
+        assert_eq!(compare_versions("1.0.0+build.5", "1.0.0+build.2"), Some(Ordering::Equal));
+        assert_eq!(compare_versions("1.0", "1.0.0"), None);
         assert!(is_update_available("0.0.1", "v0.0.2"));
         assert!(!is_update_available("0.0.2", "v0.0.2"));
         assert!(!is_update_available("0.1.0", "v0.0.9"));
@@ -418,6 +476,21 @@ mod tests {
         assert_eq!(strip_v("v0.9.9"), "0.9.9");
         assert_eq!(canonical_version_tag("1.2.3-x <inject>").as_deref(), Some("v1.2.3-x"));
         assert_eq!(canonical_version_tag("nope"), None);
+    }
+
+    #[test]
+    fn installer_url_pins_to_the_release_and_rejects_unsafe_tags() {
+        assert_eq!(
+            installer_url_for_tag("v1.2.3", false).as_deref(),
+            Some("https://raw.githubusercontent.com/UntaDotMy/codegraphV/v1.2.3/install-rust.sh")
+        );
+        assert_eq!(
+            installer_url_for_tag("v1.2.3", true).as_deref(),
+            Some("https://raw.githubusercontent.com/UntaDotMy/codegraphV/v1.2.3/install-rust.ps1")
+        );
+        for bad in ["", "v1.2.3; rm -rf /", "v1.2.3$(x)", "v1.2.3/../main"] {
+            assert!(installer_url_for_tag(bad, false).is_none(), "{bad}");
+        }
     }
 
     #[test]

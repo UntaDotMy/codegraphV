@@ -536,7 +536,13 @@ impl<'t> Walker<'t> {
             let Some(child) = node.named_child(i) else { continue };
             if child.kind() == "argument_list" {
                 for j in 0..child.named_child_count() {
-                    let Some(arg) = child.named_child(j) else { continue };
+                    let Some(base) = child.named_child(j) else { continue };
+                    // Only unwrap one subscription: computed bases and Base[T][U]
+                    // are not declarations of a statically named superclass.
+                    let arg = if base.kind() == "subscript" {
+                        let Some(value) = base.child_by_field_name("value") else { continue };
+                        value
+                    } else { base };
                     if matches!(arg.kind(), "identifier" | "attribute") {
                         let name = self.text(arg).to_string();
                         self.push_ref_at(row, &name, extends_kind, arg);

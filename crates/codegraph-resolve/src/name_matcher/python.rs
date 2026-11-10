@@ -3,7 +3,7 @@
 
 use super::same_language_family;
 use crate::ctx::Ctx;
-use crate::import_resolver::resolve_import;
+use crate::import_resolver::{resolve_import, resolve_import_path};
 use crate::types::{ImportMapping, NodeRef, Tri, UnresolvedRef};
 use codegraph_extract::strip_comments::strip_comments_for_regex;
 use codegraph_jsre::{escape_regex, re, Re};
@@ -93,6 +93,34 @@ fn char_slice(chars: &[char], start: usize, end: usize) -> String {
 
 // -- Classes and members --------------------------------------------------------
 
+/// Absolute imports absent from the project cannot denote arbitrary project namesakes.
+/// Keep same-file rebinding, relative/fallback imports and custom-root module paths.
+pub fn is_python_name_from_outside(name: &str, file: &str, target: Option<&Node>, ctx: &Ctx) -> bool {
+    if target.is_some_and(|n| n.file_path == file) { return false; }
+    let imports = ctx.get_import_mappings(file, Language::Python);
+    let bindings: Vec<_> = imports.iter().filter(|i| i.local_name == name
+        || (i.is_namespace && i.source.split('.').next() == Some(name))).collect();
+    !bindings.is_empty() && bindings.iter().all(|i| {
+        let tail = format!("/{}", i.source.replace('.', "/"));
+        !i.source.starts_with('.')
+            && ctx.resolve_module_file(&i.source, file, Language::Python).is_none()
+            && !target.is_some_and(|n| {
+                let path = format!("/{}", n.file_path);
+                path.contains(&format!("{tail}/")) || path.ends_with(&format!("{tail}.py"))
+                    || path.ends_with(&format!("{tail}.pyi"))
+            })
+    })
+}
+
+pub(super) fn is_python_base_from_outside(cls: &Node, name: &str, target: &Node, ctx: &Ctx) -> bool {
+    let bases = python_base_list(cls, ctx).unwrap_or_default();
+    let pattern = Re::cached(&format!(r"(?<![\w.])([\w.]*\.)?{}\b", escape_regex(name)), "");
+    let captures = pattern.captures(&bases);
+    let head = captures.as_ref().and_then(|c| c.text(1))
+        .and_then(|s| s.split('.').next()).unwrap_or(name);
+    is_python_name_from_outside(head, &cls.file_path, Some(target), ctx)
+}
+
 /// The class a (possibly module-qualified) name written in `r`'s file denotes.
 pub fn python_ref_class(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
     let imports = ctx.get_import_mappings(&r.file_path, Language::Python);
@@ -115,6 +143,7 @@ pub fn python_ref_class(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<Node
         probe.reference_kind = ReferenceKind::Edge(codegraph_types::EdgeKind::References);
         let hit = resolve_import(&probe, ctx);
         let node = hit.and_then(|h| ctx.node_by_id(&h.target_node_id))?;
+        if is_python_name_from_outside(head, &r.file_path, Some(&node), ctx) { return None; }
         if node.kind == NodeKind::Class
             && ctx
                 .get_nodes_by_qualified_name(&node.qualified_name)
@@ -140,19 +169,105 @@ pub fn python_ref_class(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<Node
     }
 }
 
+/// Read only the class header, including wrapped bases and PEP 695 parameters.
+/// Quotes and comments cannot close a list; the class extent bounds malformed input.
+pub(super) fn python_base_list(cls: &Node, ctx: &Ctx) -> Option<String> {
+    let lines = ctx.get_file_lines(&cls.file_path)?;
+    let start = cls.start_line.saturating_sub(1) as usize;
+    let first = lines.get(start)?;
+    let head = re!(r"^\s*class\s+\w+").captures(first)?.text(0)?.len();
+    let mut params = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut list = String::new();
+    for (index, line) in lines.iter().enumerate().take(cls.end_line.max(cls.start_line) as usize).skip(start) {
+        let text = if index == start { &line[head..] } else { line.as_str() };
+        for ch in text.chars() {
+            if let Some(q) = quote {
+                if escaped { escaped = false; }
+                else if ch == '\\' { escaped = true; }
+                else if ch == q { quote = None; }
+                if depth > 0 { list.push(ch); }
+                continue;
+            }
+            if ch == '#' { break; }
+            if ch == '\'' || ch == '"' {
+                quote = Some(ch);
+                if depth > 0 { list.push(ch); }
+                continue;
+            }
+            if depth == 0 {
+                match ch {
+                    '[' => params += 1,
+                    ']' => params = params.checked_sub(1)?,
+                    '(' if params == 0 => depth = 1,
+                    c if params == 0 && !c.is_whitespace() => return None,
+                    _ => {},
+                }
+            } else {
+                if ch == '(' { depth += 1; }
+                if ch == ')' {
+                    depth -= 1;
+                    if depth == 0 { return Some(list); }
+                }
+                list.push(ch);
+            }
+        }
+        if depth > 0 { list.push('\n'); }
+    }
+    None
+}
+
 /// The base classes a class statement lists, as far as they resolve.
 pub fn python_bases(cls: &Node, r: &UnresolvedRef, ctx: &Ctx) -> Vec<NodeRef> {
-    let idx = (cls.start_line as usize).wrapping_sub(1);
-    let line: String = ctx
-        .get_file_lines(&cls.file_path)
-        .and_then(|l| l.get(idx).cloned())
-        .or_else(|| ctx.read_file(&cls.file_path).and_then(|c| c.split('\n').nth(idx).map(|s| s.to_string())))
-        .unwrap_or_default();
-    let Some(bases) = re!(r"^\s*class\s+\w+\s*\(([^)]*)\)").captures(&line).and_then(|c| c.text(1).map(|s| s.to_string())) else {
-        return Vec::new();
-    };
+    let Some(bases) = python_base_list(cls, ctx) else { return Vec::new(); };
     let at = with_file(r, &cls.file_path);
-    bases.split(',').filter_map(|name| python_ref_class(js_trim(name), &at, ctx)).collect()
+    split_base_list(&bases)
+        .into_iter()
+        .filter_map(|raw| {
+            let base = js_trim(raw);
+            if base.is_empty() || base.contains('=') {
+                return None; // metaclass=type / keyword argument, not a base
+            }
+            // `Base[User]` extends Base; its type argument is not a supertype (upstream cd04b21a).
+            let head = base.split('[').next().unwrap_or(base).trim();
+            python_ref_class(head, &at, ctx)
+        })
+        .collect()
+}
+
+/// Split a class base list on top-level commas, respecting brackets and quotes.
+fn split_base_list(bases: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut start = 0usize;
+    for (i, c) in bases.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(bases[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(bases[start..].trim());
+    out
 }
 
 pub fn python_derives_from(cls: &Node, base: &Node, r: &UnresolvedRef, ctx: &Ctx, seen: &mut HashSet<String>) -> bool {
@@ -186,7 +301,15 @@ pub fn python_members(cls: &NodeRef, member: &str, r: &UnresolvedRef, ctx: &Ctx,
         return own;
     }
     let mut unique: IndexMap<String, NodeRef> = IndexMap::new();
-    for p in python_bases(cls, r, ctx) {
+    let mut parents = python_bases(cls, r, ctx);
+    // A base the import path names even when no Python search root finds it already has a
+    // resolved extends edge; use it rather than dropping the inherited member.
+    for parent in ctx.get_superclass_nodes(&cls.id).iter() {
+        if !parents.iter().any(|p| p.id == parent.id) {
+            parents.push(parent.clone());
+        }
+    }
+    for p in parents {
         for n in python_members(&p, member, r, ctx, seen) {
             unique.insert(n.id.clone(), n);
         }
@@ -426,6 +549,49 @@ pub fn python_assignment(line: &str) -> Option<PythonAssignment> {
     }
 }
 
+/// Replace Python string literals with spaces (newlines kept), so text inside a string is never
+/// read as a binding. Comments are already blanked by `python_member_lines`.
+fn mask_python_strings(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let quote = bytes[i];
+        if quote != b'\'' && quote != b'"' {
+            i += 1;
+            continue;
+        }
+        let triple = i + 2 < bytes.len() && bytes[i + 1] == quote && bytes[i + 2] == quote;
+        let start = i;
+        let mut j = if triple { i + 3 } else { i + 1 };
+        while j < bytes.len() {
+            if bytes[j] == b'\\' {
+                j = (j + 2).min(bytes.len());
+                continue;
+            }
+            if triple {
+                if j + 2 < bytes.len() && bytes[j] == quote && bytes[j + 1] == quote && bytes[j + 2] == quote {
+                    j += 3;
+                    break;
+                }
+            } else if bytes[j] == quote {
+                j += 1;
+                break;
+            } else if bytes[j] == b'\n' {
+                break;
+            }
+            j += 1;
+        }
+        for byte in out.iter_mut().take(j).skip(start) {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        i = j;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// How a statement binds `name`: `import`, assignment, `global`, or some other way.
 pub fn python_line_bindings(lines: &[String], index: usize, statements: &[bool], name: &str) -> Vec<PythonBinding> {
     let mut line = lines[index].clone();
@@ -437,6 +603,7 @@ pub fn python_line_bindings(lines: &[String], index: usize, statements: &[bool],
             j += 1;
         }
     }
+    let line = mask_python_strings(&line);
     let mut out: Vec<PythonBinding> = Vec::new();
 
     let imported = if statements[index] { re!(r"^\s*(?:from\s+([\w.]+)\s+)?import\s+([\s\S]*)$").captures(&line) } else { None };
@@ -493,7 +660,12 @@ pub fn python_line_bindings(lines: &[String], index: usize, statements: &[bool],
     }
     if statements[index] {
         if re!(r"^\s*case\b").is_match(&line) {
-            return vec![PythonBinding::Other];
+            // A bare/sequence capture or `as other` binds; a keyword argument inside a class
+            // pattern (`case Point(other=1)`) does not.
+            let pattern = line.trim_start().trim_start_matches("case").trim_start().split(':').next().unwrap_or("");
+            let capture = Re::cached(&format!(r"(?<![\w.]){esc}\b(?!\s*[.=])"), "").is_match(pattern)
+                || re!(r"\bas\s+[\w]+\b").is_match(pattern) && word.is_match(pattern);
+            return if capture { vec![PythonBinding::Other] } else { Vec::new() };
         }
         if let Some(assignment) = python_assignment(&line) {
             let target = if assignment.targets.len() == 1 && !assignment.augmented { js_trim(&assignment.targets[0]).to_string() } else { String::new() };
@@ -565,6 +737,113 @@ pub fn python_binds_locally(name: &str, r: &UnresolvedRef, ctx: &Ctx, imports_bi
     false
 }
 
+/// The import keys a file binds at module scope (indentation zero). A from-import written inside
+/// a function is not in this set, so it cannot leak into another function's resolution.
+pub fn python_module_import_keys(name: &str, file_path: &str, ctx: &Ctx) -> HashSet<String> {
+    let lines = python_member_lines(file_path, ctx);
+    let statements = python_statement_starts(file_path, ctx);
+    let mut keys = HashSet::new();
+    for i in 0..lines.len() {
+        if !statements[i] || lines[i].is_empty() || lines[i].starts_with(char::is_whitespace) {
+            continue;
+        }
+        for binding in python_line_bindings(&lines, i, &statements, name) {
+            if let PythonBinding::Import { key } = binding {
+                keys.insert(key);
+            }
+        }
+    }
+    keys
+}
+
+fn python_lambda_covers_reference(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    let Some(lines) = ctx.get_file_lines(&r.file_path) else { return false };
+    let Some(line) = r.line.checked_sub(1).and_then(|i| lines.get(i as usize)) else { return false };
+    let mut units = 0usize;
+    let mut reference = line.len();
+    for (i, c) in line.char_indices() {
+        if units >= r.column as usize {
+            reference = i;
+            break;
+        }
+        units += c.len_utf16();
+    }
+    for lambda in re!(r"\blambda\b([^:]*):", "g").captures_iter(line) {
+        let params = lambda.text(1).unwrap_or("");
+        if !Re::cached(&format!(r"(?<![\w$]){}(?![\w$])", escape_regex(name)), "").is_match(params) {
+            continue;
+        }
+        let body = lambda.get(0).map(|m| m.end()).unwrap_or(0);
+        let mut depth = 0i32;
+        let mut end = line.len();
+        for (i, c) in line[body..].char_indices() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => {
+                    if depth == 0 {
+                        end = body + i;
+                        break;
+                    }
+                    depth -= 1;
+                }
+                ',' if depth == 0 => {
+                    end = body + i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if reference >= body && reference < end {
+            return true;
+        }
+    }
+    false
+}
+
+fn python_header_binds(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    let Some(node) = ctx.node_by_id(&r.from_node_id) else { return false };
+    let signature = node.signature.clone().unwrap_or_default();
+    Re::cached(&format!(r"[(,]\s*\*{{0,2}}{}\s*[:=,)]", escape_regex(name)), "").is_match(&signature)
+}
+
+/// A Python module receiver the surrounding function binds to something else (parameter, local,
+/// `with`/`for`/`except` target, walrus, comprehension/lambda/case), so import resolution must
+/// not treat it as the module the file imports. A function-local import is not shadowing; it is
+/// resolved to its own module separately (upstream b700a3ee).
+pub fn python_import_receiver_shadowed(r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    if r.language != Language::Python || !r.is_kind(codegraph_types::EdgeKind::Calls) {
+        return false;
+    }
+    let receiver = if let Some((root, _)) = r.reference_name.split_once('.') {
+        root.to_string()
+    } else {
+        let Some(bare) = super::calls::bare_call_receiver(r, ctx) else { return false };
+        bare.receiver.split('.').next().unwrap_or("").to_string()
+    };
+    if receiver.is_empty() {
+        return false;
+    }
+    if !ctx.get_import_mappings(&r.file_path, Language::Python).iter().any(|m| m.local_name == receiver) {
+        return false;
+    }
+    if python_function_module_alias(&receiver, r, ctx).is_some() {
+        return false;
+    }
+    if !python_binds_locally(&receiver, r, ctx, false) {
+        return false;
+    }
+    // A lambda parameter binds only the lambda's own body; `run(lambda other: 1, other.persist())`
+    // does not shadow the module for the second argument (upstream b700a3ee).
+    let line = ctx
+        .get_file_lines(&r.file_path)
+        .and_then(|lines| r.line.checked_sub(1).and_then(|i| lines.get(i as usize)).cloned())
+        .unwrap_or_default();
+    if line.contains("lambda") && line.contains(&receiver) && !python_lambda_covers_reference(&receiver, r, ctx) {
+        return python_header_binds(&receiver, r, ctx);
+    }
+    true
+}
+
 /// The module a function-local `import x` / `from m import x` binds `name` to, when it is
 /// one dotted module.
 pub fn python_function_module_alias(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
@@ -588,9 +867,16 @@ pub fn python_function_module_alias(name: &str, r: &UnresolvedRef, ctx: &Ctx) ->
         }
         let modules: IndexSet<String> = bindings
             .iter()
-            .map(|b| match b {
-                PythonBinding::Import { key } if key.ends_with(":*") => key[..key.len() - 2].to_string(),
-                _ => String::new(),
+            .filter_map(|b| match b {
+                PythonBinding::Import { key } if key.ends_with(":*") => Some(key[..key.len() - 2].to_string()),
+                // `from pkg import third as other` binds the module pkg.third when that names a
+                // module file (a class or function of the same name does not).
+                PythonBinding::Import { key } => {
+                    let (source, name) = key.split_once(':')?;
+                    let module = format!("{source}.{name}");
+                    resolve_import_path(&module, &r.file_path, Language::Python, ctx).map(|_| module)
+                }
+                _ => None,
             })
             .collect();
         let module = modules.iter().next().cloned().unwrap_or_default();

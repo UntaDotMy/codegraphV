@@ -42,24 +42,82 @@ pub fn is_object_literal_owner(n: &Node) -> bool {
         && n.signature.as_deref().is_some_and(|s| re!(r"^=\s*\{").is_match(s))
 }
 
-memo_map!(OwnerOfMemo, String, Option<NodeRef>);
+/// A function qualified under an object literal's holder, and the block it is written in when that is no member's place.
+pub struct LiteralPlace {
+    pub holder: NodeRef,
+    pub block: Option<(u32, u32)>,
+}
+
+memo_map!(LiteralPlaceMemo, String, Option<Rc<LiteralPlace>>);
+memo_map!(HolderBlocksMemo, String, Option<Rc<JsBlockIndex>>);
 memo_map!(ThisCallerMemo, String, NodeRef);
 memo_map!(ClassicScriptMemo, String, bool);
 memo_map!(GlobalHolderMemo, String, bool);
 
-/// The object literal a function member was declared inside.
-pub fn object_literal_owner_of(n: &Node, ctx: &Ctx) -> Option<NodeRef> {
+/// The holder's own text, comments blanked and string contents blanked, so a component's template is not code.
+fn holder_code(container: &Node, ctx: &Ctx) -> Option<String> {
+    let lines = ctx.get_file_lines(&container.file_path)?;
+    let from = container.start_line as usize - 1;
+    let mut extent_lines: Vec<String> =
+        lines.iter().skip(from).take((container.end_line as usize + 1).saturating_sub(container.start_line as usize)).cloned().collect();
+    if extent_lines.is_empty() {
+        return None;
+    }
+    let last = extent_lines.len() - 1;
+    extent_lines[last] = utf16_prefix(&extent_lines[last], container.end_column as usize).to_string();
+    extent_lines[0] = utf16_from(&extent_lines[0], container.start_column as usize).to_string();
+    let extent = strip_comments_for_regex(&extent_lines.join("\n"), "typescript");
+    Some(blank_string_contents(&extent, None))
+}
+
+/// The lines of the block `n` is written in, when that lies below the literal `holder` holds.
+/// Null for a member, which sits in the literal's own braces.
+fn block_below_literal(n: &Node, holder: &Node, ctx: &Ctx) -> Option<(u32, u32)> {
+    let index = memoized::<HolderBlocksMemo>(ctx, holder.id.clone(), || holder_code(holder, ctx).map(|code| Rc::new(read_js_blocks(&code))))?;
+    let first_line = n.start_line == holder.start_line;
+    let column = n.start_column.saturating_sub(if first_line { holder.start_column } else { 0 });
+    let at = js_offset(&index, n.start_line - holder.start_line + 1, column);
+    let block = js_block_at(&index, at)?;
+    if js_block_at(&index, block.0).is_none() {
+        return None;
+    }
+    let line_of = |offset: usize| -> u32 {
+        let starts = &index.line_starts;
+        let mut line = starts.len() - 1;
+        while line > 0 && starts[line] > offset {
+            line -= 1;
+        }
+        holder.start_line + line as u32
+    };
+    Some((line_of(block.0), line_of(block.1)))
+}
+
+/// Where a function qualified under an object literal's holder is written.
+/// A function directly in the literal's braces is a member (`block` is none). One deeper down is a local of its block.
+pub fn literal_place_of(n: &Node, ctx: &Ctx) -> Option<Rc<LiteralPlace>> {
     if n.kind != NodeKind::Function || !is_js_family(n.language) {
         return None;
     }
     let cut = n.qualified_name.rfind("::").filter(|c| *c > 0)?;
-    memoized::<OwnerOfMemo>(ctx, n.id.clone(), || {
+    memoized::<LiteralPlaceMemo>(ctx, n.id.clone(), || {
         let parent = &n.qualified_name[..cut];
-        ctx.get_nodes_by_qualified_name(parent)
-            .iter()
-            .find(|o| o.file_path == n.file_path && o.id != n.id && is_object_literal_owner(o) && range_within(n, o))
-            .cloned()
+        let nodes = ctx.get_nodes_by_qualified_name(parent);
+        let holder = nodes.iter().find(|o| o.file_path == n.file_path && o.id != n.id && is_object_literal_owner(o) && range_within(n, o));
+        holder.map(|holder| {
+            let block = block_below_literal(n, holder, ctx);
+            Rc::new(LiteralPlace { holder: holder.clone(), block })
+        })
     })
+}
+
+/// The object literal a function is a member of, or none when the function is a local written deeper in it.
+pub fn object_literal_owner_of(n: &Node, ctx: &Ctx) -> Option<NodeRef> {
+    let place = literal_place_of(n, ctx)?;
+    if place.block.is_some() {
+        None
+    } else {
+        Some(place.holder.clone())
+    }
 }
 
 fn qualified_parent_of(n: &Node, ctx: &Ctx) -> Option<NodeRef> {

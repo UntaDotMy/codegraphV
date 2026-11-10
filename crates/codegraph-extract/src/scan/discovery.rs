@@ -345,7 +345,7 @@ fn collect_included_files(
                 }
                 let abs = abs_dir.join(&name);
                 let rel = normalize_path(&relative_to(self.root_dir, &abs));
-                if rel.is_empty() || rel.starts_with("..") {
+                if rel.is_empty() || codegraph_types::nodepath::leaves_root(&rel) {
                     continue;
                 }
                 let Ok(ft) = entry.file_type() else { continue };
@@ -647,10 +647,10 @@ fn gitlink_embedded_repo_skipped(rel_dir: &str, prefix: &str, defaults: &Ignore,
     })
 }
 
-/// `git ls-files -z -s`, expanding submodules where git allows it. Older git
+/// `git ls-files -z -s -t`, expanding submodules where git allows it. Older git
 /// (< 2.36) refuses `--recurse-submodules` with `-s`; retry without it (#1549).
 fn ls_files_staged(cwd: &Path) -> Res<String> {
-    git30(cwd, &["ls-files", "-z", "-s", "--recurse-submodules"]).or_else(|_| git30(cwd, &["ls-files", "-z", "-s"]))
+    git30(cwd, &["ls-files", "-z", "-s", "-t", "--recurse-submodules"]).or_else(|_| git30(cwd, &["ls-files", "-z", "-s", "-t"]))
 }
 
 /// Standalone discovery of every embedded repo root under `root_dir` (relative,
@@ -687,7 +687,7 @@ fn visit_embedded(repo_abs: &Path, prefix: &str, defaults: &Ignore, include_igno
         let staged = ls_files_staged(repo_abs)?;
         let repo_ignore = build_default_ignore(repo_abs);
         for entry in staged.split('\0') {
-            if entry.is_empty() || !entry.starts_with("160000") {
+            if entry.get(2..8) != Some("160000") {
                 continue;
             }
             let Some(tab) = entry.find('\t') else { continue };
@@ -809,10 +809,13 @@ fn collect_git_files(
         }
         let Some(tab) = entry.find('\t') else { continue };
         let rel = &entry[tab + 1..];
-        if entry.starts_with("160000") {
+        if entry.get(2..8) == Some("160000") {
             gitlink_rels.push(rel.to_string()); // recursed into below, not a source file itself
             continue;
         }
+        // A skip-worktree bit alone is insufficient: update-index may leave the file
+        // present. Drop only absent sparse paths, before any parsing or resolution reads.
+        if entry.starts_with("S ") && !repo_dir.join(rel).exists() { continue; }
         files.insert(normalize_path(&format!("{prefix}{rel}")));
     }
 
@@ -1208,7 +1211,7 @@ fn is_ignored(rel_full: &str, is_dir: bool, matchers: &[Arc<ScopedIgnore>]) -> R
                 None => continue, // not under this matcher's dir
             }
         };
-        if rel.is_empty() || rel.starts_with("..") {
+        if rel.is_empty() || codegraph_types::nodepath::leaves_root(&rel) {
             continue;
         }
         if is_dir {

@@ -387,7 +387,7 @@ pub fn run(options: Options) -> crate::Result<i32> {
         // whether or not the original had one, as `install --yes` does (BUG-95).
         let (permission, _) =
             if agent.id == "claude" { env.claude_settings_as(&ORIGINAL, agent.loc) } else { (true, false) };
-        let install = InstallOptions { auto_allow: permission, prompt_hook: Some(true), dry_run: false };
+        let install = InstallOptions { auto_allow: permission, prompt_hook: Some(true), dry_run: false, preserve_permissions: false };
         // Check the replacement before removing the working entry. Parsing failures must not
         // leave an agent disconnected from both programs.
         let step = env.apply(&agent.id, agent.loc, InstallOptions { dry_run: true, ..install }, false)

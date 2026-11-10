@@ -493,6 +493,13 @@ impl Ctx {
         }
     }
 
+    /// Drop the per-context resolution memos (name matcher, framework passes) without the
+    /// file/DB caches. A config-only sync changes what those memos were derived from.
+    pub fn clear_module_memos(&self) {
+        self.memos.borrow_mut().clear();
+        self.view_memos.borrow_mut().clear();
+    }
+
     /// Drop every cache and memo.
     pub fn clear_caches(&self) {
         self.node_cache.borrow_mut().clear();
@@ -516,8 +523,12 @@ impl Ctx {
         *self.known_names.borrow_mut() = None;
         *self.known_lower_names.borrow_mut() = None;
         *self.known_files.borrow_mut() = None;
+        *self.project_aliases.borrow_mut() = None;
+        self.dir_aliases.borrow_mut().clear();
+        self.go_module_by_dir.borrow_mut().clear();
         *self.go_modules.borrow_mut() = None;
         self.go_package_dirs.borrow_mut().clear();
+        *self.workspace_packages.borrow_mut() = None;
         self.caches_warmed.set(false);
         // The import resolver's and name matcher's per-context memos assume the same stable
         // window as the caches above — drop them together.
@@ -1103,6 +1114,72 @@ impl Ctx {
     }
 
     // -- Project configuration -----------------------------------------------
+
+    /// Project import-path aliases (tsconfig/jsconfig `paths`, and `baseUrl`).
+    /// Re-read effective module configuration, including inherited aliases. Fingerprints
+    /// contain only resolution inputs, so unrelated compiler flags/dependency bumps do not
+    /// reopen references. Per-directory memoization shares ancestor reads within this pass.
+    pub fn refresh_module_configuration(&self) -> (String, String, String) {
+        // A config-only sync changes no source file, so nothing else may have dropped the
+        // content memos. Read the manifests as they are now.
+        self.file_cache.borrow_mut().clear();
+        self.file_lines_cache.borrow_mut().clear();
+        self.clear_module_memos();
+        *self.project_aliases.borrow_mut() = None;
+        self.dir_aliases.borrow_mut().clear();
+        self.go_module_by_dir.borrow_mut().clear();
+        *self.go_modules.borrow_mut() = None;
+        self.go_package_dirs.borrow_mut().clear();
+        let files = q("moduleConfigFiles", self.store.get_all_file_paths());
+        let mut dirs = std::collections::BTreeSet::new();
+        dirs.insert(String::new());
+        for file in &files {
+            if [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".svelte", ".vue", ".astro", ".ets"].iter().any(|ext| file.ends_with(ext)) {
+                let mut dir = file.rsplit_once('/').map_or("", |(dir, _)| dir);
+                while !dir.is_empty() {
+                    dirs.insert(dir.to_string());
+                    dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+                }
+            }
+        }
+        let aliases: Vec<_> = dirs.into_iter().filter(|dir| dir.is_empty()
+            || ["tsconfig.json", "jsconfig.json"].iter().any(|name|
+                std::path::Path::new(&nodepath::join(&[&self.project_root, dir, name])).is_file()))
+            .map(|dir| {
+            let map = self.get_nearest_aliases(&format!("{dir}/__module_config__.ts"))
+                .or_else(|| self.get_project_aliases());
+            (dir, map.map(|m| serde_json::json!({
+                "baseUrl":m.base_url, "declaresBaseUrl":m.declares_base_url,
+                "patterns":m.patterns.iter().map(|p| serde_json::json!({
+                    "prefix":p.prefix,"suffix":p.suffix,"wildcard":p.has_wildcard,"replacements":p.replacements
+                })).collect::<Vec<_>>()
+            })))
+        }).collect();
+        // Use the actual current file set even if resolution has warmed its old file list.
+        let mut modules = std::collections::BTreeSet::new();
+        for dir in std::iter::once("").chain(files.iter().filter(|f| f.ends_with(".go")).map(|f| f.rsplit_once('/').map_or("", |(d, _)| d))) {
+            if let Some(module) = self.nearest_go_module(dir) {
+                modules.insert((module.root_dir.clone(), module.module_path.clone()));
+            }
+        }
+        // The Cargo workspace's crates: what a `use b::…` may bind to. A member added under a
+        // glob is named by no manifest the previous snapshot held, so read the map from the
+        // current file set (upstream f72c9d2e).
+        let mut manifests = std::collections::BTreeMap::<String, Option<String>>::new();
+        if let Some(root) = self.read_file("Cargo.toml").filter(|text| !text.is_empty()) {
+            manifests.insert("Cargo.toml".into(), Some(crate::frameworks::cargo_workspace::cargo_manifest_fields(&root)));
+            for dir in crate::frameworks::cargo_workspace::get_cargo_workspace_crate_map(self).values() {
+                let path = format!("{dir}/Cargo.toml");
+                let fields = self.read_file(&path).map(|text| crate::frameworks::cargo_workspace::cargo_manifest_fields(&text));
+                manifests.insert(path, fields);
+            }
+        }
+        (
+            serde_json::to_string(&aliases).unwrap(),
+            serde_json::to_string(&modules).unwrap(),
+            serde_json::to_string(&manifests).unwrap(),
+        )
+    }
 
     /// Project import-path aliases (tsconfig/jsconfig `paths`, and `baseUrl`).
     pub fn get_project_aliases(&self) -> Option<Rc<AliasMap>> {

@@ -151,10 +151,12 @@ pub fn delete_now_or_after_exit(paths: &[PathBuf], dirs: &[PathBuf]) -> bool {
 #[cfg(windows)]
 fn delete_after_exit(paths: &[PathBuf], dirs: &[PathBuf]) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
-    let mut script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue", std::process::id());
+    // Use .NET primitives: cleanup must also work when PowerShell's optional
+    // management modules cannot load under an isolated or damaged user profile.
+    let mut script = format!("try {{ [Diagnostics.Process]::GetProcessById({}).WaitForExit() }} catch {{}}", std::process::id());
     for path in paths {
         script.push_str(&format!(
-            "; for ($i = 0; $i -lt 50 -and (Test-Path -LiteralPath {a}); $i++) {{ Remove-Item -LiteralPath {a} -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 200 }}",
+            "; for ($i = 0; $i -lt 50 -and [IO.File]::Exists({a}); $i++) {{ try {{ [IO.File]::Delete({a}) }} catch {{}}; [Threading.Thread]::Sleep(200) }}",
             a = ps_quote(&path.to_string_lossy())
         ));
     }

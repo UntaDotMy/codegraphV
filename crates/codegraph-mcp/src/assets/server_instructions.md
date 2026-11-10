@@ -1,5 +1,7 @@
 # CodeGraphV
 
+A queue-full retry response means the request was not executed; retry it after the server is less busy.
+
 Use `codegraphV_explore` first for indexed code. It returns verbatim, numbered
 source and recorded call paths, including heuristic dynamic-dispatch hops.
 Treat returned source as already Read; don't re-read it just to verify it.

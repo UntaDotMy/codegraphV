@@ -297,8 +297,8 @@ pub fn apply_aliases(import_path: &str, aliases: &AliasMap, project_root: &str) 
             let filled = if pat.has_wildcard { target.replacen('*', captured, 1) } else { target.clone() };
             let absolute = nodepath::resolve(&[&aliases.base_url, &filled]);
             let relative = nodepath::relative(project_root, &absolute);
-            // Skip if the rewrite escapes the project root.
-            if relative.starts_with("..") {
+            // Skip if the rewrite escapes the project root (`..generated/` is inside it).
+            if nodepath::leaves_root(&relative) {
                 continue;
             }
             out.push(relative.replace('\\', "/"));
@@ -313,7 +313,7 @@ pub fn alias_and_base_url_candidates(import_path: &str, aliases: &AliasMap, proj
     let mut out = apply_aliases(import_path, aliases, project_root);
     if aliases.declares_base_url {
         let relative = nodepath::relative(project_root, &nodepath::resolve(&[&aliases.base_url, import_path]));
-        if !relative.is_empty() && !relative.starts_with("..") && !nodepath::is_absolute(&relative) {
+        if !relative.is_empty() && !nodepath::leaves_root(&relative) {
             out.push(relative.replace('\\', "/"));
         }
     }

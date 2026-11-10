@@ -59,6 +59,18 @@ pub fn same_language_family(a: Language, b: Language) -> bool {
     }
 }
 
+/// Languages whose files share one table of bare names. A C function is called by name from C++
+/// and Objective-C, and a header is C, C++ or Objective-C only as far as sniffing can tell, so
+/// ranking treats them as one language. Other families keep the language itself: ranking them
+/// together sent calls to a same-named declaration in the next file (upstream 6d3804cf).
+pub fn same_ranking_language(a: Language, b: Language) -> bool {
+    a == b || (is_c_linked_language(a) && is_c_linked_language(b))
+}
+
+fn is_c_linked_language(language: Language) -> bool {
+    matches!(language, Language::C | Language::Cpp | Language::ObjC)
+}
+
 pub fn crosses_code_boundary(a: Language, b: Language) -> bool {
     match (code_family(a.as_str()), code_family(b.as_str())) {
         (Some(fa), Some(fb)) => fa != fb,
@@ -159,9 +171,12 @@ pub use rust::{
     match_rust_self_field_call, match_rust_self_path, match_rust_typed_receiver_call, match_rust_typed_self_field_call,
     match_rust_written_receiver_call, rust_chained_call_by_name, rust_field_type_name,
 };
-pub use exact::{match_by_exact_name, match_by_file_path, match_by_qualified_name, match_fuzzy, prefer_call_site_file};
+pub use exact::{
+    is_objc_declared_type_ref, match_by_exact_name, match_by_file_path, match_by_qualified_name, match_fuzzy, prefer_call_site_file,
+};
 pub use calls::{is_go_bare_name, is_python_self_call};
 pub use js_scope::is_import_shadowed_by_js_binding;
+pub use reach::crosses_workspace_root;
 pub use js_store::{is_unresolved_js_member_call, match_js_store_binding_call};
 pub use object_literal::{match_object_path_call, resolve_object_literal_binding, this_scope_caller};
 
@@ -192,6 +207,17 @@ mod tests {
     fn config_languages_have_no_family_but_match_themselves() {
         assert!(same_language_family(l("yaml"), l("yaml")));
         assert!(!same_language_family(l("yaml"), l("terraform")));
+    }
+
+    #[test]
+    fn c_cpp_and_objc_rank_as_one_language_and_other_families_do_not() {
+        assert!(same_ranking_language(l("c"), l("cpp")));
+        assert!(same_ranking_language(l("objc"), l("c")));
+        assert!(same_ranking_language(l("cpp"), l("objc")));
+        assert!(same_ranking_language(l("typescript"), l("typescript")));
+        assert!(!same_ranking_language(l("typescript"), l("tsx")));
+        assert!(!same_ranking_language(l("java"), l("kotlin")));
+        assert!(!same_ranking_language(l("c"), l("swift")));
     }
 
     #[test]

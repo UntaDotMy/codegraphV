@@ -252,9 +252,12 @@ pub fn find_best_match(r: &UnresolvedRef, candidates: &[NodeRef], ctx: &Ctx) -> 
     let mut tied: Vec<NodeRef> = Vec::new();
     let mut ref_dirs: Vec<&str> = r.file_path.split('/').collect();
     ref_dirs.pop();
-    let has_same_language = candidates.iter().any(|c| c.language == r.language);
+    // C, C++ and Objective-C share one name table (same_ranking_language). Other families keep
+    // the language itself, so a `.ts` call still prefers the `.ts` method over a `.tsx` namesake.
+    let has_same_language = candidates.iter().any(|c| super::same_ranking_language(c.language, r.language));
     for candidate in candidates {
-        if has_same_language && candidate.language != r.language {
+        let same_language = super::same_ranking_language(candidate.language, r.language);
+        if has_same_language && !same_language {
             continue;
         }
         let mut score = 0.0f64;
@@ -268,8 +271,10 @@ pub fn find_best_match(r: &UnresolvedRef, candidates: &[NodeRef], ctx: &Ctx) -> 
         {
             score += 80.0;
         }
-        if candidate.language == r.language {
-            score += 50.0;
+        // Same ranking language is worth 50. The very language adds one point, only enough to
+        // break a tie: one nearer directory is worth 15.
+        if same_language {
+            score += if candidate.language == r.language { 51.0 } else { 50.0 };
         } else {
             score -= 80.0;
         }
@@ -292,6 +297,11 @@ pub fn find_best_match(r: &UnresolvedRef, candidates: &[NodeRef], ctx: &Ctx) -> 
             score += 10.0;
         }
         if candidate.file_path == r.file_path && candidate.start_line != 0 {
+            // The reference sits inside this declaration (a route annotation written on one of
+            // two same-named overloads) — stronger evidence than a nearer start line.
+            if candidate.start_line <= r.line && r.line <= candidate.end_line {
+                score += 30.0;
+            }
             let distance = (candidate.start_line as f64 - r.line as f64).abs();
             score += (20.0 - distance / 10.0).max(0.0);
         }

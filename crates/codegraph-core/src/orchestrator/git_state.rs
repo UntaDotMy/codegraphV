@@ -13,6 +13,22 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const INDEXED_DIRTY_PATHS_KEY: &str = "indexed_dirty_paths";
+const INDEXED_SPARSE_CHECKOUT_KEY: &str = "indexed_sparse_checkout";
+
+/// No git process on the status path. Pattern bytes and the switches both matter:
+/// disabling sparse checkout can leave the patterns file unchanged.
+fn sparse_checkout_stamp(root: &Path) -> String {
+    let Some(repo) = root.ancestors().find(|dir| dir.join(".git").exists()) else { return String::new() };
+    let Some(git_dir) = codegraph_extract::scan::git::resolve_git_dir(repo) else { return String::new() };
+    let Ok(patterns) = std::fs::read_to_string(git_dir.join("info/sparse-checkout")) else { return String::new() };
+    let mut switches = Vec::new();
+    for name in ["config", "config.worktree"] {
+        if let Ok(text) = std::fs::read_to_string(git_dir.join(name)) {
+            switches.extend(text.lines().filter(|line| line.to_ascii_lowercase().contains("sparsecheckout")).map(str::to_owned));
+        }
+    }
+    hash_content(&format!("{patterns}\0{}", switches.join("\n")))
+}
 
 /// Files that differ from the index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,6 +44,7 @@ pub struct GitIndexSnapshot {
     pub head: String,
     pub stamp: String,
     pub dirty: Option<Vec<String>>,
+    pub sparse: String,
 }
 
 /// Whether these bytes, read from `file_path`, are a `.ts` MPEG transport stream (#1910).
@@ -101,7 +118,7 @@ impl ExtractionOrchestrator {
             // so a crash cannot forget an indexed uncommitted edit.
             self.store.set_metadata(INDEXED_DIRTY_PATHS_KEY, &json!({ "commit": stamp, "paths": dirty }).to_string())?;
         }
-        Ok(GitIndexSnapshot { head, stamp, dirty })
+        Ok(GitIndexSnapshot { head, stamp, dirty, sparse: if full { sparse_checkout_stamp(root) } else { String::new() } })
     }
 
     pub fn finish_git_index_state(&self, snapshot: &GitIndexSnapshot, full: bool, retries: &[String]) -> crate::errors::Result<()> {
@@ -125,6 +142,7 @@ impl ExtractionOrchestrator {
         self.store.set_metadata(INDEXED_DIRTY_PATHS_KEY, &json!({ "commit": commit, "paths": paths }).to_string())?;
         if full {
             self.store.set_metadata(INDEXED_AT_COMMIT_KEY, commit)?;
+            self.store.set_metadata(INDEXED_SPARSE_CHECKOUT_KEY, &snapshot.sparse)?;
         }
         Ok(())
     }
@@ -149,7 +167,16 @@ impl ExtractionOrchestrator {
             // Git supplies candidates, never the verdict. A committed deletion may have been
             // recreated locally; a previously indexed dirty path may have vanished from git status
             // after restore. Classify current disk vs DB once.
-            let candidates: IndexSet<String> = git_changes.deleted.into_iter().chain(git_changes.modified).chain(git_changes.added).chain(dirty_paths).collect();
+            let mut candidates: IndexSet<String> = git_changes.deleted.into_iter().chain(git_changes.modified).chain(git_changes.added).chain(dirty_paths).collect();
+            if self.store.get_metadata(INDEXED_SPARSE_CHECKOUT_KEY)?
+                .is_some_and(|prior| prior != sparse_checkout_stamp(root)) {
+                let scanned: HashSet<String> = scan_directory(root, None, None)
+                    .map_err(crate::errors::CodeGraphError::other)?.into_iter().collect();
+                let indexed: HashSet<String> = self.store.get_all_files()?.into_iter().map(|file| file.path).collect();
+                let mut changed: Vec<_> = scanned.symmetric_difference(&indexed).cloned().collect();
+                changed.sort();
+                candidates.extend(changed);
+            }
             let scope = self.scoped_sync_matcher();
             let overrides = load_extension_overrides(root);
             for file_path in candidates {

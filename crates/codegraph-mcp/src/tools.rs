@@ -95,6 +95,7 @@ pub struct ToolHandler {
     /// never releases.
     pub idle_timeout: Option<Duration>,
     pub(crate) shown: std::collections::HashMap<String, std::collections::HashSet<u32>>,
+    pub(crate) cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// How long an explicit-`projectPath` project may go unused before the handler releases it
@@ -124,6 +125,7 @@ impl ToolHandler {
             used_at: HashMap::new(),
             idle_timeout: project_idle_timeout(),
             shown: Default::default(),
+            cancellation: None,
         }
     }
 
@@ -266,7 +268,14 @@ impl ToolHandler {
         }
         let (_, mut cg) = self.projects.shift_remove_entry(&root).unwrap();
         cg.reopen_if_replaced();
+        let scope = self.cancellation.clone().map(codegraph_types::request::Scope::enter);
         let result = self.dispatch(&cg, name, args);
+        let cancelled = codegraph_types::request::cancelled();
+        drop(scope);
+        let result = if cancelled {
+            self.shown.clear();
+            Ok(ToolResult::text("Request cancelled; no complete answer was produced."))
+        } else { result };
         let result = match result {
             Ok(result) => result,
             Err(error) => ToolResult::error(format!(

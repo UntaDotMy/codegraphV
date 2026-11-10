@@ -20,9 +20,15 @@ use codegraph_jsre::{re, Re};
 use codegraph_search::is_test_path;
 use codegraph_types::jscompat::{js_trim, utf16_byte_index};
 use codegraph_types::{EdgeKind, Language, Node, NodeKind};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::LazyLock;
+
+thread_local! {
+    /// The argument-based choices currently being made, so one that re-enters itself stops.
+    static CPP_ARGUMENT_CHOICES_IN_FLIGHT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
 
 // -- Argument types --------------------------------------------------------------------------------
 
@@ -517,6 +523,24 @@ pub fn cpp_argument_type_choice(tied: Vec<NodeRef>, name: &str, args: &[String],
     if tied.len() == 1 || args.is_empty() {
         return tied[0].clone();
     }
+    // Typing an argument can resolve a call of this same overloaded name, whose own choice is
+    // again made by the outer call's arguments. Re-entering takes the first overload, the way a
+    // call whose argument types are unknown does; otherwise the choice recurses until the stack
+    // runs out (upstream 0d7480f8).
+    let key = format!("{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}", r.from_node_id, r.file_path, r.line, r.column, name);
+    struct Guard(String);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CPP_ARGUMENT_CHOICES_IN_FLIGHT.with(|set| {
+                set.borrow_mut().remove(&self.0);
+            });
+        }
+    }
+    let reentered = CPP_ARGUMENT_CHOICES_IN_FLIGHT.with(|set| !set.borrow_mut().insert(key.clone()));
+    if reentered {
+        return tied[0].clone();
+    }
+    let _guard = Guard(key);
     let types: Vec<Option<ArgType>> = args.iter().map(|a| cpp_argument_type(a, r, ctx)).collect();
     if types.iter().all(Option::is_none) {
         return tied[0].clone();

@@ -463,6 +463,11 @@ pub fn lexical_kotlin_members(candidates: &[NodeRef], r: &UnresolvedRef, ctx: &C
             if n.kind != NodeKind::Method {
                 return false;
             }
+            // An object expression's override is not what a call of its own name
+            // inside it means. The scopes around it decide.
+            if n.id == r.from_node_id && super::reach::is_anonymous_member(n) {
+                return false;
+            }
             let cut = n.qualified_name.rfind("::").unwrap_or(0);
             let mut path: Vec<&str> = n.qualified_name[..cut].split("::").flat_map(|s| s.split('.')).collect();
             let mut owner = path.pop().unwrap_or("");

@@ -30,6 +30,33 @@ fn payload(prompt: &str, cwd: &Path) -> String {
 }
 
 #[test]
+fn hook_deadline_fails_open_even_when_stdin_never_closes() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codegraphV"))
+        .arg("prompt-hook").current_dir(home.path())
+        .env("HOME", home.path()).env("USERPROFILE", home.path())
+        .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
+        .env("CODEGRAPHV_PROMPT_HOOK_TIMEOUT_MS", "100")
+        .env_remove("CODEGRAPHV_NO_PROMPT_HOOK").env_remove("CODEGRAPHV_PROMPT_HOOK")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let input = child.stdin.take().unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() { break; }
+        if started.elapsed() > std::time::Duration::from_secs(5) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("hook did not honor deadline while stdin stayed open");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn injects_for_structural_prompts_and_is_silent_on_every_failure_path() {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -73,7 +100,7 @@ fn injects_for_structural_prompts_and_is_silent_on_every_failure_path() {
     silent(hook(broken.path(), &payload("how does login work?", broken.path()), &[]), "corrupt index");
 }
 
-/// BUG-95: the hook `install` writes runs from the hook shell even when the agent's PATH does
+/// BUG-95: the hook `install` writes runs directly even when the agent's PATH does
 /// not hold the install folder (an agent started before the install, or a folder never added).
 #[test]
 fn installed_hook_runs_without_the_install_folder_on_path() {
@@ -94,21 +121,10 @@ fn installed_hook_runs_without_the_install_folder_on_path() {
         serde_json::from_str(&std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap()).unwrap();
     let command = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
 
-    // Claude Code runs hooks with Git Bash on Windows and sh elsewhere.
-    let shell = if cfg!(windows) {
-        let exec = Command::new("git").arg("--exec-path").output().expect("git is installed");
-        let exec = String::from_utf8(exec.stdout).unwrap();
-        // <git>/mingw64/libexec/git-core -> <git>/bin/bash.exe
-        let bash = Path::new(exec.trim()).ancestors().nth(3).unwrap().join("bin").join("bash.exe");
-        assert!(bash.is_file(), "{}", bash.display());
-        bash
-    } else {
-        Path::new("/bin/sh").to_path_buf()
-    };
+    let args = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"].as_array().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let mut child = Command::new(shell)
-        .arg("-c")
-        .arg(&command)
+    let mut child = Command::new(&command)
+        .args(args.iter().map(|v| v.as_str().unwrap()))
         .current_dir(cwd.path())
         .env("PATH", "/usr/bin:/bin")
         .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")

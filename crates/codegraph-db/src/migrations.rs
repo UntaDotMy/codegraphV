@@ -327,11 +327,22 @@ fn record_migration(db: &Connection, version: u32, description: &str) -> Result<
 }
 
 /// Run every migration newer than `from_version`, each in its own transaction.
+///
+/// `BEGIN IMMEDIATE` takes the write lock before reading the version, so two
+/// processes opening an index that needs a migration serialize instead of both
+/// applying it (upstream d139865f): the second waits for the first, then sees
+/// the recorded version and skips it. A deferred transaction would hit
+/// SQLITE_BUSY on its first write, or fail recording a version already there.
 pub fn run_migrations(db: &Connection, from_version: u32) -> Result<()> {
     let mut pending: Vec<Migration> = migrations().into_iter().filter(|m| m.version > from_version).collect();
     pending.sort_by_key(|m| m.version);
     for m in pending {
-        db.execute_batch("BEGIN")?;
+        db.execute_batch("BEGIN IMMEDIATE")?;
+        // Another process may have applied this (and possibly later) migrations while we waited.
+        if get_current_version(db) >= m.version {
+            db.execute_batch("COMMIT")?;
+            continue;
+        }
         let result = (m.up)(db).and_then(|_| record_migration(db, m.version, m.description));
         match result {
             Ok(()) => db.execute_batch("COMMIT")?,

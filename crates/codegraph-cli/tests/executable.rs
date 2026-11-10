@@ -94,6 +94,29 @@ fn executable_indexes_queries_syncs_and_serves_jsonrpc_without_node() {
 }
 
 #[test]
+fn serve_accepts_no_telemetry_for_host_compatibility() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.ts"), "export const app = 1;\n").unwrap();
+    run(dir.path(), &["init", "--yes"]);
+    let mut child = binary()
+        .args(["serve", "--mcp", "--no-watch", "--no-telemetry"])
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let message: Value = serde_json::from_str(String::from_utf8(output.stdout).unwrap().trim()).unwrap();
+    assert_eq!(message["result"]["serverInfo"]["title"], "CodeGraphV");
+}
+
+#[test]
 fn executable_continues_long_source_lines_with_columns_and_hashes() {
     let dir = tempfile::tempdir().unwrap();
     let source = format!("// {}tail_marker\npub fn after() {{}}\n", "x".repeat(5000));

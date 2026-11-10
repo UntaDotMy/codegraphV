@@ -31,6 +31,10 @@ pub struct WorkspacePackages {
     /// (dependency name, target directory) in declaration order. Seen only from the files under
     /// that manifest; the root manifest's are in `by_name`.
     pub scoped_by_name: HashMap<String, Vec<(String, String)>>,
+    /// Folders below the root whose package.json or pnpm-workspace.yaml declares workspaces of
+    /// its own, and which are not members of the root workspace. A bare import from inside one
+    /// does not reach the outer packages, and a name guess does not leave it.
+    pub nested_roots: Vec<String>,
 }
 
 impl WorkspacePackages {
@@ -48,6 +52,8 @@ pub struct PackageEntries {
     /// The `exports` map (`.`, `./utils`, `./schema/*` → targets), in key order. A string, an
     /// array or a conditions-only `exports` is the `.` entry.
     pub exports: Option<Vec<(String, Vec<String>)>>,
+    /// What the same keys' `browser` condition names, for those that have one.
+    pub browser: Option<Vec<(String, Vec<String>)>>,
     /// The package root's `source`, `module`, `main`, `types` and `typings` fields.
     pub main: Option<Vec<String>>,
 }
@@ -57,6 +63,8 @@ pub struct PackageEntries {
 pub struct WorkspaceImportTargets {
     /// The entries the package declares for the import, best first.
     pub declared: Vec<String>,
+    /// The entries the package declares for a browser (a `browser` condition), best first.
+    pub browser: Vec<String>,
     /// The package's directory plus the import's subpath (`packages/ui/widgets`), extension-less.
     pub directory: String,
     /// The package's directory.
@@ -101,7 +109,7 @@ pub fn load_workspace_packages(project_root: &str) -> Option<WorkspacePackages> 
     }
 
     // HarmonyOS/OpenHarmony (ArkTS) modular projects, and npm path dependencies (#2456).
-    let PathDeps { ohpm, mut npm } = collect_path_deps(project_root);
+    let PathDeps { ohpm, mut npm, workspace_roots } = collect_path_deps(project_root);
     for (name, dir) in ohpm {
         if ws.by_name.contains_key(&name) {
             continue;
@@ -120,7 +128,11 @@ pub fn load_workspace_packages(project_root: &str) -> Option<WorkspacePackages> 
         }
     }
 
-    if ws.by_name.is_empty() && npm.is_empty() {
+    // A member of the root's own workspace is installed with it, whatever its manifest declares.
+    let members: HashSet<String> = ws.by_name.values().cloned().collect();
+    let nested_roots: Vec<String> = workspace_roots.into_iter().filter(|dir| !members.contains(dir)).collect();
+
+    if ws.by_name.is_empty() && npm.is_empty() && nested_roots.is_empty() {
         return None;
     }
 
@@ -135,6 +147,7 @@ pub fn load_workspace_packages(project_root: &str) -> Option<WorkspacePackages> 
         }
     }
     ws.scoped_by_name = npm;
+    ws.nested_roots = nested_roots;
 
     log_debug(
         "workspace packages loaded",
@@ -176,6 +189,15 @@ fn export_targets(value: &Value) -> Vec<String> {
     }
 }
 
+/// What an `exports` value's `browser` condition names, at any depth of its conditions.
+fn browser_targets(value: &Value) -> Vec<String> {
+    let Some(conditions) = value.as_object() else { return Vec::new() };
+    if let Some(browser) = conditions.get("browser") {
+        return export_targets(browser);
+    }
+    conditions.values().flat_map(browser_targets).collect()
+}
+
 /// The package.json fields an importer of the package root reaches without `exports`.
 const MAIN_FIELDS: [&str; 5] = ["source", "module", "main", "types", "typings"];
 
@@ -199,14 +221,25 @@ fn read_package_entries(project_root: &str, dir_rel: &str) -> Option<PackageEntr
             vec![(".".to_string(), exp)]
         };
         let mut exports: Vec<(String, Vec<String>)> = Vec::new();
+        let mut browser: Vec<(String, Vec<String>)> = Vec::new();
         for (key, value) in entries {
             let targets = dedupe(export_targets(value).iter().filter_map(|t| in_package(t)));
             match exports.iter_mut().find(|(k, _)| *k == key) {
                 Some(slot) => slot.1 = targets,
-                None => exports.push((key, targets)),
+                None => exports.push((key.clone(), targets)),
+            }
+            let for_browser = dedupe(browser_targets(value).iter().filter_map(|t| in_package(t)));
+            if !for_browser.is_empty() {
+                match browser.iter_mut().find(|(k, _)| *k == key) {
+                    Some(slot) => slot.1 = for_browser,
+                    None => browser.push((key, for_browser)),
+                }
             }
         }
         out.exports = Some(exports);
+        if !browser.is_empty() {
+            out.browser = Some(browser);
+        }
     }
     let main = dedupe(MAIN_FIELDS.iter().filter_map(|field| pkg.get(*field)?.as_str()).filter_map(in_package));
     if !main.is_empty() {
@@ -225,7 +258,7 @@ fn package_target(project_root: &str, dir_rel: &str, target: &str) -> Option<Str
     let package_dir = nodepath::resolve(&[project_root, dir_rel]);
     let abs = nodepath::resolve(&[&package_dir, trimmed]);
     let inside = nodepath::relative(&package_dir, &abs);
-    if inside.starts_with("..") || nodepath::is_absolute(&inside) {
+    if nodepath::leaves_root(&inside) {
         return None;
     }
     Some(nodepath::relative(project_root, &abs).replace('\\', "/"))
@@ -240,7 +273,7 @@ fn read_ohpm_main(project_root: &str, dir_rel: &str) -> Option<String> {
     }
     let entry_abs = nodepath::resolve(&[project_root, dir_rel, main]);
     let entry_rel = nodepath::relative(project_root, &entry_abs).replace('\\', "/");
-    if entry_rel.starts_with("..") {
+    if nodepath::leaves_root(&entry_rel) {
         return None;
     }
     Some(entry_rel)
@@ -259,6 +292,8 @@ struct PathDeps {
     /// package.json `file:`/`link:`/`portal:` dependencies by the declaring manifest's directory
     /// (`""` for the root).
     npm: HashMap<String, Vec<(String, String)>>,
+    /// Directories below the root whose manifest declares workspaces of its own.
+    workspace_roots: Vec<String>,
 }
 
 /// Scan for `oh-package.json5` manifests and collect their `file:` dependencies; a name
@@ -269,6 +304,7 @@ fn collect_path_deps(project_root: &str) -> PathDeps {
     let mut ohpm: Vec<(String, String)> = Vec::new();
     let mut ambiguous: HashSet<String> = HashSet::new();
     let mut npm: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut workspace_roots: Vec<String> = Vec::new();
 
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
     queue.push_back((String::new(), 0));
@@ -294,11 +330,14 @@ fn collect_path_deps(project_root: &str) -> PathDeps {
                 continue;
             }
             if name == NPM_MANIFEST {
+                if !rel.is_empty() && !read_workspace_globs(&abs).is_empty() {
+                    workspace_roots.push(rel.clone());
+                }
                 let mut deps: Vec<(String, String)> = Vec::new();
                 for (dep, target) in read_npm_path_deps(&nodepath::join(&[&abs, &name])) {
                     let target_abs = nodepath::resolve(&[&abs, &target]);
                     let target_rel = nodepath::relative(project_root, &target_abs).replace('\\', "/");
-                    if target_rel.is_empty() || target_rel.starts_with("..") || nodepath::is_absolute(&target_rel) {
+                    if target_rel.is_empty() || nodepath::leaves_root(&target_rel) {
                         continue;
                     }
                     if re!(r"(?:^|/)node_modules(?:/|$)").is_match(&target_rel) || !std::fs::metadata(&target_abs).is_ok_and(|m| m.is_dir()) {
@@ -320,7 +359,7 @@ fn collect_path_deps(project_root: &str) -> PathDeps {
             for (dep, target) in read_ohpm_file_deps(&nodepath::join(&[&abs, &name])) {
                 let target_abs = nodepath::resolve(&[&abs, &target]);
                 let target_rel = nodepath::relative(project_root, &target_abs).replace('\\', "/");
-                if target_rel.starts_with("..") {
+                if nodepath::leaves_root(&target_rel) {
                     continue;
                 }
                 match ohpm.iter().position(|(n, _)| *n == dep) {
@@ -339,7 +378,7 @@ fn collect_path_deps(project_root: &str) -> PathDeps {
             }
         }
     }
-    PathDeps { ohpm, npm }
+    PathDeps { ohpm, npm, workspace_roots }
 }
 
 /// A package.json's dependencies on a path (`file:`, `link:`, `portal:`), from every dependency
@@ -396,12 +435,14 @@ pub fn workspace_import_targets(import_path: &str, ws: &WorkspacePackages, from_
     let (name, dir) = match_package(import_path, ws, from_file)?;
     let subpath = &import_path[name.len()..];
     let directory = re!(r"/{2,}", "g").replace_all_str(&format!("{dir}{subpath}"), "/");
+    let entries = ws.entries_by_dir.get(dir);
     let ohpm = if subpath.is_empty() { ws.entry_by_name.get(name) } else { None };
     let declared = match ohpm {
         Some(entry) => vec![entry.clone()],
-        None => declared_entries(ws.entries_by_dir.get(dir), subpath),
+        None => declared_entries(entries, subpath),
     };
-    Some(WorkspaceImportTargets { declared, directory, package_dir: dir.to_string() })
+    let browser = entries.and_then(|e| e.browser.as_ref()).map(|b| exported_targets(b, &format!(".{subpath}"))).unwrap_or_default();
+    Some(WorkspaceImportTargets { declared, browser, directory, package_dir: dir.to_string() })
 }
 
 /// The package an import names: a path dependency of the nearest manifest above `from_file`
@@ -412,7 +453,33 @@ fn match_package<'a>(import_path: &str, ws: &'a WorkspacePackages, from_file: Op
         return Some(hit);
     }
     let name = longest_name(import_path, ws.names_in_order.iter().map(String::as_str))?;
-    Some((name, ws.by_name[name].as_str()))
+    let dir = ws.by_name[name].as_str();
+    if from_file.is_some_and(|file| leaves_workspace_root(file, dir, Some(ws))) {
+        return None;
+    }
+    Some((name, dir))
+}
+
+/// The nested root `file` is under, the deepest; empty when `file` is in the project's own root.
+fn workspace_root_of(file: &str, roots: &[String]) -> String {
+    let mut root = String::new();
+    for dir in roots {
+        if utf16(dir) > utf16(&root) && file.starts_with(dir) && file[dir.len()..].starts_with('/') {
+            root = dir.clone();
+        }
+    }
+    root
+}
+
+/// Whether `target`, a project path, lies outside the nested root `file` is under.
+pub fn leaves_workspace_root(file: &str, target: &str, ws: Option<&WorkspacePackages>) -> bool {
+    let Some(ws) = ws else { return false };
+    if ws.nested_roots.is_empty() {
+        return false;
+    }
+    let root = workspace_root_of(&file.replace('\\', "/"), &ws.nested_roots);
+    let target = target.replace('\\', "/");
+    !root.is_empty() && !(target.starts_with(&root) && target[root.len()..].starts_with('/'))
 }
 
 fn scoped_package<'a>(import_path: &str, ws: &'a WorkspacePackages, from_file: Option<&str>) -> Option<(&'a str, &'a str)> {
@@ -511,8 +578,9 @@ pub fn workspace_fingerprint(ws: Option<&WorkspacePackages>) -> String {
     let entries: Vec<Value> = js_sorted(ws.entries_by_dir.iter().map(|(k, v)| (k.clone(), v.clone())))
         .into_iter()
         .map(|(dir, e)| {
-            let exports: Vec<Value> = js_sorted(e.exports.unwrap_or_default().into_iter()).into_iter().map(|(k, t)| json!([k, t])).collect();
-            json!([dir, exports, e.main.unwrap_or_default()])
+            let exports: Vec<Value> = js_sorted(e.exports.clone().unwrap_or_default().into_iter()).into_iter().map(|(k, t)| json!([k, t])).collect();
+            let browser: Vec<Value> = js_sorted(e.browser.unwrap_or_default().into_iter()).into_iter().map(|(k, t)| json!([k, t])).collect();
+            json!([dir, exports, browser, e.main.unwrap_or_default()])
         })
         .collect();
     let mut canonical = serde_json::Map::new();
@@ -520,6 +588,7 @@ pub fn workspace_fingerprint(ws: Option<&WorkspacePackages>) -> String {
     canonical.insert("entryByName".into(), Value::Array(pairs(entry_by_name)));
     canonical.insert("scoped".into(), Value::Array(scoped));
     canonical.insert("entries".into(), Value::Array(entries));
+    canonical.insert("nested".into(), Value::Array(ws.nested_roots.iter().cloned().map(Value::String).collect()));
     let text = serde_json::to_string(&Value::Object(canonical)).unwrap_or_default();
     Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }

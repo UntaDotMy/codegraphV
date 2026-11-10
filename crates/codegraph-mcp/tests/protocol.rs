@@ -45,6 +45,35 @@ fn file_project_path_keeps_the_sensitive_folder_refusal() {
     assert_eq!(handler.open_project_count(), 0);
 }
 #[test]
+fn initialize_advertises_a_title_and_an_inline_icon() {
+    let mut session = Session::new(None, false);
+    let init = request(&mut session, 1, "initialize", json!({}));
+    let info = &init["result"]["serverInfo"];
+    assert_eq!(info["name"], "codegraphV");
+    assert_eq!(info["title"], "CodeGraphV");
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert!(info["icons"][0]["src"].as_str().unwrap().starts_with("data:image/svg+xml;base64,"));
+    assert_eq!(info["icons"][0]["mimeType"], "image/svg+xml");
+}
+
+#[test]
+fn malformed_envelopes_and_unknown_protocol_versions_stay_recoverable() {
+    let mut session = Session::new(None, false);
+    for bad in [
+        r#"{"jsonrpc":"1.0","id":1,"method":"ping"}"#,
+        r#"{"jsonrpc":"2.0","id":1}"#,
+        r#"{"jsonrpc":"2.0","id":{"nested":true},"method":"ping"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":"string"}"#,
+    ] {
+        assert_eq!(session.process(bad)[0]["error"]["code"], if bad.contains("params") { -32602 } else { -32600 }, "{bad}");
+    }
+    // An unsupported requested version is answered with the version this server implements.
+    let init = request(&mut session, 1, "initialize", json!({"protocolVersion":"2099-01-01"}));
+    assert_eq!(init["result"]["protocolVersion"], codegraph_mcp::session::PROTOCOL_VERSION);
+    assert!(request(&mut session, 2, "ping", json!({}))["result"].is_object());
+}
+
+#[test]
 fn protocol_handshake_roots_and_recoverable_misses() {
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::new(Some(dir.path().to_string_lossy().into_owned()), false);
@@ -128,7 +157,7 @@ fn source_node_flow_and_read_windows_are_native() {
     );
     assert!(!node.is_error);
     assert!(
-        node.message().contains("2 definitions"),
+        node.message().contains("Returning 2 in full"),
         "{}",
         node.message()
     );

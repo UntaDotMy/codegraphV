@@ -956,6 +956,23 @@ impl Store {
         )
     }
 
+    /// The module edges (`imports` edges into a file node) into declaration files: where an import
+    /// of a package lands while a `declare module` of it is all there is.
+    pub fn get_module_imports_into_declaration_files(&self) -> Result<Vec<ResolutionEdge>> {
+        self.query_resolution_edges(
+            &format!(
+                "SELECT {RES_EDGE_COLS}, tgt.file_path
+           FROM nodes tgt
+           JOIN edges e ON e.target = tgt.id AND e.kind = 'imports'
+           JOIN nodes src ON src.id = e.source
+          WHERE tgt.kind = 'file'
+            AND (tgt.file_path LIKE '%.d.ts' OR tgt.file_path LIKE '%.d.mts' OR tgt.file_path LIKE '%.d.cts')"
+            ),
+            vec![],
+            Some(10),
+        )
+    }
+
     /// The module edges (`imports` edges into a file node) into the files an import of `dir/name`
     /// can find instead of a file added there.
     pub fn get_module_imports_named(&self, dir: &str, name: &str) -> Result<Vec<ResolutionEdge>> {

@@ -37,15 +37,14 @@ fn patterns(kind: Tags) -> (&'static Re, &'static Re) {
             re!(r#"^[ \t]*(sections?)[ \t]+['"]([^'"]+)['"]"#),
         ),
         Tags::Assign => (
-            re!(r"^\{%[-]?\s*(assign)\s+(\w+)\s*="),
-            re!(r"^[ \t]*(assign)[ \t]+(\w+)\s*="),
+            re!(r"^\{%[-]?\s*(assign)\s+(\w(?:[\w-]*\w)?)\s*="),
+            re!(r"^[ \t]*(assign)[ \t]+(\w(?:[\w-]*\w)?)\s*="),
         ),
-        // Liquid reads a quoted name (`{% capture 'title' %}`) as the name inside the quotes. A
-        // name that goes on with `-` or `.`, which the assign rule doesn't read either, gets no
-        // node rather than a cut-short one.
+        // Liquid allows a hyphen inside a variable name (but not at its end); the whole name is
+        // indexed, not a cut-short prefix.
         Tags::Capture => (
-            re!(r#"^\{%[-]?\s*(capture)\s+(?:'(\w+)'|"(\w+)"|(\w+))(?=\s|-?%\}|$)"#),
-            re!(r#"^[ \t]*(capture)[ \t]+(?:'(\w+)'|"(\w+)"|(\w+))(?=\s|-?%\}|$)"#),
+            re!(r#"^\{%[-]?\s*(capture)\s+(?:'(\w(?:[\w-]*\w)?)'|"(\w(?:[\w-]*\w)?)"|(\w(?:[\w-]*\w)?))(?=\s|-?%\}|$)"#),
+            re!(r#"^[ \t]*(capture)[ \t]+(?:'(\w(?:[\w-]*\w)?)'|"(\w(?:[\w-]*\w)?)"|(\w(?:[\w-]*\w)?))(?=\s|-?%\}|$)"#),
         ),
     }
 }

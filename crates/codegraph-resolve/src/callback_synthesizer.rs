@@ -6,6 +6,8 @@
 
 mod angular_template;
 mod c_fnptr;
+mod const_alias;
+pub use const_alias::alias_may_name;
 mod channels;
 mod common;
 mod dispatch;
@@ -85,6 +87,8 @@ fn synth_passes() -> Vec<SynthPass> {
         p("mybatisEdges", |has| has(&["java", "kotlin"]) && has(&["xml"]), native::mybatis_java_xml_edges),
         p("ginEdges", |has| has(&["go"]), native::gin_middleware_chain_edges),
         p("thunkEdges", |has| has(&JS), stores::redux_thunk_edges),
+        // `export const extname = isWin ? win32.extname : posix.extname` onto each function it can hold.
+        p("constAliasEdges", |has| has(&JS), const_alias::const_alias_edges),
         p("registryEdges", always, stores::object_registry_edges),
         p("rtkEdges", |has| has(&JS), stores::rtk_query_edges),
         p("piniaEdges", |has| has(&VUE_AND_JS), stores::pinia_store_edges),
@@ -309,6 +313,9 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
     }
     // A wrapper renders the component it wraps, in a file with no markup of its own too.
     if re!(r"\b(?:styled|memo|forwardRef)\s*\(\s*[A-Z]").is_match(content) {
+        return true;
+    }
+    if const_alias::has_const_alias_shape(file_path, content) {
         return true;
     }
     if re!(r"\.(?:forEach|append|add|push|insert|fire|dispatchEvent|addListener|Use|GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Any|Handle)\s*\(")

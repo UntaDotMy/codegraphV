@@ -16,18 +16,24 @@ fn declares_rust_variant(type_: &Node, variant: &str, ctx: &Ctx) -> bool {
         return false;
     }
     let qualified = format!("{}::{variant}", type_.qualified_name);
-    ctx.get_nodes_in_file_named(&type_.file_path, variant).iter().any(|n| n.kind == NodeKind::EnumMember && n.qualified_name == qualified)
+    ctx.get_nodes_in_file_named(&type_.file_path, variant)
+        .iter()
+        .any(|n| n.kind == NodeKind::EnumMember && n.qualified_name == qualified)
 }
 
 fn is_in_enclosing_rust_impl(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     let header = rust_enclosing_impl_line(r, ctx);
-    header > 0 && candidate.file_path == r.file_path && candidate.start_line >= header && candidate.start_line <= r.line
+    header > 0
+        && candidate.file_path == r.file_path
+        && candidate.start_line >= header
+        && candidate.start_line <= r.line
 }
 
 /// `Assoc = Type` / `Assoc: Bound` written inside `<…>` (an associated type binding, not a type read).
 fn is_rust_assoc_binding(line: &str, column: u32, name: &str) -> bool {
     if !starts_with_at(line, name, column)
-        || !re!(r"^\s*(?:=(?![=>])|:(?!:))").is_match(after_col(after_col(line, column), utf16_len(name) as u32))
+        || !re!(r"^\s*(?:=(?![=>])|:(?!:))")
+            .is_match(after_col(after_col(line, column), utf16_len(name) as u32))
     {
         return false;
     }
@@ -63,7 +69,8 @@ struct QualifiedSelf {
 }
 
 fn qualified_self_head(part: &str) -> String {
-    let stripped = re!(r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?|dyn\s+)+").replace_first(part, |_| String::new());
+    let stripped =
+        re!(r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?|dyn\s+)+").replace_first(part, |_| String::new());
     re!(r"((?:[A-Za-z_]\w*\s*::\s*)*)([A-Za-z_]\w*)\s*(?:<[\s\S]*)?$")
         .captures(js_trim(&stripped))
         .and_then(|c| c.text(2).map(String::from))
@@ -104,12 +111,17 @@ fn rust_qualified_self(before: &str) -> Option<QualifiedSelf> {
     if self_.is_empty() {
         return None;
     }
-    let trait_ = as_.map(|a| qualified_self_head(&inner[a.end()..])).filter(|t| !t.is_empty());
+    let trait_ = as_
+        .map(|a| qualified_self_head(&inner[a.end()..]))
+        .filter(|t| !t.is_empty());
     Some(QualifiedSelf { self_, trait_ })
 }
 
 fn is_type_member_kind(kind: NodeKind) -> bool {
-    matches!(kind, NodeKind::Method | NodeKind::Property | NodeKind::Field | NodeKind::EnumMember)
+    matches!(
+        kind,
+        NodeKind::Method | NodeKind::Property | NodeKind::Field | NodeKind::EnumMember
+    )
 }
 
 /// Whether `candidate` is what the Rust reference `r` names, given its scope (paths, `use`s, globs).
@@ -137,12 +149,22 @@ impl RustRefScope {
         let name = r.reference_name.as_str();
         let line = line_at(ctx, &r.file_path, r.line);
         let references = r.is_kind(EdgeKind::References);
-        let assoc_binding = references && line.as_deref().is_some_and(|l| is_rust_assoc_binding(l, r.column, name));
-        let at: String = line.as_deref().map(|l| after_col(l, r.column).to_string()).unwrap_or_default();
+        let assoc_binding = references
+            && line
+                .as_deref()
+                .is_some_and(|l| is_rust_assoc_binding(l, r.column, name));
+        let at: String = line
+            .as_deref()
+            .map(|l| after_col(l, r.column).to_string())
+            .unwrap_or_default();
         let type_read = references && re!(r"^\w+$").is_match(name);
         let via_self = type_read && name != "Self" && re!(r"^Self\s*::").is_match(&at);
-        let variant = if type_read && (via_self || (at.starts_with(name) && !re!(r"^\w").is_match(&at[name.len()..]))) {
-            re!(r"^\w+\s*::\s*([A-Z]\w*)").captures(&at).and_then(|c| c.text(1).map(String::from))
+        let variant = if type_read
+            && (via_self || (at.starts_with(name) && !re!(r"^\w").is_match(&at[name.len()..])))
+        {
+            re!(r"^\w+\s*::\s*([A-Z]\w*)")
+                .captures(&at)
+                .and_then(|c| c.text(1).map(String::from))
         } else {
             None
         };
@@ -153,28 +175,56 @@ impl RustRefScope {
                 if starts_with_at(line, name, r.column) && re!(r"::\s*$").is_match(before) {
                     re!(r"((?:[A-Za-z_]\w*\s*::\s*)*)([A-Za-z_]\w*)?\s*::\s*$")
                         .captures(before)
-                        .map(|c| (c.text(1).unwrap_or("").to_string(), c.text(2).unwrap_or("").to_string()))
-                } else if !Re::cached(&format!(r"(?<![\w$:]){}\b", escape_regex(name)), "").is_match(line) {
-                    Re::cached(&format!(r"((?:[A-Za-z_]\w*\s*::\s*)*)([A-Za-z_]\w*)\s*::\s*{}\b", escape_regex(name)), "")
-                        .captures(line)
-                        .map(|c| (c.text(1).unwrap_or("").to_string(), c.text(2).unwrap_or("").to_string()))
+                        .map(|c| {
+                            (
+                                c.text(1).unwrap_or("").to_string(),
+                                c.text(2).unwrap_or("").to_string(),
+                            )
+                        })
+                } else if !Re::cached(&format!(r"(?<![\w$:]){}\b", escape_regex(name)), "")
+                    .is_match(line)
+                {
+                    Re::cached(
+                        &format!(
+                            r"((?:[A-Za-z_]\w*\s*::\s*)*)([A-Za-z_]\w*)\s*::\s*{}\b",
+                            escape_regex(name)
+                        ),
+                        "",
+                    )
+                    .captures(line)
+                    .map(|c| {
+                        (
+                            c.text(1).unwrap_or("").to_string(),
+                            c.text(2).unwrap_or("").to_string(),
+                        )
+                    })
                 } else {
                     None
                 }
             }
         };
         let pathed = pathed.map(|(prefix, seg)| {
-            let root = re!(r"^([A-Za-z_]\w*)").captures(&prefix).and_then(|c| c.text(1).map(String::from)).unwrap_or_else(|| seg.clone());
+            let root = re!(r"^([A-Za-z_]\w*)")
+                .captures(&prefix)
+                .and_then(|c| c.text(1).map(String::from))
+                .unwrap_or_else(|| seg.clone());
             (prefix, seg, root)
         });
-        RustRefScope { line, references, assoc_binding, variant, pathed, scoped: is_rust_scoped_ref(r, ctx) }
+        RustRefScope {
+            line,
+            references,
+            assoc_binding,
+            variant,
+            pathed,
+            scoped: is_rust_scoped_ref(r, ctx),
+        }
     }
 
     pub fn admits(&self, candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
         if self.scoped {
             return true;
         }
-        if !is_rust_item_visible_from(candidate, r) {
+        if !is_rust_item_visible_from(candidate, r, ctx) {
             return false;
         }
         if self.assoc_binding {
@@ -197,7 +247,8 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
         let (prefix, seg, root) = (prefix.as_str(), seg.as_str(), root.as_str());
         if references && prefix.is_empty() && line.is_some() {
             if seg == "Self" {
-                return candidate.kind == NodeKind::TypeAlias && is_in_enclosing_rust_impl(candidate, r, ctx);
+                return candidate.kind == NodeKind::TypeAlias
+                    && is_in_enclosing_rust_impl(candidate, r, ctx);
             }
             if is_rust_generic_param(seg, r, ctx) {
                 return false;
@@ -211,24 +262,39 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
             if !seg.is_empty() {
                 return false;
             }
-            let Some(qself) = rust_qualified_self(before_col(line, r.column)) else { return true };
+            let Some(qself) = rust_qualified_self(before_col(line, r.column)) else {
+                return true;
+            };
             if qself.self_ == "Self" {
                 return is_in_enclosing_rust_impl(candidate, r, ctx);
             }
-            if is_rust_generic_param(&qself.self_, r, ctx) || candidate.qualified_name != format!("{}::{}", qself.self_, candidate.name) {
+            if is_rust_generic_param(&qself.self_, r, ctx)
+                || candidate.qualified_name != format!("{}::{}", qself.self_, candidate.name)
+            {
                 return false;
             }
-            return qself.trait_.is_none() || rust_trait_impl_header(candidate, ctx).is_some_and(|h| Some(&h.trait_) == qself.trait_.as_ref());
+            return qself.trait_.is_none()
+                || rust_trait_impl_header(candidate, ctx)
+                    .is_some_and(|h| Some(&h.trait_) == qself.trait_.as_ref());
         }
         let project_crates = rust_project_crates(ctx);
         let path_uses = rust_uses_of(&r.file_path, ctx);
-        if (root == "std" || root == "core" || root == "alloc" || rust_dependency_crates(ctx).contains(root))
+        if (root == "std"
+            || root == "core"
+            || root == "alloc"
+            || rust_dependency_crates(ctx).contains(root))
             && !project_crates.contains(root)
             && !path_uses.bound.contains(root)
         {
             return false;
         }
-        if seg.is_empty() || seg == "crate" || seg == "self" || seg == "super" || seg == "Self" || project_crates.contains(seg) {
+        if seg.is_empty()
+            || seg == "crate"
+            || seg == "self"
+            || seg == "super"
+            || seg == "Self"
+            || project_crates.contains(seg)
+        {
             return true;
         }
         if path_uses.external.contains(seg) && !path_uses.bound.contains(seg) {
@@ -242,7 +308,8 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
         return rust_module_name(&candidate.file_path) == seg
             || candidate.file_path.contains(&format!("/{seg}/"))
             || candidate.qualified_name.split("::").any(|s| s == seg)
-            || (candidate.file_path == r.file_path && is_in_rust_inline_module(candidate, seg, ctx));
+            || (candidate.file_path == r.file_path
+                && is_in_rust_inline_module(candidate, seg, ctx));
     }
     if is_rust_associated_item(candidate) {
         return false;
@@ -253,15 +320,22 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
         }
         let uses = rust_uses_of(&r.file_path, ctx);
         let owner = match candidate.qualified_name.rfind("::") {
-            Some(cut) => candidate.qualified_name[..cut].rsplit("::").next().unwrap_or("").to_string(),
+            Some(cut) => candidate.qualified_name[..cut]
+                .rsplit("::")
+                .next()
+                .unwrap_or("")
+                .to_string(),
             None => String::new(),
         };
-        if !((!owner.is_empty() && uses.globs.contains(&owner)) || (uses.names.contains(name) && uses.names.contains(&owner))) {
+        if !((!owner.is_empty() && uses.globs.contains(&owner))
+            || (uses.names.contains(name) && uses.names.contains(&owner)))
+        {
             return false;
         }
         // A `use` of the variant itself names that enum's: `use crate::models::E::Good` is
         // `models`'s `E::Good`, not an `E::Good` another module declares.
-        return !uses.paths.contains_key(name) || rust_use_items_at(name, r, ctx).is_none_or(|ids| ids.contains(&candidate.id));
+        return !uses.paths.contains_key(name)
+            || rust_use_items_at(name, r, ctx).is_none_or(|ids| ids.contains(&candidate.id));
     }
     if candidate.file_path == r.file_path {
         // A `use` in the block around the reference shadows its module's own item of the name:
@@ -270,10 +344,17 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
             return true;
         }
         let visible = rust_visible_use(name, &r.file_path, rust_use_ref_offset(r, ctx), ctx);
-        return visible.is_none_or(|v| v.block < 0 || rust_use_items_at(name, r, ctx).is_none_or(|ids| ids.contains(&candidate.id)));
+        return visible.is_none_or(|v| {
+            v.block < 0
+                || rust_use_items_at(name, r, ctx).is_none_or(|ids| ids.contains(&candidate.id))
+        });
     }
     let uses = rust_uses_of(&r.file_path, ctx);
-    let from = if is_rust_module_item_kind(candidate.kind) { uses.bound_from.get(name) } else { None };
+    let from = if is_rust_module_item_kind(candidate.kind) {
+        uses.bound_from.get(name)
+    } else {
+        None
+    };
     if let Some(from) = from {
         if !rust_use_can_reach(from, candidate, r, ctx) {
             return false;
@@ -289,8 +370,11 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
     if uses.external.contains(name) && !uses.bound.contains(name) {
         if let Some(line) = &line {
             let from_col = after_col(line, r.column);
-            if let Some(m) = Re::cached(&format!(r"(?<![\w$]){}\b", escape_regex(name)), "").find(from_col) {
-                let upto = &line[..(utf16_byte_index(line, r.column as usize) + m.start()).min(line.len())];
+            if let Some(m) =
+                Re::cached(&format!(r"(?<![\w$]){}\b", escape_regex(name)), "").find(from_col)
+            {
+                let upto = &line
+                    [..(utf16_byte_index(line, r.column as usize) + m.start()).min(line.len())];
                 if !re!(r"\.\s*$").is_match(upto) {
                     return false;
                 }
@@ -300,7 +384,10 @@ fn admits_in_scope(scope: &RustRefScope, candidate: &Node, r: &UnresolvedRef, ct
     if !in_rust_prelude(name) {
         if is_type_member_kind(candidate.kind)
             || r.is_kind(EdgeKind::Imports)
-            || matches!(candidate.kind, NodeKind::File | NodeKind::Module | NodeKind::Namespace)
+            || matches!(
+                candidate.kind,
+                NodeKind::File | NodeKind::Module | NodeKind::Namespace
+            )
         {
             return true;
         }

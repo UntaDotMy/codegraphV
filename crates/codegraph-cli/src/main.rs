@@ -60,10 +60,14 @@ enum Command {
         force: bool,
         #[arg(short, long)]
         verbose: bool,
+        /// Accepted for compatibility; `init` never prompts.
         #[arg(short, long)]
         yes: bool,
         #[arg(short, long, hide = true)]
         index: bool,
+        /// Install CodeGraphV's Git sync hooks (post-commit, post-merge, post-checkout).
+        #[arg(long)]
+        git_hooks: bool,
     },
     /// Rebuild the code graph.
     Index {
@@ -83,7 +87,7 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
     },
-    /// Remove this project's index and generated integration files.
+    /// Remove this project's index. Agent configuration is removed separately by uninstall.
     Uninit {
         #[arg(default_value = ".")]
         path: String,
@@ -206,6 +210,9 @@ enum Command {
         mcp: bool,
         #[arg(long)]
         no_watch: bool,
+        /// Accepted for host compatibility; codegraphV has no telemetry to disable.
+        #[arg(long)]
+        no_telemetry: bool,
     },
     #[command(name = "__daemon", hide = true)]
     DaemonServer {
@@ -253,6 +260,9 @@ enum Command {
         init: bool,
         #[arg(long)]
         no_permissions: bool,
+        /// Claude prompt hook choice; refresh preserves the existing choice by default.
+        #[arg(long, value_parser=["preserve", "on", "off"])]
+        prompt_hook: Option<String>,
         #[arg(long)]
         print_config: Option<String>,
         #[arg(long)]
@@ -353,6 +363,44 @@ fn tool(project: Project, name: &str, args: Value) -> Result<()> {
     println!("{}", result.message());
     Ok(())
 }
+fn index_project(path: &str, force: bool, verbose: bool, quiet: bool) -> Result<()> {
+    let root = nodepath::resolve(&[path]);
+    if let Some(reason) = codegraph_core::utils::validate_project_path(&root) {
+        return Err(reason.into());
+    }
+    if !force {
+        if let Some(reason) = directory::unsafe_index_root_reason(&root) {
+            return Err(format!("{reason}; pass --force to index this directory.").into());
+        }
+    }
+    let mut cg = if directory::is_initialized(&root) {
+        CodeGraph::open(&root, OpenOptions::default())?
+    } else {
+        CodeGraph::init(&root)?
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal = cancelled.clone();
+    ctrlc::set_handler(move || {
+        signal.store(true, Ordering::SeqCst);
+    })?;
+    let result = cg.index_all(
+        &IndexOptions {
+            verbose,
+            ..Default::default()
+        },
+        None,
+        Some(&cancelled),
+    )?;
+    if !quiet {
+        print_json(&result)?;
+    }
+    cg.close();
+    if !result.success {
+        return Err("Indexing did not complete; see the errors above.".into());
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = match cli.command {
@@ -363,6 +411,7 @@ fn run() -> Result<()> {
             yes: false,
             init: false,
             no_permissions: false,
+            prompt_hook: None,
             print_config: None,
             refresh: false,
         },
@@ -392,47 +441,31 @@ fn run() -> Result<()> {
             path,
             force,
             verbose,
-            ..
-        }
-        | Command::Index {
-            path,
-            force,
-            verbose,
+            git_hooks,
             ..
         } => {
-            let root = nodepath::resolve(&[&path]);
-            if let Some(reason) = codegraph_core::utils::validate_project_path(&root) {
-                return Err(reason.into());
-            }
-            if !force {
-                if let Some(reason) = directory::unsafe_index_root_reason(&root) {
-                    return Err(format!("{reason}; pass --force to index this directory.").into());
+            index_project(&path, force, verbose, false)?;
+            if git_hooks {
+                let root = nodepath::resolve(&[&path]);
+                let result = codegraph_sync::git_hooks::install_git_sync_hook(&root, None)?;
+                if let Some(reason) = &result.skipped {
+                    println!("Git sync hooks skipped: {reason}");
+                } else {
+                    let names: Vec<_> = result.installed.iter().map(|h| h.as_str()).collect();
+                    println!("Installed Git sync hooks: {}", names.join(", "));
+                    if let Some(unsupported) = &result.unsupported {
+                        let names: Vec<_> = unsupported.iter().map(|h| h.as_str()).collect();
+                        println!("Kept existing non-shell hooks unchanged: {}", names.join(", "));
+                    }
                 }
             }
-            let mut cg = if directory::is_initialized(&root) {
-                CodeGraph::open(&root, OpenOptions::default())?
-            } else {
-                CodeGraph::init(&root)?
-            };
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let signal = cancelled.clone();
-            ctrlc::set_handler(move || {
-                signal.store(true, Ordering::SeqCst);
-            })?;
-            let result = cg.index_all(
-                &IndexOptions {
-                    verbose,
-                    ..Default::default()
-                },
-                None,
-                Some(&cancelled),
-            )?;
-            print_json(&result)?;
-            cg.close();
-            if !result.success {
-                return Err("Indexing did not complete; see the errors above.".into());
-            }
         }
+        Command::Index {
+            path,
+            force,
+            quiet,
+            verbose,
+        } => index_project(&path, force, verbose, quiet)?,
         Command::Sync { path, quiet } => {
             let mut cg = open(&Project { path: Some(path) })?;
             let result = cg.sync(&IndexOptions::default(), None)?;
@@ -450,7 +483,31 @@ fn run() -> Result<()> {
             if !force && !confirm(&format!("Remove {}?", directory::get_code_graph_dir(&root)))? {
                 return Ok(());
             }
-            directory::remove_directory(&root)?;
+            // Owned Git hook blocks go first: they only need the project path, and leaving
+            // them behind after removing the index would run `sync` against nothing.
+            match codegraph_sync::git_hooks::remove_git_sync_hook(&root, None) {
+                Ok(result) if !result.installed.is_empty() => {
+                    let names: Vec<_> = result.installed.iter().map(|h| h.as_str()).collect();
+                    println!("Removed Git sync hooks: {}", names.join(", "));
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("Warning: could not remove Git sync hooks: {error}"),
+            }
+            // A live daemon owns the database; stop it and wait for it to release the endpoint
+            // and lock before deleting the directory (A06).
+            if codegraph_mcp::daemon::stop(&root).unwrap_or(false) {
+                let endpoint = std::path::Path::new(&directory::get_code_graph_dir(&root))
+                    .join("native-daemon.json");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while endpoint.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            directory::remove_directory(&root).map_err(|error| {
+                format!(
+                    "Could not remove the index while another CodeGraphV process is using it ({error}). Stop the MCP server or indexer and retry."
+                )
+            })?;
             println!("Removed index: {root}");
         }
         Command::Status {
@@ -501,10 +558,13 @@ fn run() -> Result<()> {
             json: as_json,
         } => {
             let cg = open_read_only(&project, true)?;
+            // One effective limit drives the query, the sentinel row, the warning and output.
+            // The cap is a hard ceiling; a request above it must not look complete.
+            let effective = limit.clamp(1, 10_000);
             let results = cg.search_nodes(
                 &search,
                 &SearchOptions {
-                    limit: Some(limit.clamp(1, 10000) + 1),
+                    limit: Some(effective + 1),
                     kinds: kind
                         .as_deref()
                         .map(|k| {
@@ -515,14 +575,20 @@ fn run() -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            if results.len() > limit {
-                eprintln!("Results truncated at {limit}; pass --limit to widen.");
+            let truncated = results.len() > effective;
+            if truncated {
+                let requested = if effective != limit {
+                    format!(" (requested {limit}; maximum {effective})")
+                } else {
+                    String::new()
+                };
+                eprintln!("Results truncated at {effective}{requested}; pass --limit to widen.");
             }
             if as_json {
-                print_json(&results.into_iter().take(limit).collect::<Vec<_>>())?;
+                print_json(&results.into_iter().take(effective).collect::<Vec<_>>())?;
             } else {
                 println!("\nSearch Results for \"{search}\":\n");
-                for r in results.into_iter().take(limit) {
+                for r in results.into_iter().take(effective) {
                     println!(
                         "{:<12} {}\n  {}:{}",
                         r.node.kind.as_str(),
@@ -690,7 +756,9 @@ fn run() -> Result<()> {
             project,
             mcp,
             no_watch,
+            no_telemetry,
         } => {
+            let _ = no_telemetry; // no telemetry is emitted by the native runtime
             if !mcp {
                 return Err(
                     "Pass --mcp to serve the MCP protocol over standard input/output.".into(),
@@ -818,6 +886,7 @@ fn run() -> Result<()> {
             yes,
             init,
             no_permissions,
+            prompt_hook,
             print_config,
             refresh,
         } => {
@@ -853,7 +922,9 @@ fn run() -> Result<()> {
             }
             // Claude Code's front-load prompt hook: opt-in, default yes; --yes turns it on and a
             // refresh leaves the earlier choice alone.
-            let prompt_hook = if refresh || !targets.iter().any(|t| t == "claude") {
+            let prompt_hook = if let Some(choice) = prompt_hook.as_deref() {
+                match choice { "on" => Some(true), "off" => Some(false), _ => None }
+            } else if refresh || !targets.iter().any(|t| t == "claude") {
                 None
             } else if yes {
                 Some(true)
@@ -862,17 +933,21 @@ fn run() -> Result<()> {
                     "Front-load CodeGraphV on \"how / where / trace\" prompts? Auto-injects structural context so answers need fewer steps (adds a moment to those prompts; Claude Code only).",
                 )?)
             };
-            for id in targets {
-                let result = environment.apply(
-                    &id,
-                    loc,
-                    InstallOptions {
-                        auto_allow: !no_permissions,
-                        prompt_hook,
-                        dry_run: false,
-                    },
-                    false,
-                )?;
+            let requests: Vec<_> = targets
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        InstallOptions {
+                            auto_allow: !no_permissions,
+                            preserve_permissions: refresh && !no_permissions,
+                            prompt_hook,
+                            dry_run: false,
+                        },
+                    )
+                })
+                .collect();
+            for (id, result) in environment.apply_many(&requests, loc, false)? {
                 for file in result.files {
                     println!("{id}: {} {}", file.action, file.path.display());
                 }
@@ -904,7 +979,7 @@ fn run() -> Result<()> {
             yes,
             keep_cli,
         } => {
-            use codegraph_installer::{Environment, InstallOptions, Location};
+            use codegraph_installer::{Environment, Location};
             let environment = Environment::current()?;
             let loc = if location.as_deref() == Some("local") {
                 Location::Local
@@ -920,8 +995,12 @@ fn run() -> Result<()> {
             {
                 return Ok(());
             }
-            for id in targets {
-                let result = environment.apply(&id, loc, InstallOptions::default(), true)?;
+            for (id, result) in environment.remove_many_as(
+                &codegraph_installer::CODEGRAPHV,
+                &targets,
+                loc,
+                false,
+            )? {
                 for file in result.files {
                     println!("{id}: {} {}", file.action, file.path.display());
                 }
@@ -929,8 +1008,12 @@ fn run() -> Result<()> {
                     println!("{note}");
                 }
             }
-            // Like the original: a global uninstall also removes the CLI unless --keep-cli.
-            if loc == Location::Global && !keep_cli {
+            // A selected integration cannot establish ownership of the shared executable.
+            // Only explicit all-target removal may remove it, and never with known consumers.
+            let remaining = codegraph_installer::TARGETS.iter().any(|id|
+                environment.configured(id, Location::Global)
+                    || environment.supports(id, Location::Local) && environment.configured(id, Location::Local));
+            if loc == Location::Global && !keep_cli && target == "all" && !remaining {
                 let exe = std::env::current_exe()?;
                 let env = |name: &str| std::env::var(name).ok();
                 match codegraph_types::paths::home_dir() {
@@ -940,6 +1023,8 @@ fn run() -> Result<()> {
                     }
                     None => println!("No home directory found; the codegraphV CLI was left installed."),
                 }
+            } else if loc == Location::Global && !keep_cli {
+                println!("CodeGraphV CLI retained: selected integrations or remaining consumers may share it.");
             }
         }
     }

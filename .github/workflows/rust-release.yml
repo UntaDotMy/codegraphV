@@ -17,6 +17,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write      # OIDC token for Sigstore signing
+  attestations: write  # store the GitHub artifact attestations for the archives
 
 env:
   CARGO_TERM_COLOR: always
@@ -100,6 +102,15 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum codegraphV-* > SHA256SUMS && cat SHA256SUMS
+      - name: Attest build provenance for release archives
+        # SHA256SUMS proves integrity only; the attestation proves the archives were built by
+        # this workflow from this repository. Verify with:
+        #   gh attestation verify <file> -R colbymchenry/codegraph
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/codegraphV-*
+            dist/SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

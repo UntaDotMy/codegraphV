@@ -1,0 +1,40 @@
+# Pull-request gate for the native Rust workspace (audit A23).
+#
+# Read-only: no artifact publishing, no npm, no release state. The release workflow keeps its
+# own tag/manual publishing path. `cargo fmt --check` and `clippy -D warnings` are deliberately
+# not gates yet: the existing formatting baseline still differs (audit A29), and adding them
+# here would make every PR red for pre-existing debt instead of the change under review.
+name: Rust PR
+
+on:
+  pull_request:
+    branches: [main, rust-rewrite]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - name: Release build smoke
+        run: cargo build --release --locked -p codegraph-cli
+      - name: Windows installer recovery
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/test-install-rust.ps1

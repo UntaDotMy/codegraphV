@@ -115,6 +115,8 @@ pub struct Store {
     batch_sql: RefCell<HashMap<(&'static str, usize), String>>,
     project_name_tokens: RefCell<HashSet<String>>,
     pub(crate) dominant_file_memo: RefCell<Option<crate::graph_queries::DominantMemo>>,
+    /// Whether `idx_edges_source_kind` is present (a bulk-load window drops it), checked once.
+    source_kind_index: Cell<Option<bool>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +138,22 @@ impl Store {
             batch_sql: RefCell::new(HashMap::new()),
             project_name_tokens: RefCell::new(HashSet::new()),
             dominant_file_memo: RefCell::new(None),
+            source_kind_index: Cell::new(None),
         }
+    }
+
+    /// Is `idx_edges_source_kind` present? A bulk-load window drops secondary indexes and
+    /// recreates them, so the answer is cached for this connection's lifetime.
+    fn source_kind_indexed(&self) -> bool {
+        if let Some(known) = self.source_kind_index.get() {
+            return known;
+        }
+        let present = self
+            .conn
+            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_edges_source_kind'", [], |_| Ok(()))
+            .is_ok();
+        self.source_kind_index.set(Some(present));
+        present
     }
 
     /// Run a PRAGMA, discarding any row it returns (`mmap_size`, `journal_mode`
@@ -158,6 +175,7 @@ impl Store {
     /// window rides out a normal incremental sync; with WAL, reads never block on
     /// a writer, so this only governs cross-process write contention.
     fn configure_connection(conn: &Connection, read_only: bool) -> Result<()> {
+        conn.progress_handler(1000, Some(codegraph_types::request::cancelled))?;
         // Field filters must run before SQL LIMIT. SQLite lower() is ASCII-only;
         // retain the search API's Unicode lowercase + literal-substring semantics.
         conn.create_scalar_function("codegraph_contains", 2,
@@ -1334,6 +1352,29 @@ impl Store {
         Ok(())
     }
 
+    /// Signatures of top-level nodes of these kinds and languages whose text holds one of
+    /// `names`. A sync asks this about the definitions it just changed, so no node is built.
+    pub fn top_level_signatures_mentioning(&self, kinds: &[NodeKind], languages: &[Language], names: &[String]) -> Result<Vec<String>> {
+        if kinds.is_empty() || languages.is_empty() || names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let name_pred = names.iter().map(|_| "instr(signature, ?) > 0").collect::<Vec<_>>().join(" OR ");
+        let sql = format!(
+            "SELECT signature FROM nodes WHERE kind IN ({}) AND language IN ({}) AND qualified_name = name AND ({name_pred})",
+            placeholders(kinds.len()),
+            placeholders(languages.len()),
+        );
+        let mut bound: Vec<String> = Vec::with_capacity(kinds.len() + languages.len() + names.len());
+        bound.extend(kinds.iter().map(|k| k.as_str().to_string()));
+        bound.extend(languages.iter().map(|l| l.as_str().to_string()));
+        bound.extend(names.iter().cloned());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_from_iter(bound.iter()), |r| r.get::<_, Option<String>>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().flatten().collect())
+    }
+
     /// Every node of one kind in the canonical `(file_path, start_line, id)` order,
     /// streamed through `visit` (`iterateNodesByKind`); `visit` returns `false` to stop early.
     pub fn for_each_node_of_kind(&self, kind: NodeKind, mut visit: impl FnMut(Node) -> bool) -> Result<()> {
@@ -1480,9 +1521,24 @@ impl Store {
 
     // -- Edges ---------------------------------------------------------------
 
+    /// Impact adjacency is limited in SQL, before materializing a high-fanout node.
+    /// Incoming containment is excluded before applying the limit. The limit is inlined: a bound
+    /// `LIMIT ?` makes SQLite take a slower plan than the same literal (measured 2x on a
+    /// 12-row result), and the value is our own budget, never user text.
+    pub fn impact_edges(&self, id: &str, incoming: bool, limit: usize) -> Result<Vec<Edge>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let (column, filter, peer) = if incoming {
+            ("target", "kind != 'contains'", "source")
+        } else {
+            ("source", "kind = 'contains'", "target")
+        };
+        self.query_edges(&format!("SELECT {EDGE_COLS} FROM edges WHERE {column} = ? AND {filter} ORDER BY kind, {peer}, line, col LIMIT {limit}"), &[&id])
+    }
+
     /// Outgoing edges from a node. Preserves the source/kind index order (calls
     /// before imports/references), then breaks ties deterministically.
     pub fn get_outgoing_edges(&self, source_id: &str, kinds: &[EdgeKind], provenance: Option<&str>) -> Result<Vec<Edge>> {
+        if codegraph_types::request::cancelled() { return Err(DbError::other("Request cancelled")); }
         if kinds.is_empty() && provenance.is_none() {
             return self.query_edges(
                 &format!("SELECT {EDGE_COLS} FROM edges WHERE source = ? ORDER BY kind, target, line, col"),
@@ -1504,10 +1560,49 @@ impl Store {
         self.query_edges(&sql, &params)
     }
 
+    /// The bounded form used by graph walks, so a hub cannot materialize its whole fanout
+    /// before the caller's own node/output limit applies. `INDEXED BY` and a literal `LIMIT` keep
+    /// the plan the unlimited read uses: a bound limit makes SQLite prefer the wider identity
+    /// index and takes a slower plan (measured 2x).
+    pub fn get_outgoing_edges_limited(&self, source_id: &str, kinds: &[EdgeKind], provenance: Option<&str>, limit: usize) -> Result<Vec<Edge>> {
+        if codegraph_types::request::cancelled() { return Err(DbError::other("Request cancelled")); }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        if kinds.is_empty() && provenance.is_none() {
+            let plain = format!("SELECT {EDGE_COLS} FROM edges WHERE source = ? ORDER BY kind, target, line, col LIMIT {limit}");
+            if !self.source_kind_indexed() {
+                return self.query_edges(&plain, &[&source_id]);
+            }
+            // Keep the plan the unlimited read uses; `LIMIT ?` alone picks the wider identity
+            // index. A bulk-load window may have dropped the index after the check.
+            let hinted = format!("SELECT {EDGE_COLS} FROM edges INDEXED BY idx_edges_source_kind WHERE source = ? ORDER BY kind, target, line, col LIMIT {limit}");
+            return match self.query_edges(&hinted, &[&source_id]) {
+                Ok(edges) => Ok(edges),
+                Err(_) => {
+                    self.source_kind_index.set(Some(false));
+                    self.query_edges(&plain, &[&source_id])
+                }
+            };
+        }
+        let mut sql = format!("SELECT {EDGE_COLS} FROM edges WHERE source = ?");
+        let mut params: Vec<&dyn ToSql> = vec![&source_id];
+        let kind_strs: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        if !kinds.is_empty() {
+            sql.push_str(&format!(" AND kind IN ({})", placeholders(kinds.len())));
+            params.extend(kind_strs.iter().map(|k| k as &dyn ToSql));
+        }
+        if let Some(p) = provenance.as_ref() {
+            sql.push_str(" AND provenance = ?");
+            params.push(p);
+        }
+        sql.push_str(&format!(" ORDER BY kind, target, line, col LIMIT {limit}"));
+        self.query_edges(&sql, &params)
+    }
+
     /// Incoming edges to a node. Kind must precede opaque source IDs: file IDs
     /// sort before function IDs, so source-first ordering lets imports displace
     /// actual calls in capped caller lists.
     pub fn get_incoming_edges(&self, target_id: &str, kinds: &[EdgeKind]) -> Result<Vec<Edge>> {
+        if codegraph_types::request::cancelled() { return Err(DbError::other("Request cancelled")); }
         if kinds.is_empty() {
             return self.query_edges(
                 &format!("SELECT {EDGE_COLS} FROM edges WHERE target = ? ORDER BY kind, source, line, col"),
@@ -1516,6 +1611,26 @@ impl Store {
         }
         let sql = format!(
             "SELECT {EDGE_COLS} FROM edges WHERE target = ? AND kind IN ({}) ORDER BY kind, source, line, col",
+            placeholders(kinds.len())
+        );
+        let kind_strs: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        let mut params: Vec<&dyn ToSql> = vec![&target_id];
+        params.extend(kind_strs.iter().map(|k| k as &dyn ToSql));
+        self.query_edges(&sql, &params)
+    }
+
+    /// The bounded form of [`Store::get_incoming_edges`].
+    pub fn get_incoming_edges_limited(&self, target_id: &str, kinds: &[EdgeKind], limit: usize) -> Result<Vec<Edge>> {
+        if codegraph_types::request::cancelled() { return Err(DbError::other("Request cancelled")); }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        if kinds.is_empty() {
+            return self.query_edges(
+                &format!("SELECT {EDGE_COLS} FROM edges WHERE target = ? ORDER BY kind, source, line, col LIMIT {limit}"),
+                &[&target_id],
+            );
+        }
+        let sql = format!(
+            "SELECT {EDGE_COLS} FROM edges WHERE target = ? AND kind IN ({}) ORDER BY kind, source, line, col LIMIT {limit}",
             placeholders(kinds.len())
         );
         let kind_strs: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();

@@ -107,6 +107,9 @@ pub struct IndexResult {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncResult {
+    /// Existing modules whose re-export statements changed during extraction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub re_exports_changed_file_paths: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_refs_processed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

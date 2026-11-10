@@ -3,6 +3,7 @@ pub mod daemon;
 pub mod explore;
 pub mod handoff;
 pub mod render;
+mod requests;
 pub mod session;
 pub mod tools;
 pub use tools::{ToolHandler, ToolResult};

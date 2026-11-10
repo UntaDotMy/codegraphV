@@ -4,10 +4,11 @@ use crate::alias_binding::extract_local_export_aliases;
 use crate::ctx::Ctx;
 use crate::synth_utils::make_line_at;
 use crate::types::NodeRef;
+use codegraph_extract::mask_js_noncode;
 use codegraph_extract::strip_comments::strip_comments_for_regex;
 use codegraph_jsre::re;
 use codegraph_types::jscompat::utf16_prefix;
-use codegraph_types::NodeKind;
+use codegraph_types::{Node, NodeKind};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -51,11 +52,69 @@ pub struct FileExportIndex {
     pub default_component: Option<NodeRef>,
     pub default_fn_class: Option<NodeRef>,
     stated_default: RefCell<Option<StatedDefault>>,
+    /// What `module.exports =` says, once read.
+    common_js_default: RefCell<Option<Option<CommonJsDefault>>>,
     clause_aliases: RefCell<Option<HashMap<String, NodeRef>>>,
 }
 
 #[derive(Default)]
 pub struct FileExportIndexes(RefCell<HashMap<String, Rc<FileExportIndex>>>);
+
+/// The names a filed `export const { a, b: c } = …` binds into the module's export scope
+/// (`a` under its own name, `c` under `b`'s). A destructuring export is the module's own binding
+/// even when the value it comes from is an object literal's member.
+fn destructured_export_names(source: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let bytes = source.as_bytes();
+    for m in re!(r"^\s*export\s+(?:const|let|var)\s*\{", "m").captures_iter(source) {
+        let whole = m.get(0).unwrap();
+        let open = whole.end() - 1;
+        let mut depth = 0i32;
+        let mut close = None;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                b'\'' | b'"' | b'`' => {
+                    let quote = bytes[i];
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        if bytes[i] == b'\\' { i += 1; }
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let Some(close) = close else { continue };
+        let body = &source[open + 1..close];
+        for part in body.split(',') {
+            let part = part.trim();
+            if part.is_empty() { continue; }
+            if let Some(rest) = part.strip_prefix("...") {
+                if re!(r"^[A-Za-z_$][\w$]*$").is_match(rest.trim()) { out.insert(rest.trim().to_string()); }
+                continue;
+            }
+            // `key: local` binds `local`; a shorthand binds its own name.
+            let local = match part.split_once(':') {
+                Some((_, value)) => value.split('=').next().unwrap_or("").trim(),
+                None => part.split('=').next().unwrap_or("").trim(),
+            };
+            if re!(r"^[A-Za-z_$][\w$]*$").is_match(local) {
+                out.insert(local.to_string());
+            }
+        }
+    }
+    out
+}
 
 pub fn get_file_export_index(file_path: &str, ctx: &Ctx) -> Rc<FileExportIndex> {
     let memo = ctx.memo::<FileExportIndexes>();
@@ -67,6 +126,7 @@ pub fn get_file_export_index(file_path: &str, ctx: &Ctx) -> Rc<FileExportIndex> 
         default_component: None,
         default_fn_class: None,
         stated_default: RefCell::new(None),
+        common_js_default: RefCell::new(None),
         clause_aliases: RefCell::new(None),
     };
     // Python has no export keyword: every module-level def is importable, and the extractor
@@ -76,7 +136,16 @@ pub fn get_file_export_index(file_path: &str, ctx: &Ctx) -> Rc<FileExportIndex> 
     } else {
         ctx.get_exported_nodes_in_file(file_path)
     };
+    // A method of an exported object literal is marked exported too, but an import names the
+    // module's own binding, never the object's method (#2945). Module-level declarations only;
+    // an explicit destructuring export (`export const { f } = d`) does bind that member.
+    let destructured = ctx.read_file(file_path).map(|s| destructured_export_names(&s)).unwrap_or_default();
     for n in exported {
+        if crate::name_matcher::object_literal::object_literal_owner_of(&n, ctx).is_some()
+            && !destructured.contains(&n.name)
+        {
+            continue;
+        }
         idx.by_name.entry(n.name.clone()).or_insert_with(|| Rc::clone(&n));
         if idx.default_component.is_none() && n.kind == NodeKind::Component {
             idx.default_component = Some(Rc::clone(&n));
@@ -154,7 +223,7 @@ pub fn stated_default_export(file_path: &str, idx: &FileExportIndex, ctx: &Ctx) 
     let mut stated: Option<StatedDefault> = None;
     let source = if is_js_family_path(file_path) { ctx.read_file(file_path) } else { None };
     if let Some(source) = source.filter(|s| !s.is_empty() && re!(r"\bexport\s+default\b").is_match(s)) {
-        let code = strip_comments_for_regex(&source, "typescript");
+        let code = mask_js_noncode(&source).unwrap_or_else(|| strip_comments_for_regex(&source, "typescript"));
         let line_at = make_line_at(&code, 1);
         for m in re!(r"^[ \t]*export\s+default\s+", "gm").captures_iter(&code) {
             let whole = m.get(0).unwrap();
@@ -177,7 +246,12 @@ pub fn stated_default_export(file_path: &str, idx: &FileExportIndex, ctx: &Ctx) 
             let node = if declared {
                 named.iter().find(|n| is_default_declaration_kind(n.kind) && n.start_line >= from && n.start_line <= to).cloned()
             } else {
-                let mut v: Vec<NodeRef> = named.iter().filter(|n| is_default_binding_kind(n.kind)).cloned().collect();
+                let mut v: Vec<NodeRef> = named.iter()
+                    .filter(|n| is_default_binding_kind(n.kind))
+                    // `export default f` names the module's binding, not an object method called f.
+                    .filter(|n| crate::name_matcher::object_literal::object_literal_owner_of(n, ctx).is_none())
+                    .cloned()
+                    .collect();
                 v.sort_by(|a, b| a.start_line.cmp(&b.start_line).then(a.start_column.cmp(&b.start_column)));
                 v.into_iter().next()
             };
@@ -192,9 +266,27 @@ pub fn stated_default_export(file_path: &str, idx: &FileExportIndex, ctx: &Ctx) 
     result
 }
 
+#[derive(Clone)]
 pub struct CommonJsDefault {
     pub source: Option<String>,
     pub name: Option<String>,
+}
+
+/// Whether `node` is what its own file says it default-exports. A declaration file's answer,
+/// including `export =`, counts. Anything else a default import lands on is the guess at the
+/// module's first export.
+pub fn is_stated_default_export(node: &Node, ctx: &Ctx) -> bool {
+    if !is_js_family_path(&node.file_path) {
+        return node.kind == NodeKind::Component;
+    }
+    if crate::ambient_modules::is_declaration_file(&node.file_path) {
+        return true;
+    }
+    let idx = get_file_export_index(&node.file_path, ctx);
+    match stated_default_export(&node.file_path, &idx, ctx) {
+        StatedDefault::Node(stated) => stated.id == node.id,
+        _ => common_js_default_export(&node.file_path, ctx).and_then(|c| c.name).as_deref() == Some(node.name.as_str()),
+    }
 }
 
 /// `module.exports = …` (also `exports = module.exports = …`): the name it binds
@@ -207,20 +299,25 @@ pub fn common_js_default_export(file_path: &str, ctx: &Ctx) -> Option<CommonJsDe
     if !ctx.file_contains(file_path, "module.exports") {
         return None;
     }
-    let source = ctx.read_file(file_path)?;
-    if source.is_empty() || !source.contains("module.exports") {
-        return None;
+    let idx = get_file_export_index(file_path, ctx);
+    if let Some(cached) = idx.common_js_default.borrow().clone() {
+        return cached;
     }
-    let m = re!(
-        r#"^[ \t]*(?:exports\s*=\s*)?module\.exports\s*=\s*(?:exports\s*=\s*)?(?:require\(\s*['"]([^'"]+)['"]\s*\)\s*;?[ \t]*$|(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|class\s+([A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)\s*;?[ \t]*$)"#,
-        "m"
-    )
-    .captures(&source)?;
-    if let Some(s) = m.text(1).filter(|s| !s.is_empty()) {
-        return Some(CommonJsDefault { source: Some(s.to_string()), name: None });
-    }
-    let name = m.text(2).or_else(|| m.text(3)).or_else(|| m.text(4)).map(String::from);
-    Some(CommonJsDefault { source: None, name })
+    let source = ctx.read_file(file_path).filter(|s| !s.is_empty() && s.contains("module.exports"));
+    let parsed = source.and_then(|source| {
+        let m = re!(
+            r#"^[ \t]*(?:exports\s*=\s*)?module\.exports\s*=\s*(?:exports\s*=\s*)?(?:require\(\s*['"]([^'"]+)['"]\s*\)\s*;?[ \t]*$|(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|class\s+([A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)\s*;?[ \t]*$)"#,
+            "m"
+        )
+        .captures(&source)?;
+        if let Some(s) = m.text(1).filter(|s| !s.is_empty()) {
+            return Some(CommonJsDefault { source: Some(s.to_string()), name: None });
+        }
+        let name = m.text(2).or_else(|| m.text(3)).or_else(|| m.text(4)).map(String::from);
+        Some(CommonJsDefault { source: None, name })
+    });
+    *idx.common_js_default.borrow_mut() = Some(parsed.clone());
+    parsed
 }
 
 /// The declaration a module default-exports: what its own `export default` statement declares or
@@ -245,7 +342,10 @@ pub fn has_esm_default_export(file_path: &str, idx: &FileExportIndex, ctx: &Ctx)
         return false;
     }
     match ctx.read_file(file_path) {
-        Some(source) => !source.is_empty() && source.contains("default") && re!(r"^[ \t]*export\s+default\b", "m").is_match(&source),
+        Some(source) => {
+            let code = mask_js_noncode(&source).unwrap_or_else(|| strip_comments_for_regex(&source, "typescript"));
+            !code.is_empty() && re!(r"^[ \t]*export\s+default\b", "m").is_match(&code)
+        }
         None => false,
     }
 }
@@ -266,7 +366,9 @@ pub fn exported_by_name(file_path: &str, idx: &FileExportIndex, name: &str, ctx:
                     if idx.by_name.contains_key(&a.exported_name) || aliases.contains_key(&a.exported_name) {
                         continue;
                     }
-                    if let Some(decl) = nodes_in_file_named(file_path, &a.local_name, ctx).into_iter().next() {
+                    if let Some(decl) = nodes_in_file_named(file_path, &a.local_name, ctx).into_iter()
+                        .find(|n| crate::name_matcher::object_literal::object_literal_owner_of(n, ctx).is_none())
+                    {
                         aliases.insert(a.exported_name, decl);
                     }
                 }

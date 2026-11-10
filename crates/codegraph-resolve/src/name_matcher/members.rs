@@ -2,12 +2,13 @@
 //! names in its head, and the method an inherited chain reaches.
 
 use super::infer::{normalize_inferred_type_name, TYPE_ARGS};
+use super::reach::is_anonymous_class;
 use super::lang_shape::is_method_owner_kind;
 use super::objc::objc_supertypes_of;
 use super::dart::dart_supertypes_of;
 use super::scala::scala_supertypes_of;
 use super::swift::swift_decl_supers;
-use super::ruby::{ruby_methods_of_kind_first, RubyMethodKind};
+use super::ruby::{ruby_ancestor_method, ruby_methods_of_kind_first, RubyMethodKind};
 use super::util::*;
 use crate::ctx::Ctx;
 use crate::types::{NodeRef, Tri, UnresolvedRef};
@@ -59,7 +60,22 @@ pub fn infer_member_receiver_type(receiver: &str, r: &UnresolvedRef, ctx: &Ctx) 
         }
     }
     let cls = cls?;
-    let found = member_type_through_hierarchy(&cls, &name, ctx)?;
+    let mut found = member_type_through_hierarchy(&cls, &name, ctx);
+    // An object expression's code sees the class it is written in. Its `this`
+    // stays the object: the walk runs only when the receiver text is the member name.
+    let mut inner = cls.clone();
+    while found.is_none() && r.language == Language::Kotlin && is_anonymous_class(&inner) && receiver == name {
+        let mut outer: Option<NodeRef> = None;
+        for n in &in_file {
+            if is_member_class_kind(n.kind) && n.start_line < inner.start_line && n.end_line >= r.line && outer.as_ref().map_or(true, |o| n.start_line >= o.start_line) {
+                outer = Some(n.clone());
+            }
+        }
+        let Some(next) = outer else { break };
+        found = member_type_through_hierarchy(&next, &name, ctx);
+        inner = next;
+    }
+    let found = found?;
     match func {
         Some(f) if binds_name_itself(&f, &name, ctx) => None,
         _ => Some(found),
@@ -230,7 +246,13 @@ fn read_declared_supertypes(cls: &Node, ctx: &Ctx) -> Vec<String> {
     match cls.language {
         Language::Pascal => names(cap(re!(r"=\s*class\s*(?:sealed|abstract)?\s*\(([^)]*)\)", "i"), &head)),
         Language::Python => {
-            let inner = cap(re!(r"\bclass\s+\w+\s*\(([^)]*)\)"), &head)
+            let inner = super::python::python_base_list(cls, ctx)
+                .map(|mut s| {
+                    while re!(r"\[[^\[\]]*\]").is_match(&s) {
+                        s = re!(r"\[[^\[\]]*\]", "g").replace_all_str(&s, "");
+                    }
+                    s
+                })
                 .map(|s| re!(r"\w+\s*=\s*[\w.]+", "g").replace_all_str(&s, ""))
                 .map(|s| re!(r"([A-Za-z_][\w.]*)\.\w+\s*\(", "g").replace_all(&s, |m| Some(format!("{} (", m.text(1).unwrap_or("")))));
             names(inner)
@@ -322,6 +344,8 @@ fn find_inherited_class_method(classes: &[NodeRef], name: &str, ctx: &Ctx, kind:
                     if decl.language != cls.language || !is_method_owner_kind(decl) || seen.contains(&decl.id) {
                         continue;
                     }
+                    if cls.language == Language::Python
+                        && super::python::is_python_base_from_outside(cls, sup, decl, ctx) { continue; }
                     seen.insert(decl.id.clone());
                     let in_decl_file = ctx.get_nodes_in_file(&decl.file_path);
                     let methods: Vec<NodeRef> = in_decl_file
@@ -470,8 +494,13 @@ pub fn find_own_method(nodes_in_file: &[NodeRef], class_node: &Node, method_name
         .map(|n| (*n).clone())
 }
 
-/// A class's method by name, own first, then inherited.
+/// A class's method by name, own first, then inherited. Ruby walks the class's real ancestors.
 pub fn class_strategy_method(class_node: &NodeRef, method_name: &str, ctx: &Ctx, kind: Option<RubyMethodKind>) -> Option<NodeRef> {
-    find_own_method(&ctx.get_nodes_in_file(&class_node.file_path), class_node, method_name, kind)
-        .or_else(|| inherited_class_method(std::slice::from_ref(class_node), method_name, ctx, kind))
+    if let Some(own) = find_own_method(&ctx.get_nodes_in_file(&class_node.file_path), class_node, method_name, kind) {
+        return Some(own);
+    }
+    if class_node.language == Language::Ruby {
+        return ruby_ancestor_method(&class_node.qualified_name, method_name, ctx, kind);
+    }
+    inherited_class_method(std::slice::from_ref(class_node), method_name, ctx, kind)
 }

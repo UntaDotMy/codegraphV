@@ -1,14 +1,16 @@
 //! Receiver type inference: what class does `lg` in `lg.warn()` name? Read from the nearest
 //! declaration of `lg` in the enclosing function, language by language.
 
+use super::go::chain::{go_call_value_type, GoTypeText};
+use super::go::{
+    go_asserted_local_type, go_local_decl, go_named_type, go_written_type, GoProjectType,
+};
 use super::js_imports::*;
 use super::js_store::{enclosing_scope_start_line, has_parameter_binding, import_shadowed_at};
-use super::go::chain::{go_call_value_type, GoTypeText};
-use super::go::{go_asserted_local_type, go_local_decl, go_named_type, go_written_type, GoProjectType};
-use super::reach::is_lexically_reachable;
+use super::reach::{anonymous_depth, is_anonymous_class, is_lexically_reachable};
 use super::util::*;
 use crate::ambient_modules::is_merged_ambient_declaration;
-use crate::ctx::Ctx;
+use crate::ctx::{js_lower, Ctx};
 use crate::js_builtins::TS_PRIMITIVE_TYPES;
 use crate::types::{NodeRef, Tri, UnresolvedRef};
 use codegraph_extract::strip_comments::{blank_string_contents, strip_comments_for_regex};
@@ -21,18 +23,41 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// An optional generic argument list and array brackets after a type name.
-pub const TYPE_ARGS: &str = r"(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\s*(?:\[[\s,]*\]\s*)*";
+pub const TYPE_ARGS: &str =
+    r"(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\s*(?:\[[\s,]*\]\s*)*";
 /// A Swift call with balanced parentheses that is not chained on, or an unterminated one.
-const SWIFT_UNCHAINED_CALL: &str = r"(?:\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)(?!\s*\??\.)|\([^)]*$)";
+const SWIFT_UNCHAINED_CALL: &str =
+    r"(?:\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)(?!\s*\??\.)|\([^)]*$)";
 
-pub(super) const NON_TYPE_RECEIVER_TOKENS: [&str; 16] =
-    ["this", "self", "super", "new", "return", "await", "yield", "typeof", "null", "nil", "None", "true", "false", "True", "False", "undefined"];
+pub(super) const NON_TYPE_RECEIVER_TOKENS: [&str; 16] = [
+    "this",
+    "self",
+    "super",
+    "new",
+    "return",
+    "await",
+    "yield",
+    "typeof",
+    "null",
+    "nil",
+    "None",
+    "true",
+    "false",
+    "True",
+    "False",
+    "undefined",
+];
 
 /// The type name an inferred type reads as (`Foo<T>*` → `Foo`, `a.b.Foo` → `Foo`), or none for a keyword.
 pub fn normalize_inferred_type_name(raw: &str) -> Option<String> {
-    let cleaned = re!(r"[&*]", "g").replace_all_str(&re!(r"<[^>]*>", "g").replace_all_str(raw, ""), "");
+    let cleaned =
+        re!(r"[&*]", "g").replace_all_str(&re!(r"<[^>]*>", "g").replace_all_str(raw, ""), "");
     let cleaned = codegraph_types::jscompat::js_trim(&cleaned);
-    let seg = re!(r"[.:]+").split(cleaned).into_iter().filter(|s| !s.is_empty()).last()?;
+    let seg = re!(r"[.:]+")
+        .split(cleaned)
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .last()?;
     if NON_TYPE_RECEIVER_TOKENS.contains(&seg) {
         None
     } else {
@@ -42,7 +67,9 @@ pub fn normalize_inferred_type_name(raw: &str) -> Option<String> {
 
 /// `Item[]` → `Item`.
 pub fn array_element_type(ty: &str) -> Option<String> {
-    re!(r"^(.+?)\s*\[\s*\]$").captures(ty).and_then(|c| c.text(1).map(|s| s.to_string()))
+    re!(r"^(.+?)\s*\[\s*\]$")
+        .captures(ty)
+        .and_then(|c| c.text(1).map(|s| s.to_string()))
 }
 
 fn at(template: &str, r: &str) -> String {
@@ -76,25 +103,39 @@ fn memo_patterns(key: String, build: impl FnOnce() -> Vec<Arc<Re>>) -> Rc<Vec<Ar
 
 /// The declaration patterns that bind `r` (already regex-escaped) to a type, for `language`.
 pub fn local_receiver_type_patterns(language: Language, r: &str) -> Rc<Vec<Arc<Re>>> {
-    memo_patterns(format!("{}|{r}", language.as_str()), || build_local_receiver_type_patterns(language, r))
+    memo_patterns(format!("{}|{r}", language.as_str()), || {
+        build_local_receiver_type_patterns(language, r)
+    })
 }
 
 fn build_local_receiver_type_patterns(language: Language, r: &str) -> Vec<Arc<Re>> {
     let s = |t: &str| at(t, r);
     let ta = TYPE_ARGS;
     match language {
-        Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx | Language::ArkTs => pats(
+        Language::TypeScript
+        | Language::JavaScript
+        | Language::Tsx
+        | Language::Jsx
+        | Language::ArkTs => pats(
             &[
                 s(r"\b@R@\b\s*=\s*new\s+([A-Za-z_$][\w.$]*)"),
-                s(r"\b@R@\b\s*=\s*(?:inject|(?:this\.)?(?:[\w$#]+\.)*createInstance)\s*<\s*([A-Z][\w.$]*)[^;=(){}]*>\s*\((?![^;]*\)\s*(?:\?\.|\.|\[))"),
-                s(r"\b@R@\b\s*=\s*(?:inject|(?:this\.)?(?:[\w$#]+\.)*createInstance)\s*\(\s*([A-Z][\w.$]*)(?![^;]*\)\s*(?:\?\.|\.|\[))"),
-                s(r"\b@R@\b\s*:\s*([A-Z][\w.$]*(?:(?:\s*<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\s*\[[^\]]*\])?)"),
+                s(
+                    r"\b@R@\b\s*=\s*(?:inject|(?:this\.)?(?:[\w$#]+\.)*createInstance)\s*<\s*([A-Z][\w.$]*)[^;=(){}]*>\s*\((?![^;]*\)\s*(?:\?\.|\.|\[))",
+                ),
+                s(
+                    r"\b@R@\b\s*=\s*(?:inject|(?:this\.)?(?:[\w$#]+\.)*createInstance)\s*\(\s*([A-Z][\w.$]*)(?![^;]*\)\s*(?:\?\.|\.|\[))",
+                ),
+                s(
+                    r"\b@R@\b\s*:\s*([A-Z][\w.$]*(?:(?:\s*<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\s*\[[^\]]*\])?)",
+                ),
             ],
             "",
         ),
         Language::Python => pats(
             &[
-                s(r"(?:^|;)\s*@R@\s*=(?!=)\s*([A-Z]\w*)\.objects\.(?:create|get|first|last|latest|earliest|get_by_natural_key)\s*\("),
+                s(
+                    r"(?:^|;)\s*@R@\s*=(?!=)\s*([A-Z]\w*)\.objects\.(?:create|get|first|last|latest|earliest|get_by_natural_key)\s*\(",
+                ),
                 s(r"(?:^|;)\s*@R@\s*=(?!=)\s*([A-Z][\w.]*)\s*\((?![^\n]*,\s*$)"),
                 s(r#"\b@R@\b\s*:\s*["']([A-Z][\w.]*)["']"#),
                 s(r"\b@R@\b\s*:\s*([A-Z][\w.]*)"),
@@ -107,11 +148,19 @@ fn build_local_receiver_type_patterns(language: Language, r: &str) -> Vec<Arc<Re
                 // A package written before the type is kept (`org.app.Message message`): it, not a
                 // same-named import, says which type the local is.
                 format!(r"\b((?:[a-z_$][\w$]*\.)*[A-Z][\w.]*)\s*{ta}\s+{r}\b\s*[=;,)]"),
-                format!(r"\bfor\s*\(\s*(?:final\s+)?((?:[a-z_$][\w$]*\.)*[A-Z][\w.]*)\s*{ta}\s+{r}\s*:"),
+                format!(
+                    r"\bfor\s*\(\s*(?:final\s+)?((?:[a-z_$][\w$]*\.)*[A-Z][\w.]*)\s*{ta}\s+{r}\s*:"
+                ),
             ],
             "",
         ),
-        Language::Kotlin => pats(&[s(r"\b@R@\b\s*=\s*([A-Z][\w.]*)\s*\("), s(r"\b@R@\b\s*:\s*([A-Z][\w.]*)")], ""),
+        Language::Kotlin => pats(
+            &[
+                s(r"\b@R@\b\s*=\s*([A-Z][\w.]*)\s*\("),
+                s(r"\b@R@\b\s*:\s*([A-Z][\w.]*)"),
+            ],
+            "",
+        ),
         Language::CSharp => pats(
             &[
                 s(r"\b@R@\b\s*=\s*new\s+([A-Za-z_][\w.]*)"),
@@ -122,21 +171,30 @@ fn build_local_receiver_type_patterns(language: Language, r: &str) -> Vec<Arc<Re
         ),
         Language::ObjC => pats(
             &[
-                s(r"\b([A-Z]\w*)\s*(?:<[^<>;]*>\s*|[A-Z][A-Z0-9_]*\s*\([^;{}]*?\)\s*)?\*\s*(?:(?:_Nullable|_Nonnull|__strong|__weak|__unsafe_unretained|const)\s+)*@R@\b(?!\s*\()"),
-                s(r"\(\s*(?:(?:nullable|nonnull|__kindof)\s+)*([A-Z]\w*)\s*(?:<[^<>)]*>\s*|[A-Z][A-Z0-9_]*\s*\([^()]*\)\s*)?\*[^)]*\)\s*@R@\b"),
+                s(
+                    r"\b([A-Z]\w*)\s*(?:<[^<>;]*>\s*|[A-Z][A-Z0-9_]*\s*\([^;{}]*?\)\s*)?\*\s*(?:(?:_Nullable|_Nonnull|__strong|__weak|__unsafe_unretained|const)\s+)*@R@\b(?!\s*\()",
+                ),
+                s(
+                    r"\(\s*(?:(?:nullable|nonnull|__kindof)\s+)*([A-Z]\w*)\s*(?:<[^<>)]*>\s*|[A-Z][A-Z0-9_]*\s*\([^()]*\)\s*)?\*[^)]*\)\s*@R@\b",
+                ),
             ],
             "",
         ),
         Language::Swift => pats(
             &[
                 format!(r"\b{r}\b\s*=\s*([A-Z][\w.]*)\s*{ta}\("),
-                format!(r"\b(?:let|var)\s+{r}\b\s*=\s*(?:try[!?]\s*|(?:try|await)\s+)+([A-Z][\w.]*)\s*{ta}{SWIFT_UNCHAINED_CALL}"),
+                format!(
+                    r"\b(?:let|var)\s+{r}\b\s*=\s*(?:try[!?]\s*|(?:try|await)\s+)+([A-Z][\w.]*)\s*{ta}{SWIFT_UNCHAINED_CALL}"
+                ),
                 s(r"\b@R@\b\s*:\s*([A-Z][\w.]*)"),
             ],
             "",
         ),
         Language::Rust => pats(
-            &[s(r"\blet\s+(?:mut\s+)?@R@\b(?:\s*:[^=]+)?=\s*&?(?:mut\s+)?([A-Z][\w]*)"), s(r"\b@R@\s*:\s*&?(?:mut\s+)?([A-Z][\w]*)")],
+            &[
+                s(r"\blet\s+(?:mut\s+)?@R@\b(?:\s*:[^=]+)?=\s*&?(?:mut\s+)?([A-Z][\w]*)"),
+                s(r"\b@R@\s*:\s*&?(?:mut\s+)?([A-Z][\w]*)"),
+            ],
             "",
         ),
         Language::Go => pats(
@@ -149,10 +207,25 @@ fn build_local_receiver_type_patterns(language: Language, r: &str) -> Vec<Arc<Re
             "",
         ),
         Language::Ruby => pats(&[s(r"\b@R@\b\s*=\s*([A-Z][\w:]*)\.new\b")], ""),
-        Language::Scala => pats(&[s(r"\b@R@\b\s*=\s*(?:new\s+)?([A-Z][\w.]*)"), s(r"\b@R@\b\s*:\s*([A-Z][\w.]*)")], ""),
-        Language::Dart => pats(&[s(r"\b@R@\b\s*=\s*([A-Z][\w.]*)\s*\("), s(r"\b([A-Z][\w.]*)\s+@R@\b\s*[=;,)]")], ""),
+        Language::Scala => pats(
+            &[
+                s(r"\b@R@\b\s*=\s*(?:new\s+)?([A-Z][\w.]*)"),
+                s(r"\b@R@\b\s*:\s*([A-Z][\w.]*)"),
+            ],
+            "",
+        ),
+        Language::Dart => pats(
+            &[
+                s(r"\b@R@\b\s*=\s*([A-Z][\w.]*)\s*\("),
+                s(r"\b([A-Z][\w.]*)\s+@R@\b\s*[=;,)]"),
+            ],
+            "",
+        ),
         Language::Php => pats(
-            &[s(r"\$?@R@\b\s*=\s*new\s+([A-Za-z_\\][\w\\]*)"), s(r"\b([A-Za-z_\\][\w\\]*)\s+&?\$@R@\b")],
+            &[
+                s(r"\$?@R@\b\s*=\s*new\s+([A-Za-z_\\][\w\\]*)"),
+                s(r"\b([A-Za-z_\\][\w\\]*)\s+&?\$@R@\b"),
+            ],
             "",
         ),
         Language::Lua | Language::Luau => pats(
@@ -164,12 +237,20 @@ fn build_local_receiver_type_patterns(language: Language, r: &str) -> Vec<Arc<Re
             "",
         ),
         Language::R => pats(&[s(r"\b@R@\b\s*(?:<-|<<-|=)\s*([A-Z][\w.]*)\$new\b")], ""),
-        Language::Pascal => pats(&[s(r"\b@R@\b\s*:\s*([A-Z][\w]*)"), s(r"\b@R@\b\s*:=\s*([A-Z][\w.]*)\.Create\b")], ""),
+        Language::Pascal => pats(
+            &[
+                s(r"\b@R@\b\s*:\s*([A-Z][\w]*)"),
+                s(r"\b@R@\b\s*:=\s*([A-Z][\w.]*)\.Create\b"),
+            ],
+            "",
+        ),
         Language::Cfml | Language::CfScript => {
             let mut v = pats(
                 &[
                     s(r"\b@R@\b\s*=\s*new\s+([A-Za-z_][\w.]*)"),
-                    s(r#"\b@R@\b\s*=\s*[Cc]reate[Oo]bject\s*\(\s*["']component["']\s*,\s*["']([\w.]+)["']"#),
+                    s(
+                        r#"\b@R@\b\s*=\s*[Cc]reate[Oo]bject\s*\(\s*["']component["']\s*,\s*["']([\w.]+)["']"#,
+                    ),
                     s(r#"\b@R@\b\s*=\s*[Cc]reate[Oo]bject\s*\(\s*["']([\w.]+)["']\s*\)"#),
                     s(r"\b([A-Z][\w.]*)\s+@R@\b\s*[=;,)]"),
                 ],
@@ -194,7 +275,10 @@ fn php_property_type_patterns(r: &str) -> Rc<Vec<Arc<Re>>> {
     memo_patterns(format!("php-prop|{r}"), || {
         pats(
             &[
-                at(r"\b(?:(?:private|protected|public|readonly|static|final)(?:\(set\))?\s+)+\??([A-Za-z_\\][\w\\]*)\s+&?\$@R@\b", r),
+                at(
+                    r"\b(?:(?:private|protected|public|readonly|static|final)(?:\(set\))?\s+)+\??([A-Za-z_\\][\w\\]*)\s+&?\$@R@\b",
+                    r,
+                ),
                 at(r"\$this->@R@\b\s*=\s*new\s+([A-Za-z_\\][\w\\]*)", r),
             ],
             "",
@@ -231,12 +315,125 @@ pub struct GoReceiverDecl {
     pub valued: Tri<GoTypeText>,
 }
 
+/// Pascal receiver-scan extras. They die with the resolution context.
+#[derive(Default)]
+struct PascalInferExtra {
+    pointees: RefCell<HashMap<String, Option<String>>>,
+    spans: RefCell<HashMap<String, Vec<(usize, usize)>>>,
+    headers: RefCell<HashMap<String, Vec<usize>>>,
+}
+
+/// The 0-based line of the routine header at or above `call_idx` (`procedure TFoo.Bar`).
+fn pascal_routine_header_index(
+    file_path: &str,
+    lines: &[String],
+    call_idx: usize,
+    ctx: &Ctx,
+) -> usize {
+    let extra = ctx.memo::<PascalInferExtra>();
+    let headers = {
+        let mut map = extra.headers.borrow_mut();
+        if let Some(hit) = map.get(file_path) {
+            hit.clone()
+        } else {
+            let header = re!(
+                r"^(?:class\s+)?(?:procedure|function|constructor|destructor|operator)\s+[A-Za-z_]",
+                "i"
+            );
+            let found: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| header.is_match(line))
+                .map(|(i, _)| i)
+                .collect();
+            map.insert(file_path.to_string(), found.clone());
+            found
+        }
+    };
+    let mut lo: i64 = 0;
+    let mut hi = headers.len() as i64 - 1;
+    let mut hit = 0usize;
+    while lo <= hi {
+        let mid = ((lo + hi) >> 1) as usize;
+        if headers[mid] <= call_idx {
+            hit = headers[mid];
+            lo = mid as i64 + 1;
+        } else {
+            hi = mid as i64 - 1;
+        }
+    }
+    hit
+}
+
+/// The class a Pascal pointer or class-reference type stands for
+/// (`PDBObject = ^TDBObject`, `TSynLogClass = class of TSynLog`).
+fn pascal_pointee(type_name: &str, ctx: &Ctx) -> Option<String> {
+    let extra = ctx.memo::<PascalInferExtra>();
+    let lower = js_lower(type_name);
+    if let Some(hit) = extra.pointees.borrow().get(&lower).cloned() {
+        return hit;
+    }
+    let mut pointee = None;
+    let alias = re!(r"=\s*(?:\^|class\s+of\b)\s*([A-Za-z_]\w*)", "i");
+    for n in ctx.get_nodes_by_lower_name(&lower).iter() {
+        if n.language != Language::Pascal || n.kind != NodeKind::TypeAlias {
+            continue;
+        }
+        let raw = ctx.get_file_lines(&n.file_path).and_then(|lines| {
+            (n.start_line as usize)
+                .checked_sub(1)
+                .and_then(|i| lines.get(i).cloned())
+        });
+        let line = re!(r"//.*$|\{[^}]*\}", "g").replace_all_str(raw.as_deref().unwrap_or(""), " ");
+        let captured = alias.captures(&line).and_then(|c| c.text(1).map(str::to_string));
+        if captured.is_some() {
+            pointee = captured;
+            break;
+        }
+    }
+    extra.pointees.borrow_mut().insert(lower, pointee.clone());
+    pointee
+}
+
+/// Lines inside a Pascal routine nested in another that the scan from `start_idx` is not inside.
+/// What that routine declares is its own.
+fn pascal_nested_spans(file_path: &str, start_idx: usize, ctx: &Ctx) -> Vec<(usize, usize)> {
+    let extra = ctx.memo::<PascalInferExtra>();
+    let key = format!("{file_path}|{start_idx}");
+    if let Some(hit) = extra.spans.borrow().get(&key).cloned() {
+        return hit;
+    }
+    let mut spans = Vec::new();
+    for n in ctx.get_nodes_in_file(file_path).iter() {
+        if n.kind != NodeKind::Function
+            || n.language != Language::Pascal
+            || !n.qualified_name.contains("::")
+        {
+            continue;
+        }
+        let start = (n.start_line as usize).saturating_sub(1);
+        let end = (n.end_line as usize).saturating_sub(1);
+        if start > start_idx || end < start_idx {
+            spans.push((start, end));
+        }
+    }
+    extra.spans.borrow_mut().insert(key, spans.clone());
+    spans
+}
+
 /// Infer a receiver's type from its local declaration or initializer in the enclosing function.
-pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &Ctx, mut decl: Option<&mut GoReceiverDecl>) -> Option<String> {
+pub fn infer_local_receiver_type(
+    receiver_name: &str,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+    mut decl: Option<&mut GoReceiverDecl>,
+) -> Option<String> {
     let mut scan_receiver = receiver_name.to_string();
     let mut component_scoped = false;
     if matches!(r.language, Language::Cfml | Language::CfScript) {
-        if let Some(scoped) = re!(r"^(variables|this|local|arguments)\.(.+)$", "i").captures(receiver_name) {
+        if let Some(scoped) =
+            re!(r"^(variables|this|local|arguments)\.(.+)$", "i").captures(receiver_name)
+        {
             scan_receiver = scoped.text(2).unwrap_or("").to_string();
             let scope = scoped.text(1).unwrap_or("").to_lowercase();
             component_scoped = scope == "variables" || scope == "this";
@@ -263,7 +460,11 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
                 d.asserted = asserted;
                 return Some(normalize_inferred_type_name(&written).unwrap_or(written));
             }
-            let local = if re!(r"^[A-Za-z_]\w*$").is_match(&scan_receiver) { go_local_decl(&scan_receiver, r, ctx) } else { None };
+            let local = if re!(r"^[A-Za-z_]\w*$").is_match(&scan_receiver) {
+                go_local_decl(&scan_receiver, r, ctx)
+            } else {
+                None
+            };
             let ty = local.as_ref().and_then(|l| l.ty.clone());
             if let Some(ty) = ty {
                 let named = go_named_type(&ty);
@@ -288,7 +489,10 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
             // package hands it out (`c, _ := net.Dial(…)`) or a project function returns it
             // (`*os.File`, `http.RoundTripper`, a `reflect.Value`): a guess by the method's name
             // took a namesake's (#1954).
-            if let Some(valued) = local.as_ref().and_then(|l| go_call_value_type(l, &r.file_path, ctx)) {
+            if let Some(valued) = local
+                .as_ref()
+                .and_then(|l| go_call_value_type(l, &r.file_path, ctx))
+            {
                 if !valued.is_undefined() {
                     let named = valued.as_value().and_then(|v| go_named_type(&v.text));
                     let Some(named) = named else {
@@ -304,7 +508,11 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
         }
     }
     let escaped = escape_regex(&scan_receiver);
-    let patterns = if php_property { php_property_type_patterns(&escaped) } else { local_receiver_type_patterns(r.language, &escaped) };
+    let patterns = if php_property {
+        php_property_type_patterns(&escaped)
+    } else {
+        local_receiver_type_patterns(r.language, &escaped)
+    };
     if patterns.is_empty() {
         return None;
     }
@@ -313,20 +521,81 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
         return None;
     }
     let call_idx = (r.line as usize).saturating_sub(1).min(lines.len() - 1);
-    let start_idx = if component_scoped { 0 } else { (enclosing_scope_start_line(r, ctx) as usize).saturating_sub(1) };
+    let start_idx = if component_scoped {
+        0
+    } else {
+        (enclosing_scope_start_line(r, ctx) as usize).saturating_sub(1)
+    };
+    // A Pascal routine nested in another declares its names for itself. The calling
+    // routine's own name lists count (`Doc, Doc2: TDocVariantData`); another routine's do not.
+    let nested_spans = if r.language == Language::Pascal {
+        pascal_nested_spans(&r.file_path, start_idx, ctx)
+    } else {
+        Vec::new()
+    };
+    let own_from: i64 = if r.language == Language::Pascal {
+        start_idx.max(pascal_routine_header_index(
+            &r.file_path,
+            &lines,
+            call_idx,
+            ctx,
+        )) as i64
+    } else {
+        -1
+    };
+    let listed = (own_from >= 0).then(|| {
+        Re::cached(
+            &format!(r"\b{escaped}\b(?:\s*,\s*[A-Za-z_]\w*)+\s*:\s*([A-Z][\w]*)"),
+            "",
+        )
+    });
     let last_raw: RefCell<Option<String>> = RefCell::new(None);
     let match_line = |i: usize| -> Option<String> {
         let line = lines.get(i)?;
-        if line.is_empty() || (line.len() > 10_000 && utf16_len(line) > 10_000) {
+        if line.is_empty()
+            || nested_spans
+                .iter()
+                .any(|&(start, end)| i >= start && i <= end)
+        {
             return None;
         }
+        if line.len() > 10_000 && utf16_len(line) > 10_000 {
+            return None;
+        }
+        let accept = |t: &str| -> Option<String> {
+            let mut ty = if r.language == Language::Java {
+                super::java_receiver::java_type_name(t)
+            } else {
+                normalize_inferred_type_name(t)
+            };
+            if r.language == Language::Pascal {
+                if let Some(name) = ty.as_ref() {
+                    if let Some(pointee) = pascal_pointee(name, ctx) {
+                        ty = Some(pointee);
+                    }
+                }
+            }
+            ty.map(|ty| {
+                *last_raw.borrow_mut() = Some(t.to_string());
+                ty
+            })
+        };
         for re in patterns.iter() {
             if let Some(m) = re.captures(line) {
                 if let Some(t) = m.text(1).filter(|t| !t.is_empty()) {
-                    let ty = if r.language == Language::Java { super::java_receiver::java_type_name(t) } else { normalize_inferred_type_name(t) };
-                    if let Some(ty) = ty {
-                        *last_raw.borrow_mut() = Some(t.to_string());
+                    if let Some(ty) = accept(t) {
                         return Some(ty);
+                    }
+                }
+            }
+        }
+        if i as i64 >= own_from {
+            if let Some(re) = &listed {
+                if let Some(m) = re.captures(line) {
+                    if let Some(t) = m.text(1).filter(|t| !t.is_empty()) {
+                        if let Some(ty) = accept(t) {
+                            return Some(ty);
+                        }
                     }
                 }
             }
@@ -334,64 +603,97 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
         None
     };
     if !component_scoped {
-        let key = format!("{}|{}|{}|{}", r.file_path, start_idx, r.language.as_str(), scan_receiver);
-        let existing = ctx.memo::<InferScanMemo>().lookup(&key);
-        let Some(state) = existing else {
-            let mut i = call_idx as i64;
-            while i >= start_idx as i64 {
+        let key = format!(
+            "{}|{}|{}|{}",
+            r.file_path,
+            start_idx,
+            r.language.as_str(),
+            scan_receiver
+        );
+        // query(hi) over [lo..hi] under one memo key.
+        let mut scan = |state_key: String, lo: usize, hi: usize| -> Option<String> {
+            let existing = ctx.memo::<InferScanMemo>().lookup(&state_key);
+            let Some(state) = existing else {
+                let mut i = hi as i64;
+                while i >= lo as i64 {
+                    if let Some(ty) = match_line(i as usize) {
+                        let raw = last_raw.borrow().clone();
+                        ctx.memo::<InferScanMemo>().store(
+                            state_key,
+                            Rc::new(RefCell::new(InferScanState {
+                                hi,
+                                ans_idx: i,
+                                ans_type: Some(ty.clone()),
+                                ans_raw: raw.clone(),
+                            })),
+                        );
+                        if let Some(d) = decl.as_deref_mut() {
+                            d.raw = raw;
+                            d.line = Some(i as u32 + 1);
+                        }
+                        return Some(ty);
+                    }
+                    i -= 1;
+                }
+                ctx.memo::<InferScanMemo>().store(
+                    state_key,
+                    Rc::new(RefCell::new(InferScanState {
+                        hi,
+                        ans_idx: -1,
+                        ans_type: None,
+                        ans_raw: None,
+                    })),
+                );
+                return None;
+            };
+            let state_hi = state.borrow().hi;
+            if hi >= state_hi {
+                let mut i = hi;
+                while i > state_hi {
+                    if let Some(ty) = match_line(i) {
+                        let mut s = state.borrow_mut();
+                        s.ans_idx = i as i64;
+                        s.ans_type = Some(ty);
+                        s.ans_raw = last_raw.borrow().clone();
+                        break;
+                    }
+                    i -= 1;
+                }
+                let mut s = state.borrow_mut();
+                s.hi = hi;
+                if s.ans_idx < lo as i64 {
+                    return None;
+                }
+                if let Some(d) = decl.as_deref_mut() {
+                    d.raw = s.ans_raw.clone();
+                    d.line = Some(s.ans_idx as u32 + 1);
+                }
+                return s.ans_type.clone();
+            }
+            let mut i = hi as i64;
+            while i >= lo as i64 {
                 if let Some(ty) = match_line(i as usize) {
-                    let raw = last_raw.borrow().clone();
-                    ctx.memo::<InferScanMemo>().store(
-                        key,
-                        Rc::new(RefCell::new(InferScanState { hi: call_idx, ans_idx: i, ans_type: Some(ty.clone()), ans_raw: raw.clone() })),
-                    );
-                    if let Some(d) = decl {
-                        d.raw = raw;
+                    if let Some(d) = decl.as_deref_mut() {
+                        d.raw = last_raw.borrow().clone();
                         d.line = Some(i as u32 + 1);
                     }
                     return Some(ty);
                 }
                 i -= 1;
             }
-            ctx.memo::<InferScanMemo>().store(key, Rc::new(RefCell::new(InferScanState { hi: call_idx, ans_idx: -1, ans_type: None, ans_raw: None })));
-            return None;
+            None
         };
-        let hi = state.borrow().hi;
-        if call_idx >= hi {
-            let mut i = call_idx;
-            while i > hi {
-                if let Some(ty) = match_line(i) {
-                    let mut s = state.borrow_mut();
-                    s.ans_idx = i as i64;
-                    s.ans_type = Some(ty);
-                    s.ans_raw = last_raw.borrow().clone();
-                    break;
-                }
-                i -= 1;
+        // A Pascal routine's own lines, where its name lists count, are scanned under a key of
+        // their own. The lines above it stay on the shared key.
+        if own_from >= 0 {
+            let own_at = own_from as usize;
+            let own = scan(format!("{key}|{own_from}"), own_at, call_idx);
+            if own.is_some() || own_at <= start_idx {
+                return own;
             }
-            let mut s = state.borrow_mut();
-            s.hi = call_idx;
-            if s.ans_idx < start_idx as i64 {
-                return None;
-            }
-            if let Some(d) = decl {
-                d.raw = s.ans_raw.clone();
-                d.line = Some(s.ans_idx as u32 + 1);
-            }
-            return s.ans_type.clone();
+            return scan(key, start_idx, own_at - 1);
         }
-        let mut i = call_idx as i64;
-        while i >= start_idx as i64 {
-            if let Some(ty) = match_line(i as usize) {
-                if let Some(d) = decl {
-                    d.raw = last_raw.borrow().clone();
-                    d.line = Some(i as u32 + 1);
-                }
-                return Some(ty);
-            }
-            i -= 1;
-        }
-        return None;
+        return scan(key, start_idx, call_idx);
     }
     let mut i = call_idx as i64;
     while i >= start_idx as i64 {
@@ -412,14 +714,20 @@ pub fn infer_local_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &C
 }
 
 /// `$this->prop = $var;` — the type `$var` was declared with, scanning back from the assignment.
-fn infer_php_assigned_property_type(escaped_prop: &str, lines: &[String], call_idx: usize) -> Option<String> {
+fn infer_php_assigned_property_type(
+    escaped_prop: &str,
+    lines: &[String],
+    call_idx: usize,
+) -> Option<String> {
     let assign = Re::cached(&format!(r"\$this->{escaped_prop}\b\s*=\s*\$(\w+)\b"), "");
     let assign_at = |i: usize| -> Option<String> {
         let line = lines.get(i)?;
         if line.is_empty() || (line.len() > 10_000 && utf16_len(line) > 10_000) {
             return None;
         }
-        assign.captures(line).and_then(|m| m.text(1).map(|s| s.to_string()))
+        assign
+            .captures(line)
+            .and_then(|m| m.text(1).map(|s| s.to_string()))
     };
     let mut found: Option<(usize, String)> = None;
     for i in (0..=call_idx.min(lines.len().saturating_sub(1))).rev() {
@@ -464,18 +772,29 @@ memo_map!(ImportedTypeFileMemo, String, Option<String>);
 
 /// The file the (possibly dotted) type `written` is imported from, in a TS/JS reference's file.
 pub fn ts_imported_type_file(written: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
-    let name = re!(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*").find(codegraph_types::jscompat::js_trim(written))?.as_str().to_string();
+    let name = re!(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
+        .find(codegraph_types::jscompat::js_trim(written))?
+        .as_str()
+        .to_string();
     let key = format!("{}\0{}", r.file_path, name);
     memoized::<ImportedTypeFileMemo>(ctx, key, || {
         let binding = name.split('.').next().unwrap_or("");
-        if !ctx.get_import_mappings(&r.file_path, r.language).iter().any(|i| i.local_name == binding) {
+        if !ctx
+            .get_import_mappings(&r.file_path, r.language)
+            .iter()
+            .any(|i| i.local_name == binding)
+        {
             return None;
         }
         let mut probe = r.clone();
         probe.reference_name = name.clone();
         probe.reference_kind = ReferenceKind::Edge(EdgeKind::References);
-        let node = crate::import_resolver::resolve_import(&probe, ctx).and_then(|i| ctx.node_by_id(&i.target_node_id))?;
-        if node.kind != NodeKind::File && node.file_path != r.file_path && !is_merged_ambient_declaration(&node, ctx) {
+        let node = crate::import_resolver::resolve_import(&probe, ctx)
+            .and_then(|i| ctx.node_by_id(&i.target_node_id))?;
+        if node.kind != NodeKind::File
+            && node.file_path != r.file_path
+            && !is_merged_ambient_declaration(&node, ctx)
+        {
             Some(node.file_path.clone())
         } else {
             None
@@ -485,11 +804,18 @@ pub fn ts_imported_type_file(written: &str, r: &UnresolvedRef, ctx: &Ctx) -> Opt
 
 /// The module `type_name` was imported from in the reference's file.
 pub fn imported_type_source(type_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
-    ctx.get_import_mappings(&r.file_path, r.language).iter().find(|i| i.local_name == type_name).map(|i| i.source.clone())
+    ctx.get_import_mappings(&r.file_path, r.language)
+        .iter()
+        .find(|i| i.local_name == type_name)
+        .map(|i| i.source.clone())
 }
 
 /// A Java field declared as `Type name;` in the class around the reference.
-pub fn infer_java_field_receiver_type(receiver_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
+pub fn infer_java_field_receiver_type(
+    receiver_name: &str,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<String> {
     let in_file = ctx.get_nodes_in_file(&r.file_path);
     if in_file.is_empty() {
         return None;
@@ -497,30 +823,84 @@ pub fn infer_java_field_receiver_type(receiver_name: &str, r: &UnresolvedRef, ct
     if r.language == Language::Java {
         return super::java_receiver::java_enclosing_field_type(receiver_name, r, &in_file);
     }
-    let mut enclosing: Option<&NodeRef> = None;
+    let mut enclosing: Option<NodeRef> = None;
     for n in in_file.iter() {
         if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) || n.language != r.language {
             continue;
         }
-        if n.start_line <= r.line && n.end_line >= r.line && enclosing.map_or(true, |e| n.start_line >= e.start_line) {
-            enclosing = Some(n);
+        if n.start_line <= r.line
+            && n.end_line >= r.line
+            && enclosing
+                .as_ref()
+                .map_or(true, |e| n.start_line >= e.start_line)
+        {
+            enclosing = Some(n.clone());
         }
     }
-    let enclosing = enclosing?;
+    let mut enclosing = enclosing?;
+    // An object expression sees the class it is written in when it does not
+    // declare the property itself.
+    while r.language == Language::Kotlin && is_anonymous_class(&enclosing) {
+        let own = in_file.iter().find(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Field | NodeKind::Constant | NodeKind::Variable
+            ) && n.qualified_name == format!("{}::{receiver_name}", enclosing.qualified_name)
+        });
+        if let Some(own) = own {
+            return super::kotlin_receiver::infer_kotlin_property_type(
+                receiver_name,
+                Some(own),
+                &enclosing,
+                &in_file,
+                r,
+                ctx,
+            );
+        }
+        let mut outer: Option<NodeRef> = None;
+        for n in in_file.iter() {
+            if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) || n.language != r.language
+            {
+                continue;
+            }
+            if n.start_line < enclosing.start_line
+                && n.end_line >= r.line
+                && outer
+                    .as_ref()
+                    .map_or(true, |o| n.start_line >= o.start_line)
+            {
+                outer = Some(n.clone());
+            }
+        }
+        enclosing = outer?;
+    }
+    let enclosing_anon = anonymous_depth(&enclosing.qualified_name);
     // Kotlin indexes a `val` property as a `constant`, a `var` as a `field`, and a
-    // companion-object property as a `variable`.
+    // companion-object property as a `variable`. One of an object expression in
+    // the class's code is that object's.
     let field = in_file.iter().find(|n| {
-        (n.kind == NodeKind::Field || (r.language == Language::Kotlin && matches!(n.kind, NodeKind::Constant | NodeKind::Variable)))
+        (n.kind == NodeKind::Field
+            || (r.language == Language::Kotlin
+                && matches!(n.kind, NodeKind::Constant | NodeKind::Variable)))
             && n.name == receiver_name
             && n.language == r.language
             && n.start_line >= enclosing.start_line
             && n.end_line <= enclosing.end_line
+            && !(r.language == Language::Kotlin
+                && anonymous_depth(&n.qualified_name) > enclosing_anon)
     });
     // Kotlin keeps no signature on a property, and a primary-constructor property (`class A(private
     // val repo: Repo)`) is no node at all, so the declared type has to be read from the declaration
     // itself.
     if r.language == Language::Kotlin {
-        return super::kotlin_receiver::infer_kotlin_property_type(receiver_name, field.map(|f| &**f), enclosing, &in_file, r, ctx);
+        return super::kotlin_receiver::infer_kotlin_property_type(
+            receiver_name,
+            field.map(|f| &**f),
+            &enclosing,
+            &in_file,
+            r,
+            ctx,
+        );
     }
     field_signature_type(field?)
 }
@@ -539,10 +919,19 @@ pub fn field_signature_type(field: &Node) -> Option<String> {
     if field.language == Language::Java {
         return super::java_receiver::java_type_name(type_raw);
     }
-    let no_generics = codegraph_types::jscompat::js_trim(&re!(r"<[^>]*>", "g").replace_all_str(type_raw, "")).to_string();
-    let no_array = re!(r"\.\.\.$").replace_first(&re!(r"\[\s*\]", "g").replace_all_str(&no_generics, ""), |_| String::new());
+    let no_generics =
+        codegraph_types::jscompat::js_trim(&re!(r"<[^>]*>", "g").replace_all_str(type_raw, ""))
+            .to_string();
+    let no_array = re!(r"\.\.\.$").replace_first(
+        &re!(r"\[\s*\]", "g").replace_all_str(&no_generics, ""),
+        |_| String::new(),
+    );
     let no_array = codegraph_types::jscompat::js_trim(&no_array).to_string();
-    let last = re!(r"[.\s]+").split(&no_array).into_iter().filter(|s| !s.is_empty()).last()?;
+    let last = re!(r"[.\s]+")
+        .split(&no_array)
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .last()?;
     if !re!(r"^[A-Z]").is_match(last) {
         return None;
     }
@@ -577,18 +966,38 @@ type AwaitedFiles = Bounded<Option<Rc<RefCell<AwaitedFile>>>, 256>;
 type AwaitedTypes = Bounded<Option<AwaitedType>, 8192>;
 
 /// `const x = await make(); x.run()` — the class `make()` is declared to return, as a type to resolve `run` on.
-pub fn infer_esm_awaited_call_type(receiver_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<AwaitedType> {
+pub fn infer_esm_awaited_call_type(
+    receiver_name: &str,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<AwaitedType> {
     if !is_js_ident(receiver_name) {
         return None;
     }
     let file = ctx.memo::<AwaitedFiles>().get_or(&r.file_path, false, || {
-        let source = ctx.read_file(&r.file_path).map(|s| s.to_string()).unwrap_or_default();
-        let names: HashSet<String> =
-            re!(r"\b(?:const|let|var)\s+([\w$]+)\s*=\s*await\s+[\w$]+\s*\(", "g").captures_iter(&source).filter_map(|m| m.text(1).map(|s| s.to_string())).collect();
+        let source = ctx
+            .read_file(&r.file_path)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let names: HashSet<String> = re!(
+            r"\b(?:const|let|var)\s+([\w$]+)\s*=\s*await\s+[\w$]+\s*\(",
+            "g"
+        )
+        .captures_iter(&source)
+        .filter_map(|m| m.text(1).map(|s| s.to_string()))
+        .collect();
         if names.is_empty() {
             None
         } else {
-            Some(Rc::new(RefCell::new(AwaitedFile { code: Vec::new(), ready: false, offsets: Vec::new(), names, scopes: Vec::new(), declarations: HashMap::new(), source })))
+            Some(Rc::new(RefCell::new(AwaitedFile {
+                code: Vec::new(),
+                ready: false,
+                offsets: Vec::new(),
+                names,
+                scopes: Vec::new(),
+                declarations: HashMap::new(),
+                source,
+            })))
         }
     })?;
     if !file.borrow().names.contains(receiver_name) {
@@ -596,22 +1005,34 @@ pub fn infer_esm_awaited_call_type(receiver_name: &str, r: &UnresolvedRef, ctx: 
     }
     if !file.borrow().ready {
         let mut f = file.borrow_mut();
-        let code_text = blank_string_contents(&strip_comments_for_regex(&f.source, "typescript"), None);
-        let names: HashSet<String> = re!(r"\b(?:const|let|var)\s+([\w$]+)\s*=\s*await\s+[\w$]+\s*\(", "g")
-            .captures_iter(&code_text)
-            .filter_map(|m| m.text(1).map(|s| s.to_string()))
-            .collect();
+        let code_text =
+            blank_string_contents(&strip_comments_for_regex(&f.source, "typescript"), None);
+        let names: HashSet<String> = re!(
+            r"\b(?:const|let|var)\s+([\w$]+)\s*=\s*await\s+[\w$]+\s*\(",
+            "g"
+        )
+        .captures_iter(&code_text)
+        .filter_map(|m| m.text(1).map(|s| s.to_string()))
+        .collect();
         let units: Vec<u16> = code_text.encode_utf16().collect();
         let bu = super::object_literal::ByteUnits::new(&code_text);
         let mut offsets = vec![0usize];
-        let mut scopes = vec![Scope { start: -1, end: units.len(), parent: -1 }];
+        let mut scopes = vec![Scope {
+            start: -1,
+            end: units.len(),
+            parent: -1,
+        }];
         let mut stack: Vec<usize> = vec![0];
         for (i, &c) in units.iter().enumerate() {
             if c == 10 {
                 offsets.push(i + 1);
             }
             if c == 123 {
-                scopes.push(Scope { start: i as i64, end: units.len(), parent: *stack.last().unwrap() as i64 });
+                scopes.push(Scope {
+                    start: i as i64,
+                    end: units.len(),
+                    parent: *stack.last().unwrap() as i64,
+                });
                 stack.push(scopes.len() - 1);
             } else if c == 125 && stack.len() > 1 {
                 let s = stack.pop().unwrap();
@@ -625,7 +1046,10 @@ pub fn infer_esm_awaited_call_type(receiver_name: &str, r: &UnresolvedRef, ctx: 
                 continue;
             }
             let g = m.get(0).unwrap();
-            declarations.entry(name).or_default().push((bu.at(g.start()), utf16_len(g.as_str())));
+            declarations
+                .entry(name)
+                .or_default()
+                .push((bu.at(g.start()), utf16_len(g.as_str())));
         }
         f.code = units;
         f.ready = true;
@@ -638,14 +1062,33 @@ pub fn infer_esm_awaited_call_type(receiver_name: &str, r: &UnresolvedRef, ctx: 
         }
     }
     let key = format!("{}|{}|{}|{}", r.file_path, r.line, r.column, receiver_name);
-    ctx.memo::<AwaitedTypes>().get_or(&key, false, || resolve_awaited_call_type(receiver_name, &file.borrow(), r, ctx))
+    ctx.memo::<AwaitedTypes>().get_or(&key, false, || {
+        resolve_awaited_call_type(receiver_name, &file.borrow(), r, ctx)
+    })
 }
 
-fn resolve_awaited_call_type(receiver_name: &str, file: &AwaitedFile, r: &UnresolvedRef, ctx: &Ctx) -> Option<AwaitedType> {
-    let unknown = || Some(AwaitedType { name: None, file_path: r.file_path.clone() });
-    let end = file.offsets.get(r.line as usize - 1).copied().unwrap_or(file.code.len()) + r.column as usize;
+fn resolve_awaited_call_type(
+    receiver_name: &str,
+    file: &AwaitedFile,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<AwaitedType> {
+    let unknown = || {
+        Some(AwaitedType {
+            name: None,
+            file_path: r.file_path.clone(),
+        })
+    };
+    let end = file
+        .offsets
+        .get(r.line as usize - 1)
+        .copied()
+        .unwrap_or(file.code.len())
+        + r.column as usize;
     let code_len = file.code.len();
-    let text = |a: usize, b: usize| String::from_utf16_lossy(&file.code[a.min(code_len)..b.min(code_len).max(a.min(code_len))]);
+    let text = |a: usize, b: usize| {
+        String::from_utf16_lossy(&file.code[a.min(code_len)..b.min(code_len).max(a.min(code_len))])
+    };
     let _code = text(0, end);
     let escaped = escape_regex(receiver_name);
     let scope_at = |offset: i64| -> usize {
@@ -674,7 +1117,12 @@ fn resolve_awaited_call_type(receiver_name: &str, file: &AwaitedFile, r: &Unreso
         }
         false
     };
-    let binding = file.declarations.get(receiver_name)?.iter().rev().find(|(index, _)| *index < end && visible_at(*index, end))?;
+    let binding = file
+        .declarations
+        .get(receiver_name)?
+        .iter()
+        .rev()
+        .find(|(index, _)| *index < end && visible_at(*index, end))?;
     let init = text(binding.0 + binding.1, end);
     if !re!(r"^await\b").is_match(&init) {
         return None;
@@ -699,7 +1147,11 @@ fn resolve_awaited_call_type(receiver_name: &str, file: &AwaitedFile, r: &Unreso
         return unknown();
     }
     let rest = tail;
-    if Re::cached(&format!(r"\b(?:const|let|var|function|class)\s+(?:{escaped}\b|\{{[^}}]*\b{escaped}\b)"), "").is_match(rest)
+    if Re::cached(
+        &format!(r"\b(?:const|let|var|function|class)\s+(?:{escaped}\b|\{{[^}}]*\b{escaped}\b)"),
+        "",
+    )
+    .is_match(rest)
         || Re::cached(&format!(r"\b{escaped}\s*=(?!=)"), "").is_match(rest)
         || has_parameter_binding(rest, &escaped)
     {
@@ -715,11 +1167,16 @@ fn resolve_awaited_call_type(receiver_name: &str, file: &AwaitedFile, r: &Unreso
         matches!(n.kind, NodeKind::Function | NodeKind::Method)
             && n.start_line <= binding_line
             && n.end_line >= binding_line
-            && n.signature.as_ref().is_some_and(|sig| has_parameter_binding(&format!("{sig} {{"), &callee_escaped))
+            && n.signature
+                .as_ref()
+                .is_some_and(|sig| has_parameter_binding(&format!("{sig} {{"), &callee_escaped))
     }) {
         return unknown();
     }
-    let imported = ctx.get_import_mappings(&r.file_path, r.language).iter().any(|m| m.local_name == callee);
+    let imported = ctx
+        .get_import_mappings(&r.file_path, r.language)
+        .iter()
+        .any(|m| m.local_name == callee);
     let declaring: Option<NodeRef> = if imported {
         if import_shadowed_at(&callee, &binding_ref, ctx) {
             return unknown();
@@ -727,17 +1184,31 @@ fn resolve_awaited_call_type(receiver_name: &str, file: &AwaitedFile, r: &Unreso
         let mut probe = binding_ref.clone();
         probe.reference_name = callee.clone();
         probe.reference_kind = ReferenceKind::Edge(EdgeKind::Calls);
-        crate::import_resolver::resolve_import(&probe, ctx).and_then(|i| ctx.node_by_id(&i.target_node_id))
+        crate::import_resolver::resolve_import(&probe, ctx)
+            .and_then(|i| ctx.node_by_id(&i.target_node_id))
     } else {
         let local: Vec<NodeRef> = ctx
             .get_nodes_by_name(&callee)
             .iter()
-            .filter(|n| n.kind == NodeKind::Function && n.file_path == r.file_path && is_esm_family(n.language) && is_lexically_reachable(n, &binding_ref, ctx))
+            .filter(|n| {
+                n.kind == NodeKind::Function
+                    && n.file_path == r.file_path
+                    && is_esm_family(n.language)
+                    && is_lexically_reachable(n, &binding_ref, ctx)
+            })
             .cloned()
             .collect();
-        if local.len() == 1 { Some(local[0].clone()) } else { None }
+        if local.len() == 1 {
+            Some(local[0].clone())
+        } else {
+            None
+        }
     };
-    let Some(declaring) = declaring.filter(|d| d.kind == NodeKind::Function && d.signature.is_some()) else { return unknown() };
+    let Some(declaring) =
+        declaring.filter(|d| d.kind == NodeKind::Function && d.signature.is_some())
+    else {
+        return unknown();
+    };
     if !imported {
         let before_binding = text(0, binding.0);
         let shadows = Re::cached(&format!(r"\b(?:const|let|var)\s+{callee_escaped}\b"), "g");
@@ -748,21 +1219,36 @@ fn resolve_awaited_call_type(receiver_name: &str, file: &AwaitedFile, r: &Unreso
                 continue;
             }
             let line = text(0, index).matches('\n').count() as u32 + 1;
-            if line != declaring.start_line || (index - file.offsets[line as usize - 1]) as u32 > declaring.start_column {
+            if line != declaring.start_line
+                || (index - file.offsets[line as usize - 1]) as u32 > declaring.start_column
+            {
                 return unknown();
             }
         }
     }
     let signature = declaring.signature.as_ref().unwrap();
     let after_paren = &signature[signature.rfind(')').map_or(0, |i| i + 1)..];
-    let annotation = re!(r"^\s*:\s*([\s\S]+)$").captures(after_paren).and_then(|c| c.text(1).map(|s| codegraph_types::jscompat::js_trim(s).to_string()));
-    let Some(annotation) = annotation.filter(|a| !a.is_empty()) else { return unknown() };
-    let returned = re!(r"^Promise\s*<\s*([\w$]+)\s*>$").captures(&annotation).and_then(|c| c.text(1).map(|s| s.to_string())).unwrap_or(annotation);
+    let annotation = re!(r"^\s*:\s*([\s\S]+)$")
+        .captures(after_paren)
+        .and_then(|c| {
+            c.text(1)
+                .map(|s| codegraph_types::jscompat::js_trim(s).to_string())
+        });
+    let Some(annotation) = annotation.filter(|a| !a.is_empty()) else {
+        return unknown();
+    };
+    let returned = re!(r"^Promise\s*<\s*([\w$]+)\s*>$")
+        .captures(&annotation)
+        .and_then(|c| c.text(1).map(|s| s.to_string()))
+        .unwrap_or(annotation);
     if !is_js_ident(&returned) {
         return unknown();
     }
     if TS_PRIMITIVE_TYPES.contains(returned.as_str()) {
-        return Some(AwaitedType { name: Some(returned), file_path: declaring.file_path.clone() });
+        return Some(AwaitedType {
+            name: Some(returned),
+            file_path: declaring.file_path.clone(),
+        });
     }
     let mut type_ref = binding_ref.clone();
     type_ref.from_node_id = declaring.id.clone();
@@ -772,24 +1258,43 @@ fn resolve_awaited_call_type(receiver_name: &str, file: &AwaitedFile, r: &Unreso
     type_ref.column = declaring.start_column;
     type_ref.reference_name = returned.clone();
     type_ref.reference_kind = ReferenceKind::Edge(EdgeKind::References);
-    let type_import = ctx.get_import_mappings(&declaring.file_path, declaring.language).iter().any(|m| m.local_name == returned);
-    let resolved = if type_import { crate::import_resolver::resolve_import(&type_ref, ctx) } else { None };
-    let imported_type = resolved.as_ref().and_then(|x| ctx.node_by_id(&x.target_node_id));
+    let type_import = ctx
+        .get_import_mappings(&declaring.file_path, declaring.language)
+        .iter()
+        .any(|m| m.local_name == returned);
+    let resolved = if type_import {
+        crate::import_resolver::resolve_import(&type_ref, ctx)
+    } else {
+        None
+    };
+    let imported_type = resolved
+        .as_ref()
+        .and_then(|x| ctx.node_by_id(&x.target_node_id));
     let type_node: Option<NodeRef> = if resolved.is_some() {
         imported_type.filter(|t| !is_merged_ambient_declaration(t, ctx))
     } else {
         ctx.get_nodes_by_name(&returned)
             .iter()
-            .find(|n| n.file_path == declaring.file_path && is_esm_family(n.language) && matches!(n.kind, NodeKind::Class | NodeKind::Interface))
+            .find(|n| {
+                n.file_path == declaring.file_path
+                    && is_esm_family(n.language)
+                    && matches!(n.kind, NodeKind::Class | NodeKind::Interface)
+            })
             .cloned()
     };
     match type_node {
-        Some(t) if matches!(t.kind, NodeKind::Class | NodeKind::Interface) => Some(AwaitedType { name: Some(t.name.clone()), file_path: t.file_path.clone() }),
+        Some(t) if matches!(t.kind, NodeKind::Class | NodeKind::Interface) => Some(AwaitedType {
+            name: Some(t.name.clone()),
+            file_path: t.file_path.clone(),
+        }),
         _ => unknown(),
     }
 }
 
 #[allow(dead_code)]
 fn _unused(_: &Node) {
-    let _ = (is_lexically_reachable as fn(&Node, &UnresolvedRef, &Ctx) -> bool, is_this_call_in_own_file as fn(&Node, &UnresolvedRef, &Ctx) -> bool);
+    let _ = (
+        is_lexically_reachable as fn(&Node, &UnresolvedRef, &Ctx) -> bool,
+        is_this_call_in_own_file as fn(&Node, &UnresolvedRef, &Ctx) -> bool,
+    );
 }

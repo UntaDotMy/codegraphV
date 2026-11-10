@@ -108,6 +108,7 @@ pub fn describe_synthesized_hop(edge: Option<&Edge>) -> Option<SynthesizedHop> {
                 String::new()
             }
         ),
+        "const-alias" => format!("const alias of {}", quoted("via", "a function")),
         "go-func-field" => format!(
             "func field {}{}",
             quoted("field", "a func field"),

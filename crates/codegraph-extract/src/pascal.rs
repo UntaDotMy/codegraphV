@@ -12,8 +12,8 @@
 //! file as written by its UTF-16 offsets.
 
 use crate::buffers::{
-    build_meta, edge_kind_index, node_kind_index, Arena, BoolFlags, EdgeRow, EmitOut, NodeRow, RefRow, StrRef,
-    Tables, FLAG_IS_EXPORTED, FLAG_IS_STATIC, FUNCTION_REF_CODE, NONE, NONE_STR,
+    build_meta, edge_kind_index, node_kind_index, Arena, BoolFlags, EdgeRow, EmitOut, NodeRow,
+    RefRow, StrRef, Tables, FLAG_IS_EXPORTED, FLAG_IS_STATIC, FUNCTION_REF_CODE, NONE, NONE_STR,
 };
 use crate::docstring::preceding_docstring;
 use crate::ids;
@@ -27,7 +27,10 @@ const MAX_VALUE_REF_NODES: usize = 20_000;
 
 /// PASCAL_NOT_ROUTINES (tree-sitter.ts): bare names never a project routine's call.
 fn is_not_routine(lower: &str) -> bool {
-    matches!(lower, "self" | "result" | "true" | "false" | "nil" | "exit" | "break" | "continue")
+    matches!(
+        lower,
+        "self" | "result" | "true" | "false" | "nil" | "exit" | "break" | "continue"
+    )
 }
 
 /// PASCAL_SYSTEM_NAMES (languages/pascal-system.ts).
@@ -35,23 +38,160 @@ pub fn is_system_name(lower: &str) -> bool {
     static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
-            "abs", "addr", "arctan", "assert", "assigned", "assignfile", "atomiccmpexchange", "atomicdecrement",
-            "atomicexchange", "atomicincrement", "blockread", "blockwrite", "break", "chdir", "chr", "closefile",
-            "concat", "continue", "copy", "cos", "dec", "default", "delete", "dispose", "eof", "eoln", "exclude",
-            "exit", "exp", "fail", "filepos", "filesize", "fillchar", "finalize", "frac", "freemem", "getdir",
-            "getmem", "gettypekind", "halt", "hasweakref", "hi", "high", "inc", "include", "initialize", "insert",
-            "int", "ioresult", "isconstvalue", "ismanagedtype", "length", "ln", "lo", "low", "mkdir", "move", "new",
-            "odd", "ord", "paramcount", "paramstr", "pi", "pred", "ptr", "random", "randomize", "read", "readln",
-            "reallocmem", "returnaddress", "rmdir", "round", "runerror", "setlength", "setstring", "sin", "sizeof",
-            "slice", "sqr", "sqrt", "str", "succ", "swap", "trunc", "typehandle", "typeinfo", "typeof",
-            "uniquestring", "upcase", "val", "vararrayredim", "write", "writeln", "abort", "date", "datetostr",
-            "floattostr", "format", "freeandnil", "inttostr", "lowercase", "now", "pos", "strtodate", "strtofloat",
-            "strtoint", "time", "trim", "uppercase", "ansichar", "ansistring", "boolean", "byte", "bytebool",
-            "cardinal", "char", "comp", "currency", "double", "extended", "int16", "int32", "int64", "int8",
-            "integer", "longbool", "longint", "longword", "nativeint", "nativeuint", "olevariant", "pansichar",
-            "pchar", "pointer", "pwidechar", "rawbytestring", "real", "shortint", "shortstring", "single",
-            "smallint", "string", "uint16", "uint32", "uint64", "uint8", "unicodestring", "utf8string", "variant",
-            "widechar", "widestring", "word", "wordbool",
+            "abs",
+            "addr",
+            "arctan",
+            "assert",
+            "assigned",
+            "assignfile",
+            "atomiccmpexchange",
+            "atomicdecrement",
+            "atomicexchange",
+            "atomicincrement",
+            "blockread",
+            "blockwrite",
+            "break",
+            "chdir",
+            "chr",
+            "closefile",
+            "concat",
+            "continue",
+            "copy",
+            "cos",
+            "dec",
+            "default",
+            "delete",
+            "dispose",
+            "eof",
+            "eoln",
+            "exclude",
+            "exit",
+            "exp",
+            "fail",
+            "filepos",
+            "filesize",
+            "fillchar",
+            "finalize",
+            "frac",
+            "freemem",
+            "getdir",
+            "getmem",
+            "gettypekind",
+            "halt",
+            "hasweakref",
+            "hi",
+            "high",
+            "inc",
+            "include",
+            "initialize",
+            "insert",
+            "int",
+            "ioresult",
+            "isconstvalue",
+            "ismanagedtype",
+            "length",
+            "ln",
+            "lo",
+            "low",
+            "mkdir",
+            "move",
+            "new",
+            "odd",
+            "ord",
+            "paramcount",
+            "paramstr",
+            "pi",
+            "pred",
+            "ptr",
+            "random",
+            "randomize",
+            "read",
+            "readln",
+            "reallocmem",
+            "returnaddress",
+            "rmdir",
+            "round",
+            "runerror",
+            "setlength",
+            "setstring",
+            "sin",
+            "sizeof",
+            "slice",
+            "sqr",
+            "sqrt",
+            "str",
+            "succ",
+            "swap",
+            "trunc",
+            "typehandle",
+            "typeinfo",
+            "typeof",
+            "uniquestring",
+            "upcase",
+            "val",
+            "vararrayredim",
+            "write",
+            "writeln",
+            "abort",
+            "date",
+            "datetostr",
+            "floattostr",
+            "format",
+            "freeandnil",
+            "inttostr",
+            "lowercase",
+            "now",
+            "pos",
+            "strtodate",
+            "strtofloat",
+            "strtoint",
+            "time",
+            "trim",
+            "uppercase",
+            "ansichar",
+            "ansistring",
+            "boolean",
+            "byte",
+            "bytebool",
+            "cardinal",
+            "char",
+            "comp",
+            "currency",
+            "double",
+            "extended",
+            "int16",
+            "int32",
+            "int64",
+            "int8",
+            "integer",
+            "longbool",
+            "longint",
+            "longword",
+            "nativeint",
+            "nativeuint",
+            "olevariant",
+            "pansichar",
+            "pchar",
+            "pointer",
+            "pwidechar",
+            "rawbytestring",
+            "real",
+            "shortint",
+            "shortstring",
+            "single",
+            "smallint",
+            "string",
+            "uint16",
+            "uint32",
+            "uint64",
+            "uint8",
+            "unicodestring",
+            "utf8string",
+            "variant",
+            "widechar",
+            "widestring",
+            "word",
+            "wordbool",
         ]
         .into_iter()
         .collect()
@@ -71,8 +211,14 @@ fn is_word(s: &str) -> bool {
 /// `/^[A-Za-z_]\w*$/`.
 fn is_ascii_ident(s: &str) -> bool {
     let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(is_word_char)
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(is_word_char)
 }
+
+/// A local declared with a routine type written out (`procedure of object`).
+const PASCAL_ROUTINE_TYPE: &str = "procedure";
 
 /// `/^[TI][A-Z]/` — the Delphi type-naming convention.
 fn is_type_like(s: &str) -> bool {
@@ -83,10 +229,18 @@ fn is_type_like(s: &str) -> bool {
 /// PASCAL_DATA_NAME: `/^(?:F[A-Z][a-z]|[TE][A-Z][a-z]|[A-Z][A-Z0-9_]*$)/`.
 fn is_data_name_shape(s: &str) -> bool {
     let b = s.as_bytes();
-    if b.len() >= 3 && (b[0] == b'F' || b[0] == b'T' || b[0] == b'E') && b[1].is_ascii_uppercase() && b[2].is_ascii_lowercase() {
+    if b.len() >= 3
+        && (b[0] == b'F' || b[0] == b'T' || b[0] == b'E')
+        && b[1].is_ascii_uppercase()
+        && b[2].is_ascii_lowercase()
+    {
         return true;
     }
-    !b.is_empty() && b[0].is_ascii_uppercase() && b[1..].iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+    !b.is_empty()
+        && b[0].is_ascii_uppercase()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
 }
 
 /// `/^[a-z][A-Za-z]*$/`.
@@ -128,7 +282,15 @@ fn strip_angles(s: &str) -> String {
 
 /// The lowercase routine keywords a header starts with.
 fn is_routine_keyword(word: &str) -> bool {
-    ["procedure", "function", "constructor", "destructor", "operator"].iter().any(|k| k.eq_ignore_ascii_case(word))
+    [
+        "procedure",
+        "function",
+        "constructor",
+        "destructor",
+        "operator",
+    ]
+    .iter()
+    .any(|k| k.eq_ignore_ascii_case(word))
 }
 
 fn named_children<'t>(node: Node<'t>) -> Vec<Node<'t>> {
@@ -141,7 +303,9 @@ fn find_named<'t>(node: Node<'t>, kind: &str) -> Option<Node<'t>> {
 }
 
 fn last_named<'t>(node: Node<'t>) -> Option<Node<'t>> {
-    node.named_child_count().checked_sub(1).and_then(|i| node.named_child(i))
+    node.named_child_count()
+        .checked_sub(1)
+        .and_then(|i| node.named_child(i))
 }
 
 fn same(a: Option<Node>, b: Node) -> bool {
@@ -184,6 +348,12 @@ struct ScopeView {
     class_qn: Option<String>,
     routine: Option<String>,
     text: Option<usize>,
+}
+
+/// What an assignment target contributes to a paren-less name.
+enum AssignTarget {
+    Mode(&'static str),
+    Name(String),
 }
 
 struct PendingRef {
@@ -244,7 +414,10 @@ impl<'t> Written<'t> {
             }
         }
         bytes.push(text.len());
-        Written { text, map: Some((pre_units, bytes)) }
+        Written {
+            text,
+            map: Some((pre_units, bytes)),
+        }
     }
 
     fn slice(&self, node: Node) -> &'t str {
@@ -252,7 +425,12 @@ impl<'t> Written<'t> {
         match &self.map {
             None => self.text.get(range).unwrap_or(""),
             Some((pre_units, bytes)) => {
-                let at = |b: usize| bytes.get(pre_units[b] as usize).copied().unwrap_or(self.text.len());
+                let at = |b: usize| {
+                    bytes
+                        .get(pre_units[b] as usize)
+                        .copied()
+                        .unwrap_or(self.text.len())
+                };
                 let (s, e) = (at(range.start), at(range.end));
                 self.text.get(s..e.max(s)).unwrap_or("")
             }
@@ -342,8 +520,17 @@ pub fn extract(file_path: &str, source: &str, as_written: &str) -> Result<EmitOu
         return_type: NONE_STR,
         extra_json: NONE_STR,
     });
-    w.nodes.push(Rec { id: file_id, kind: "file", name: base_name.to_string(), qualified_name: file_path.to_string() });
-    w.stack.push(Scope { row: 0, kind: "file", name: base_name.to_string() });
+    w.nodes.push(Rec {
+        id: file_id,
+        kind: "file",
+        name: base_name.to_string(),
+        qualified_name: file_path.to_string(),
+    });
+    w.stack.push(Scope {
+        row: 0,
+        kind: "file",
+        name: base_name.to_string(),
+    });
 
     w.visit_node(root);
     w.flush_fn_ref_candidates();
@@ -353,7 +540,13 @@ pub fn extract(file_path: &str, source: &str, as_written: &str) -> Result<EmitOu
 
     let duration_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let meta = build_meta(&w.tables, w.arena.len(), NONE_STR, duration_ms);
-    Ok(EmitOut { meta, nodes: w.tables.nodes, edges: w.tables.edges, refs: w.tables.refs, arena: w.arena.into_vec() })
+    Ok(EmitOut {
+        meta,
+        nodes: w.tables.nodes,
+        edges: w.tables.edges,
+        refs: w.tables.refs,
+        arena: w.arena.into_vec(),
+    })
 }
 
 fn opt_str(arena: &mut Arena, s: Option<&str>) -> StrRef {
@@ -371,23 +564,47 @@ impl<'t> Walker<'t> {
         node.start_position().row as u32 + 1
     }
     fn col_of(&self, node: Node) -> u32 {
-        util::col16(self.src, &self.line_starts, node.start_position().row, node.start_byte())
+        util::col16(
+            self.src,
+            &self.line_starts,
+            node.start_position().row,
+            node.start_byte(),
+        )
     }
     fn end_col_of(&self, node: Node) -> u32 {
-        util::col16(self.src, &self.line_starts, node.end_position().row, node.end_byte())
+        util::col16(
+            self.src,
+            &self.line_starts,
+            node.end_position().row,
+            node.end_byte(),
+        )
     }
     fn top_row(&self) -> u32 {
         self.stack.last().map(|s| s.row).unwrap_or(0)
     }
     fn inside_class_like(&self) -> bool {
-        self.stack
-            .last()
-            .is_some_and(|s| matches!(s.kind, "class" | "struct" | "union" | "interface" | "trait" | "enum" | "module" | "enum_member"))
+        self.stack.last().is_some_and(|s| {
+            matches!(
+                s.kind,
+                "class"
+                    | "struct"
+                    | "union"
+                    | "interface"
+                    | "trait"
+                    | "enum"
+                    | "module"
+                    | "enum_member"
+            )
+        })
     }
     /// Push an existing node onto the scope stack (`nodeStack.push(id)`).
     fn push_row(&mut self, row: u32) {
         let rec = &self.nodes[row as usize];
-        self.stack.push(Scope { row, kind: rec.kind, name: rec.name.clone() });
+        self.stack.push(Scope {
+            row,
+            kind: rec.kind,
+            name: rec.name.clone(),
+        });
     }
 
     fn push_ref(&mut self, from_idx: u32, name: &str, kind: &str, at: Node) {
@@ -418,17 +635,30 @@ impl<'t> Walker<'t> {
 
     // --- createNode (tree-sitter.ts) ----------------------------------------
 
-    fn create_node(&mut self, kind: &'static str, name: &str, node: Node<'t>, extra: Extra) -> Option<u32> {
+    fn create_node(
+        &mut self,
+        kind: &'static str,
+        name: &str,
+        node: Node<'t>,
+        extra: Extra,
+    ) -> Option<u32> {
         if name.is_empty() {
             return None;
         }
         let start_line = self.line_of(node);
         let column = self.col_of(node);
-        let id = self.node_id_allocator.generate(self.file_path, kind, name, start_line, column);
+        let id = self
+            .node_id_allocator
+            .generate(self.file_path, kind, name, start_line, column);
         let qualified = match extra.qualified_name {
             Some(q) => q,
             None => {
-                let mut parts: Vec<&str> = self.stack.iter().filter(|s| s.kind != "file").map(|s| s.name.as_str()).collect();
+                let mut parts: Vec<&str> = self
+                    .stack
+                    .iter()
+                    .filter(|s| s.kind != "file")
+                    .map(|s| s.name.as_str())
+                    .collect();
                 parts.push(name);
                 parts.join("::")
             }
@@ -464,7 +694,12 @@ impl<'t> Walker<'t> {
             return_type: ret_ref,
             extra_json: NONE_STR,
         });
-        self.nodes.push(Rec { id, kind, name: name.to_string(), qualified_name: qualified });
+        self.nodes.push(Rec {
+            id,
+            kind,
+            name: name.to_string(),
+            qualified_name: qualified,
+        });
 
         let parent_row = self.top_row();
         let parent_kind = self.stack.last().map(|s| s.kind).unwrap_or("file");
@@ -490,7 +725,11 @@ impl<'t> Walker<'t> {
             *self.fs_value_counts.entry(name.to_string()).or_insert(0) += 1;
         }
         if matches!(kind, "function" | "method" | "constant" | "variable") {
-            self.value_scopes.push(ValueScope { row, node, name: name.to_string() });
+            self.value_scopes.push(ValueScope {
+                row,
+                node,
+                name: name.to_string(),
+            });
         }
         Some(row)
     }
@@ -502,7 +741,10 @@ impl<'t> Walker<'t> {
         if let Some(n) = node.child_by_field_name("name") {
             return self.text(n).to_string();
         }
-        match named_children(node).into_iter().find(|c| c.kind() == "identifier") {
+        match named_children(node)
+            .into_iter()
+            .find(|c| c.kind() == "identifier")
+        {
             Some(c) => self.text(c).to_string(),
             None => "<anonymous>".to_string(),
         }
@@ -637,7 +879,9 @@ impl<'t> Walker<'t> {
             is_exported: Some(false),
             ..Extra::default()
         };
-        let Some(row) = self.create_node("class", &name, node, extra) else { return };
+        let Some(row) = self.create_node("class", &name, node, extra) else {
+            return;
+        };
         self.push_row(row);
         let body = node.child_by_field_name("body").unwrap_or(node);
         for c in named_children(body) {
@@ -648,8 +892,14 @@ impl<'t> Walker<'t> {
 
     fn extract_interface(&mut self, node: Node<'t>) {
         let name = self.extract_name(node);
-        let extra = Extra { docstring: self.docstring_of(node), is_exported: Some(false), ..Extra::default() };
-        let Some(row) = self.create_node("interface", &name, node, extra) else { return };
+        let extra = Extra {
+            docstring: self.docstring_of(node),
+            is_exported: Some(false),
+            ..Extra::default()
+        };
+        let Some(row) = self.create_node("interface", &name, node, extra) else {
+            return;
+        };
         self.push_row(row);
         let body = node.child_by_field_name("body").unwrap_or(node);
         for c in named_children(body) {
@@ -659,7 +909,9 @@ impl<'t> Walker<'t> {
     }
 
     fn extract_enum(&mut self, node: Node<'t>) {
-        let Some(body) = node.child_by_field_name("body") else { return };
+        let Some(body) = node.child_by_field_name("body") else {
+            return;
+        };
         let name = self.extract_name(node);
         let extra = Extra {
             docstring: self.docstring_of(node),
@@ -667,7 +919,9 @@ impl<'t> Walker<'t> {
             is_exported: Some(false),
             ..Extra::default()
         };
-        let Some(row) = self.create_node("enum", &name, node, extra) else { return };
+        let Some(row) = self.create_node("enum", &name, node, extra) else {
+            return;
+        };
         self.push_row(row);
         for c in named_children(body) {
             self.visit_node(c);
@@ -681,8 +935,14 @@ impl<'t> Walker<'t> {
         stack_guard!();
         match node.kind() {
             "unit" | "program" | "library" => {
-                let name = find_named(node, "moduleName").map(|m| self.text(m)).unwrap_or("");
-                let module_name = if name.is_empty() { file_stem(self.file_path) } else { name.to_string() };
+                let name = find_named(node, "moduleName")
+                    .map(|m| self.text(m))
+                    .unwrap_or("");
+                let module_name = if name.is_empty() {
+                    file_stem(self.file_path)
+                } else {
+                    name.to_string()
+                };
                 self.create_node("module", &module_name, node, Extra::default());
                 for c in named_children(node) {
                     self.visit_node(c);
@@ -733,8 +993,15 @@ impl<'t> Walker<'t> {
             "declProp" | "declField" => {
                 if let Some(n) = node.child_by_field_name("name") {
                     let name = self.text(n).to_string();
-                    let kind = if node.kind() == "declProp" { "property" } else { "field" };
-                    let extra = Extra { visibility: self.visibility_of(node), ..Extra::default() };
+                    let kind = if node.kind() == "declProp" {
+                        "property"
+                    } else {
+                        "field"
+                    };
+                    let extra = Extra {
+                        visibility: self.visibility_of(node),
+                        ..Extra::default()
+                    };
                     self.create_node(kind, &name, node, extra);
                 }
                 true
@@ -748,7 +1015,12 @@ impl<'t> Walker<'t> {
                 if outside {
                     let mut locals = HashMap::new();
                     locals.insert("result".to_string(), None);
-                    self.pscopes.push(PScope { locals, class_qn: None, routine: None, start_line: 0 });
+                    self.pscopes.push(PScope {
+                        locals,
+                        class_qn: None,
+                        routine: None,
+                        start_line: 0,
+                    });
                 }
                 self.visit_block(node, node.kind() == "blockTr");
                 if outside {
@@ -762,18 +1034,30 @@ impl<'t> Walker<'t> {
 
     /// extractPascalDeclType: a class, interface, enum or type alias named by the `declType`.
     fn extract_decl_type(&mut self, node: Node<'t>) {
-        let Some(name_node) = node.child_by_field_name("name") else { return };
+        let Some(name_node) = node.child_by_field_name("name") else {
+            return;
+        };
         let name = self.text(name_node).to_string();
         let decl_class = find_named(node, "declClass");
         let decl_intf = find_named(node, "declIntf");
         let type_child = find_named(node, "type");
         if let Some(dc) = decl_class {
-            let Some(row) = self.create_node("class", &name, node, Extra::default()) else { return };
+            let Some(row) = self.create_node("class", &name, node, Extra::default()) else {
+                return;
+            };
             // extractPascalInheritance: the first typeref extends, the rest implement.
-            let typerefs: Vec<Node> = named_children(dc).into_iter().filter(|c| c.kind() == "typeref").collect();
+            let typerefs: Vec<Node> = named_children(dc)
+                .into_iter()
+                .filter(|c| c.kind() == "typeref")
+                .collect();
             for (i, r) in typerefs.into_iter().enumerate() {
                 let ref_name = self.text(r).to_string();
-                self.push_ref(row, &ref_name, if i == 0 { "extends" } else { "implements" }, r);
+                self.push_ref(
+                    row,
+                    &ref_name,
+                    if i == 0 { "extends" } else { "implements" },
+                    r,
+                );
             }
             self.push_row(row);
             for c in named_children(dc) {
@@ -781,7 +1065,9 @@ impl<'t> Walker<'t> {
             }
             self.stack.pop();
         } else if let Some(di) = decl_intf {
-            let Some(row) = self.create_node("interface", &name, node, Extra::default()) else { return };
+            let Some(row) = self.create_node("interface", &name, node, Extra::default()) else {
+                return;
+            };
             self.push_row(row);
             for c in named_children(di) {
                 self.visit_node(c);
@@ -789,7 +1075,9 @@ impl<'t> Walker<'t> {
             self.stack.pop();
         } else if let Some(tc) = type_child {
             if let Some(de) = find_named(tc, "declEnum") {
-                let Some(row) = self.create_node("enum", &name, node, Extra::default()) else { return };
+                let Some(row) = self.create_node("enum", &name, node, Extra::default()) else {
+                    return;
+                };
                 self.push_row(row);
                 for c in named_children(de) {
                     if c.kind() == "declEnumValue" {
@@ -816,7 +1104,10 @@ impl<'t> Walker<'t> {
                 continue;
             }
             let unit = self.text(c).to_string();
-            let extra = Extra { signature: Some(import_text.clone()), ..Extra::default() };
+            let extra = Extra {
+                signature: Some(import_text.clone()),
+                ..Extra::default()
+            };
             self.create_node("import", &unit, c, extra);
             if !self.stack.is_empty() {
                 let from = self.top_row();
@@ -826,10 +1117,20 @@ impl<'t> Walker<'t> {
     }
 
     fn extract_const(&mut self, node: Node<'t>) {
-        let Some(name_node) = node.child_by_field_name("name") else { return };
+        let Some(name_node) = node.child_by_field_name("name") else {
+            return;
+        };
         let name = self.text(name_node).to_string();
         let sig = find_named(node, "defaultValue").map(|d| self.text(d).to_string());
-        self.create_node("constant", &name, node, Extra { signature: sig, ..Extra::default() });
+        self.create_node(
+            "constant",
+            &name,
+            node,
+            Extra {
+                signature: sig,
+                ..Extra::default()
+            },
+        );
     }
 
     // --- implementation routines --------------------------------------------
@@ -837,8 +1138,12 @@ impl<'t> Walker<'t> {
     /// extractPascalDefProc: walk an implementation routine under the node its declaration made.
     fn extract_def_proc(&mut self, node: Node<'t>) {
         stack_guard!();
-        let Some(decl_proc) = find_named(node, "declProc") else { return };
-        let Some(name_node) = decl_proc.child_by_field_name("name") else { return };
+        let Some(decl_proc) = find_named(node, "declProc") else {
+            return;
+        };
+        let Some(name_node) = decl_proc.child_by_field_name("name") else {
+            return;
+        };
         let full_name = js_trim(self.text(name_node)).to_string();
         let short_name = full_name.rsplit('.').next().unwrap_or("").to_string();
         let full_key = full_name.to_lowercase();
@@ -863,7 +1168,10 @@ impl<'t> Walker<'t> {
             self.method_index = Some(index);
         }
         let index = self.method_index.as_ref().unwrap();
-        let mut parent = index.get(&full_key).or_else(|| index.get(&short_key)).copied();
+        let mut parent = index
+            .get(&full_key)
+            .or_else(|| index.get(&short_key))
+            .copied();
 
         if parent.is_none() && !full_name.contains('.') {
             let extra = Extra {
@@ -894,7 +1202,10 @@ impl<'t> Walker<'t> {
         let routine = self.nodes.get(routine_row as usize);
         let qualified_name = match routine {
             Some(r) if r.kind != "file" => r.qualified_name.clone(),
-            _ => strip_angles(&full_name).split('.').collect::<Vec<_>>().join("::"),
+            _ => strip_angles(&full_name)
+                .split('.')
+                .collect::<Vec<_>>()
+                .join("::"),
         };
         let routine_name = match short_key.find('<') {
             Some(i) => short_key[..i].to_string(),
@@ -904,7 +1215,14 @@ impl<'t> Walker<'t> {
     }
 
     /// walkPascalRoutine: a routine's declarations and body, with the routine as their caller.
-    fn walk_routine(&mut self, node: Node<'t>, routine_row: u32, class_qn: Option<String>, routine: String, qualified_name: String) {
+    fn walk_routine(
+        &mut self,
+        node: Node<'t>,
+        routine_row: u32,
+        class_qn: Option<String>,
+        routine: String,
+        qualified_name: String,
+    ) {
         stack_guard!();
         let locals = self.routine_locals(node, true);
         self.pscopes.push(PScope {
@@ -955,9 +1273,18 @@ impl<'t> Walker<'t> {
     }
 
     /// extractPascalNestedRoutine: a routine nested in another, qualified under it.
-    fn extract_nested_routine(&mut self, node: Node<'t>, class_qn: Option<String>, outer_qualified_name: &str) {
-        let Some(decl_proc) = find_named(node, "declProc") else { return };
-        let Some(name_node) = decl_proc.child_by_field_name("name") else { return };
+    fn extract_nested_routine(
+        &mut self,
+        node: Node<'t>,
+        class_qn: Option<String>,
+        outer_qualified_name: &str,
+    ) {
+        let Some(decl_proc) = find_named(node, "declProc") else {
+            return;
+        };
+        let Some(name_node) = decl_proc.child_by_field_name("name") else {
+            return;
+        };
         if name_node.kind() != "identifier" {
             return;
         }
@@ -968,15 +1295,28 @@ impl<'t> Walker<'t> {
             qualified_name: Some(qualified_name.clone()),
             ..Extra::default()
         };
-        let Some(row) = self.create_node("function", &name, node, extra) else { return };
+        let Some(row) = self.create_node("function", &name, node, extra) else {
+            return;
+        };
         self.walk_routine(node, row, class_qn, name.to_lowercase(), qualified_name);
     }
 
     /// pascalRoutineLocals: the names a routine (or an anonymous method) declares before its body.
-    fn routine_locals(&self, routine: Node<'t>, header_only: bool) -> HashMap<String, Option<String>> {
+    fn routine_locals(
+        &self,
+        routine: Node<'t>,
+        header_only: bool,
+    ) -> HashMap<String, Option<String>> {
         let mut names = HashMap::new();
-        let header = if routine.kind() == "lambda" { Some(routine) } else { find_named(routine, "declProc") };
-        names.insert("result".to_string(), self.type_name(header.and_then(|h| find_named(h, "typeref"))));
+        let header = if routine.kind() == "lambda" {
+            Some(routine)
+        } else {
+            find_named(routine, "declProc")
+        };
+        names.insert(
+            "result".to_string(),
+            self.type_name(header.and_then(|h| find_named(h, "typeref"))),
+        );
         if let Some(args) = header.and_then(|h| find_named(h, "declArgs")) {
             for arg in named_children(args) {
                 if arg.kind() == "declArg" {
@@ -1006,9 +1346,37 @@ impl<'t> Walker<'t> {
     /// declarePascalLocal: the type a declaration gives and the lowercased names it declares.
     fn local_decl(&self, decl: Node<'t>) -> (Option<String>, Vec<String>) {
         let children = named_children(decl);
-        let ty = self.type_name(children.iter().copied().find(|c| matches!(c.kind(), "type" | "typeref")));
-        let names = children.iter().filter(|c| c.kind() == "identifier").map(|c| self.text(*c).to_lowercase()).collect();
+        let ty = self.local_type_name(
+            children
+                .iter()
+                .copied()
+                .find(|c| matches!(c.kind(), "type" | "typeref")),
+        );
+        let names = children
+            .iter()
+            .filter(|c| c.kind() == "identifier")
+            .map(|c| self.text(*c).to_lowercase())
+            .collect();
         (ty, names)
+    }
+
+    /// A local's declared type, or `procedure` when the type is a routine written out.
+    fn local_type_name(&self, ty: Option<Node<'t>>) -> Option<String> {
+        let ty = ty?;
+        // `Written: function: Integer of object` — the result type is not the local's type.
+        if ty.kind() == "type" && ty.named_child(0).is_some_and(|c| c.kind() == "declProcRef") {
+            return Some(PASCAL_ROUTINE_TYPE.to_string());
+        }
+        if let Some(named) = self.type_name(Some(ty)) {
+            return Some(named);
+        }
+        let text = self.text(ty);
+        let head = text.split_whitespace().next().unwrap_or("");
+        matches!(
+            head.to_ascii_lowercase().as_str(),
+            "procedure" | "function" | "reference"
+        )
+        .then(|| PASCAL_ROUTINE_TYPE.to_string())
     }
 
     /// declarePascalInline: a name the body declares where it stands joins the routine's locals.
@@ -1019,14 +1387,25 @@ impl<'t> Walker<'t> {
         let (id, ty): (Option<Node>, Option<String>) = match node.kind() {
             "varAssignDef" | "varDef" => {
                 let children = named_children(node);
-                let mut ty = self.type_name(children.iter().copied().find(|c| matches!(c.kind(), "typeref" | "type")));
-                let value = node.parent().filter(|p| p.kind() == "assignment").and_then(last_named);
+                let mut ty = self.local_type_name(
+                    children
+                        .iter()
+                        .copied()
+                        .find(|c| matches!(c.kind(), "typeref" | "type")),
+                );
+                let value = node
+                    .parent()
+                    .filter(|p| p.kind() == "assignment")
+                    .and_then(last_named);
                 if ty.is_none() {
                     if let Some(v) = value.filter(|v| v.kind() == "exprDot") {
                         let cls = v.named_child(0);
                         let ctor = last_named(v);
                         if let (Some(cls), Some(ctor)) = (cls, ctor) {
-                            if cls.kind() == "identifier" && ctor.kind() == "identifier" && self.text(ctor).eq_ignore_ascii_case("create") {
+                            if cls.kind() == "identifier"
+                                && ctor.kind() == "identifier"
+                                && self.text(ctor).eq_ignore_ascii_case("create")
+                            {
                                 ty = Some(self.text(cls).to_string());
                             }
                         }
@@ -1035,11 +1414,19 @@ impl<'t> Walker<'t> {
                 (children.into_iter().find(|c| c.kind() == "identifier"), ty)
             }
             "foreach" => (node.child_by_field_name("iterator"), None),
-            "for" => (find_named(node, "assignment").and_then(|a| a.named_child(0)), None),
-            "exceptionHandler" => (node.child_by_field_name("variable"), self.type_name(find_named(node, "typeref"))),
+            "for" => (
+                find_named(node, "assignment").and_then(|a| a.named_child(0)),
+                None,
+            ),
+            "exceptionHandler" => (
+                node.child_by_field_name("variable"),
+                self.type_name(find_named(node, "typeref")),
+            ),
             _ => return,
         };
-        let Some(id) = id.filter(|i| i.kind() == "identifier") else { return };
+        let Some(id) = id.filter(|i| i.kind() == "identifier") else {
+            return;
+        };
         let name = self.text(id).to_lowercase();
         let locals = &mut self.pscopes.last_mut().unwrap().locals;
         if ty.is_some() || !locals.contains_key(&name) {
@@ -1050,7 +1437,11 @@ impl<'t> Walker<'t> {
     /// pascalTypeName: the class or record name a declared type stands for.
     fn type_name(&self, ty: Option<Node<'t>>) -> Option<String> {
         let ty = ty?;
-        let r = if ty.kind() == "type" { ty.named_child(0)? } else { ty };
+        let r = if ty.kind() == "type" {
+            ty.named_child(0)?
+        } else {
+            ty
+        };
         if r.kind() != "typeref" {
             return None;
         }
@@ -1066,19 +1457,32 @@ impl<'t> Walker<'t> {
     // --- calls ----------------------------------------------------------------
 
     fn identifiers_joined(&self, node: Node<'t>) -> String {
-        named_children(node).into_iter().filter(|c| c.kind() == "identifier").map(|c| self.text(c)).collect::<Vec<_>>().join(".")
+        named_children(node)
+            .into_iter()
+            .filter(|c| c.kind() == "identifier")
+            .map(|c| self.text(c))
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     /// extractPascalCall.
     fn extract_call(&mut self, node: Node<'t>, receiver_link: bool) {
         stack_guard!();
-        let Some(caller) = self.stack.last().map(|s| s.row) else { return };
-        let Some(first) = node.named_child(0) else { return };
+        let Some(caller) = self.stack.last().map(|s| s.row) else {
+            return;
+        };
+        let Some(first) = node.named_child(0) else {
+            return;
+        };
         let mut callee = String::new();
         if first.kind() == "exprDot" {
             let children = named_children(first);
             let inner_call = children.iter().copied().find(|c| c.kind() == "exprCall");
-            let outer_id = children.iter().copied().filter(|c| c.kind() == "identifier").last();
+            let outer_id = children
+                .iter()
+                .copied()
+                .filter(|c| c.kind() == "identifier")
+                .last();
             let method = outer_id.map(|o| self.text(o)).unwrap_or("");
             if let (Some(ic), true) = (inner_call, !method.is_empty() && is_word(method)) {
                 let inner_callee = match ic.named_child(0) {
@@ -1086,11 +1490,16 @@ impl<'t> Walker<'t> {
                     Some(f) if f.kind() == "identifier" => self.text(f).to_string(),
                     _ => String::new(),
                 };
-                callee = if !inner_callee.is_empty() && is_type_like(&inner_callee) {
-                    format!("{inner_callee}().{method}")
+                // A class-factory chain keeps the `TFoo().Method` spelling. Any other
+                // chain is typed link by link, never left as the outer method's bare name.
+                if !inner_callee.is_empty() && is_type_like(&inner_callee) {
+                    callee = format!("{inner_callee}().{method}");
                 } else {
-                    method.to_string()
-                };
+                    self.push_chain_call(first, "args", node);
+                }
+            } else if first.named_child(0).is_some_and(|c| c.kind() == "exprDot") {
+                // `FPanel.Series.Clear(1)`, `TLog.Create.Write('x')`.
+                self.push_chain_call(first, "args", node);
             } else {
                 callee = self.identifiers_joined(first);
             }
@@ -1098,7 +1507,9 @@ impl<'t> Walker<'t> {
             callee = self.text(first).to_string();
         }
         let vague = receiver_link && first.kind() == "exprDot" && !callee.contains('.');
-        let with_member = self.with_depth > 0 && first.kind() == "identifier" && is_system_name(&callee.to_lowercase());
+        let with_member = self.with_depth > 0
+            && first.kind() == "identifier"
+            && is_system_name(&callee.to_lowercase());
         if !callee.is_empty() && !vague && !with_member {
             self.push_ref(caller, &callee, "calls", node);
         }
@@ -1151,9 +1562,14 @@ impl<'t> Walker<'t> {
     /// extractPascalParenlessCall: a statement-level `Obj.Method;`.
     fn parenless_call(&mut self, node: Node<'t>) {
         stack_guard!();
-        let Some(caller) = self.stack.last().map(|s| s.row) else { return };
+        let Some(caller) = self.stack.last().map(|s| s.row) else {
+            return;
+        };
         let receiver = node.named_child(0);
-        let outer_id = named_children(node).into_iter().filter(|c| c.kind() == "identifier").last();
+        let outer_id = named_children(node)
+            .into_iter()
+            .filter(|c| c.kind() == "identifier")
+            .last();
         let method = outer_id.map(|o| self.text(o)).unwrap_or("");
         if method.is_empty() {
             return;
@@ -1161,7 +1577,11 @@ impl<'t> Walker<'t> {
         let callee;
         match receiver.filter(|r| matches!(r.kind(), "exprDot" | "exprCall")) {
             Some(r) if is_word(method) => {
-                let inner_node = if r.kind() == "exprCall" { r.named_child(0) } else { Some(r) };
+                let inner_node = if r.kind() == "exprCall" {
+                    r.named_child(0)
+                } else {
+                    Some(r)
+                };
                 let inner = match inner_node {
                     None => String::new(),
                     Some(n) if n.kind() == "identifier" => self.text(n).to_string(),
@@ -1175,8 +1595,11 @@ impl<'t> Walker<'t> {
                         self.parenless_call(r);
                     }
                 } else {
-                    callee = method.to_string();
+                    // `FPanel.Series.BeginUpdate;` is the method of what each link is
+                    // declared to be, never a namesake of its last name.
+                    self.push_chain_call(node, "call", node);
                     self.receiver_calls(receiver, true);
+                    callee = String::new();
                 }
             }
             _ => {
@@ -1195,7 +1618,10 @@ impl<'t> Walker<'t> {
         stack_guard!();
         for child in named_children(node) {
             let kind = child.kind();
-            if declarations && (kind.starts_with("decl") || matches!(kind, "defProc" | "interface" | "implementation")) {
+            if declarations
+                && (kind.starts_with("decl")
+                    || matches!(kind, "defProc" | "interface" | "implementation"))
+            {
                 self.visit_node(child);
                 continue;
             }
@@ -1235,7 +1661,12 @@ impl<'t> Walker<'t> {
                         None => (None, 0),
                     };
                     let locals = self.routine_locals(child, false);
-                    self.pscopes.push(PScope { locals, class_qn, routine: None, start_line });
+                    self.pscopes.push(PScope {
+                        locals,
+                        class_qn,
+                        routine: None,
+                        start_line,
+                    });
                     self.visit_block(child, declarations);
                     self.pscopes.pop();
                 }
@@ -1244,15 +1675,113 @@ impl<'t> Walker<'t> {
         }
     }
 
+    /// The outer method of a call through a chain of members and functions.
+    /// `{args}` is written with its arguments; `{call}` is a statement.
+    fn push_chain_call(&mut self, callee: Node<'t>, mode: &str, at: Node<'t>) {
+        if self.is_header_name(callee) {
+            return;
+        }
+        let Some(caller) = self.stack.last().map(|s| s.row) else {
+            return;
+        };
+        let Some(scope) = self.scope_at(at.start_position().row as u32 + 1) else {
+            return;
+        };
+        let Some(mut links) = self.chain_links(callee) else {
+            return;
+        };
+        let local = self.local_type(&links[0].to_lowercase(), scope.text);
+        if self.with_depth > 0 && local.is_none() && !links[0].eq_ignore_ascii_case("self") {
+            return;
+        }
+        if let Some(ty) = local {
+            if ty.is_none() || ty.as_deref() == Some(PASCAL_ROUTINE_TYPE) {
+                return;
+            }
+            links[0] = format!(":{}", ty.unwrap());
+        }
+        let class = match scope.class_qn.as_deref() {
+            Some(c) if !c.is_empty() => format!("@{c}"),
+            _ => String::new(),
+        };
+        let ref_name = format!("{{{mode}{class}}}.{}", links.join("."));
+        self.push_ref_at(
+            caller,
+            &ref_name,
+            "references",
+            self.line_of(at),
+            self.col_of(at),
+        );
+    }
+
+    /// Names of a chain, head first. Calls' arguments and `^` are left out.
+    /// None when a link is an index, a cast, or anything other than a name.
+    fn chain_links(&self, node: Node<'t>) -> Option<Vec<String>> {
+        let mut links = Vec::new();
+        let mut n = Some(node);
+        while let Some(cur) = n {
+            let kind = cur.kind();
+            let hat = kind == "exprUnary" && last_named(cur).is_some_and(|c| c.kind() == "kHat");
+            if kind != "exprDot" && kind != "exprCall" && !hat {
+                break;
+            }
+            if kind == "exprDot" {
+                let last = last_named(cur).filter(|l| l.kind() == "identifier")?;
+                links.push(self.text(last).to_string());
+            }
+            n = cur.named_child(0);
+        }
+        let head = n.filter(|h| h.kind() == "identifier")?;
+        links.push(self.text(head).to_string());
+        links.reverse();
+        Some(links)
+    }
+
+    /// An assignment's target: a name the resolver looks up, a local's declared
+    /// type, or the mode itself when the local's type is a routine written out.
+    fn assignment_target(
+        &self,
+        target: Option<Node<'t>>,
+        text: Option<usize>,
+    ) -> Option<AssignTarget> {
+        let target = target?;
+        let mut links = if target.kind() == "identifier" {
+            vec![self.text(target).to_string()]
+        } else if target.kind() == "exprDot" {
+            self.identifier_path(target)?
+        } else {
+            return None;
+        };
+        let local = self.local_type(&links[0].to_lowercase(), text);
+        if let Some(ty) = local {
+            if links.len() == 1 && (ty.is_none() || ty.as_deref() == Some(PASCAL_ROUTINE_TYPE)) {
+                return Some(AssignTarget::Mode(if ty.is_some() {
+                    "ref"
+                } else {
+                    "read"
+                }));
+            }
+            if ty.is_none() || ty.as_deref() == Some(PASCAL_ROUTINE_TYPE) {
+                return None;
+            }
+            links[0] = format!(":{}", ty.unwrap());
+        }
+        Some(AssignTarget::Name(links.join(".")))
+    }
+
     // --- paren-less names (#2514) ---------------------------------------------
 
     /// extractPascalParenlessName.
     fn parenless_name(&mut self, name: Node<'t>, parent: Option<Node<'t>>) {
-        let Some(scope) = self.scope_at(name.start_position().row as u32 + 1) else { return };
+        let Some(scope) = self.scope_at(name.start_position().row as u32 + 1) else {
+            return;
+        };
         if self.is_header_name(name) {
             return;
         }
-        let Some(caller) = self.stack.last().map(|s| s.row) else { return };
+        let Some(caller) = self.stack.last().map(|s| s.row) else {
+            return;
+        };
         if name.kind() == "identifier" {
             let lower = self.text(name).to_lowercase();
             if is_not_routine(&lower) || self.local_type(&lower, scope.text).is_some() {
@@ -1262,7 +1791,7 @@ impl<'t> Walker<'t> {
                 return;
             }
         }
-        let mode = match parent {
+        let mut mode = match parent {
             Some(p) => match self.name_mode(name, p) {
                 Some(m) => m,
                 None => return,
@@ -1271,6 +1800,17 @@ impl<'t> Walker<'t> {
         };
         if self.with_depth > 0 && (mode != "ref" || name.kind() != "identifier") {
             return;
+        }
+        // The target's declared type says whether a method given to it is a
+        // method pointer. The mode its name gives stands where the declaration
+        // doesn't say.
+        let mut target = String::new();
+        if parent.is_some_and(|p| p.kind() == "assignment") && self.with_depth == 0 {
+            match self.assignment_target(parent.and_then(|p| p.named_child(0)), scope.text) {
+                Some(AssignTarget::Mode(m)) => mode = m,
+                Some(AssignTarget::Name(t)) => target = format!("={t}"),
+                None => {}
+            }
         }
         let mut path: Vec<String> = if name.kind() == "identifier" {
             vec![self.text(name).to_string()]
@@ -1298,7 +1838,13 @@ impl<'t> Walker<'t> {
             }
         } else if let Some(local) = local {
             match local {
-                Some(t) if mode != "recv" && !(t.len() >= 2 && t.as_bytes()[0] == b'P' && t.as_bytes()[1].is_ascii_uppercase()) => {
+                Some(t)
+                    if mode != "recv"
+                        && t != PASCAL_ROUTINE_TYPE
+                        && !(t.len() >= 2
+                            && t.as_bytes()[0] == b'P'
+                            && t.as_bytes()[1].is_ascii_uppercase()) =>
+                {
                     path[0] = format!(":{t}");
                 }
                 _ => return,
@@ -1310,12 +1856,21 @@ impl<'t> Walker<'t> {
             Some(c) if !c.is_empty() => format!("@{c}"),
             _ => String::new(),
         };
-        let ref_name = format!("{{{mode}{at}}}.{}", path.join("."));
+        let ref_name = format!("{{{mode}{target}{at}}}.{}", path.join("."));
         let line = self.line_of(name);
         let column = self.col_of(name);
         if path.len() == 1 && mode != "call" {
             let key = scope.class_qn.unwrap_or_default();
-            self.reads.push((PendingRef { from: caller, name: ref_name, line, column }, key, lower));
+            self.reads.push((
+                PendingRef {
+                    from: caller,
+                    name: ref_name,
+                    line,
+                    column,
+                },
+                key,
+                lower,
+            ));
         } else {
             self.push_ref_at(caller, &ref_name, "references", line, column);
         }
@@ -1331,7 +1886,8 @@ impl<'t> Walker<'t> {
             "exprCall" => match node.named_child(0) {
                 Some(callee)
                     if callee.kind() == "identifier"
-                        && (self.text(callee).eq_ignore_ascii_case("inc") || self.text(callee).eq_ignore_ascii_case("dec")) =>
+                        && (self.text(callee).eq_ignore_ascii_case("inc")
+                            || self.text(callee).eq_ignore_ascii_case("dec")) =>
                 {
                     find_named(node, "exprArgs").and_then(|a| a.named_child(0))
                 }
@@ -1339,13 +1895,22 @@ impl<'t> Walker<'t> {
             },
             _ => None,
         };
-        let Some(target) = target.filter(|t| t.kind() == "identifier") else { return };
-        let Some(scope) = self.scope_at(target.start_position().row as u32 + 1) else { return };
+        let Some(target) = target.filter(|t| t.kind() == "identifier") else {
+            return;
+        };
+        let Some(scope) = self.scope_at(target.start_position().row as u32 + 1) else {
+            return;
+        };
         let name = self.text(target).to_lowercase();
-        if scope.routine.as_deref() == Some(name.as_str()) || self.local_type(&name, scope.text).is_some() {
+        if scope.routine.as_deref() == Some(name.as_str())
+            || self.local_type(&name, scope.text).is_some()
+        {
             return;
         }
-        self.assigned.entry(scope.class_qn.unwrap_or_default()).or_default().insert(name);
+        self.assigned
+            .entry(scope.class_qn.unwrap_or_default())
+            .or_default()
+            .insert(name);
     }
 
     /// flushPascalReads: the bare names read, less those the file shows are variables.
@@ -1370,7 +1935,11 @@ impl<'t> Walker<'t> {
         if core.len() == t.len() {
             return false;
         }
-        if core.len() > 5 && core.is_char_boundary(5) && core[..5].eq_ignore_ascii_case("class") && core[5..].starts_with(is_js_space) {
+        if core.len() > 5
+            && core.is_char_boundary(5)
+            && core[..5].eq_ignore_ascii_case("class")
+            && core[5..].starts_with(is_js_space)
+        {
             let kw = js_trim_start(&core[5..]);
             if is_routine_keyword(kw) {
                 return true;
@@ -1393,7 +1962,11 @@ impl<'t> Walker<'t> {
     /// pascalScopeAt: the class and routine a name at `line` belongs to.
     fn scope_at(&mut self, line: u32) -> Option<ScopeView> {
         let scope = self.pscopes.last()?;
-        let own = ScopeView { class_qn: scope.class_qn.clone(), routine: scope.routine.clone(), text: None };
+        let own = ScopeView {
+            class_qn: scope.class_qn.clone(),
+            routine: scope.routine.clone(),
+            text: None,
+        };
         if !self.has_error {
             return Some(own);
         }
@@ -1410,14 +1983,20 @@ impl<'t> Walker<'t> {
         if t.line <= start_line || (start_line > 0 && t.routine.is_none()) {
             return Some(own);
         }
-        Some(ScopeView { class_qn: t.class_qn.clone(), routine: t.routine.clone(), text: Some(hit - 1) })
+        Some(ScopeView {
+            class_qn: t.class_qn.clone(),
+            routine: t.routine.clone(),
+            text: Some(hit - 1),
+        })
     }
 
     /// pascalNameMode: how a name in `parent` may run a parameterless routine.
     fn name_mode(&self, name: Node<'t>, parent: Node<'t>) -> Option<&'static str> {
         let is = |field: &str| same(parent.child_by_field_name(field), name);
         match parent.kind() {
-            "statement" => (parent.named_child_count() == 1 && name.kind() == "identifier").then_some("call"),
+            "statement" => {
+                (parent.named_child_count() == 1 && name.kind() == "identifier").then_some("call")
+            }
             "exprSubscript" => same(parent.named_child(0), name).then_some("recv"),
             "assignment" => {
                 let target = parent.named_child(0)?;
@@ -1425,25 +2004,43 @@ impl<'t> Walker<'t> {
                     return None;
                 }
                 let last = if target.kind() == "exprDot" {
-                    named_children(target).into_iter().filter(|c| c.kind() == "identifier").last()
+                    named_children(target)
+                        .into_iter()
+                        .filter(|c| c.kind() == "identifier")
+                        .last()
                 } else {
                     Some(target)
                 };
-                Some(if last.is_some_and(|l| is_event_name(self.text(l))) { "ref" } else { "read" })
+                Some(if last.is_some_and(|l| is_event_name(self.text(l))) {
+                    "ref"
+                } else {
+                    "read"
+                })
             }
             "exprArgs" => parent
                 .parent()
                 .is_some_and(|g| matches!(g.kind(), "exprCall" | "exprSubscript" | "inherited"))
                 .then_some("read"),
             "exprBinary" => {
-                let op = named_children(parent).into_iter().find(|c| c.id() != name.id() && is_keyword_kind(c.kind()));
-                if op.is_some_and(|o| matches!(o.kind(), "kIs" | "kAs")) && !same(parent.named_child(0), name) {
+                let op = named_children(parent)
+                    .into_iter()
+                    .find(|c| c.id() != name.id() && is_keyword_kind(c.kind()));
+                if op.is_some_and(|o| matches!(o.kind(), "kIs" | "kAs"))
+                    && !same(parent.named_child(0), name)
+                {
                     None
                 } else {
                     Some("read")
                 }
             }
-            "exprUnary" => (parent.child(0).map(|c| c.kind()) != Some("kAt")).then_some("read"),
+            // `@Obj.Method` is a method pointer. `@Handler` stays the function-value path.
+            "exprUnary" => {
+                if parent.child(0).map(|c| c.kind()) == Some("kAt") {
+                    (name.kind() == "exprDot").then_some("ref")
+                } else {
+                    Some("read")
+                }
+            }
             "if" | "ifElse" | "while" | "repeat" => is("condition").then_some("read"),
             "case" | "exprParens" => Some("read"),
             "foreach" => is("iterable").then_some("read"),
@@ -1471,7 +2068,9 @@ impl<'t> Walker<'t> {
     fn is_data_name(&mut self, class_qn: Option<&str>, lower: &str) -> bool {
         let key = class_qn.unwrap_or("").to_string();
         if !self.data_name_sets.contains_key(&key) {
-            let prefix = class_qn.filter(|c| !c.is_empty()).map(|c| format!("{}::", c.to_lowercase()));
+            let prefix = class_qn
+                .filter(|c| !c.is_empty())
+                .map(|c| format!("{}::", c.to_lowercase()));
             let mut names = HashSet::new();
             for n in &self.nodes {
                 if n.kind == "enum_member" {
@@ -1482,7 +2081,9 @@ impl<'t> Walker<'t> {
                     continue;
                 }
                 let qn = strip_angles(&n.qualified_name).to_lowercase();
-                let own = prefix.as_ref().is_some_and(|p| qn.starts_with(p.as_str()) && !qn[p.len()..].contains("::"));
+                let own = prefix
+                    .as_ref()
+                    .is_some_and(|p| qn.starts_with(p.as_str()) && !qn[p.len()..].contains("::"));
                 if own || !qn.contains("::") {
                     names.insert(n.name.to_lowercase());
                 }
@@ -1501,12 +2102,20 @@ impl<'t> Walker<'t> {
         let values: Vec<Node> = match node.kind() {
             "exprArgs" => named_children(node),
             "assignment" => {
-                let Some(rhs) = node.child_by_field_name("rhs") else { return };
+                let Some(rhs) = node.child_by_field_name("rhs") else {
+                    return;
+                };
                 let lhs = node
                     .child_by_field_name("left")
                     .or_else(|| node.child_by_field_name("lhs"))
                     .or_else(|| node.child_by_field_name("target"))
-                    .or_else(|| if node.named_child_count() >= 2 { node.named_child(0) } else { None });
+                    .or_else(|| {
+                        if node.named_child_count() >= 2 {
+                            node.named_child(0)
+                        } else {
+                            None
+                        }
+                    });
                 let lhs_last = lhs.and_then(|l| trailing_js_ident(self.text(l)));
                 if lhs_last.is_some_and(|l| l == js_trim(self.text(rhs))) {
                     return;
@@ -1515,7 +2124,9 @@ impl<'t> Walker<'t> {
             }
             _ => return,
         };
-        let Some(from) = self.stack.last().map(|s| s.row) else { return };
+        let Some(from) = self.stack.last().map(|s| s.row) else {
+            return;
+        };
         for v in values {
             if v.kind() == "identifier" {
                 continue;
@@ -1528,7 +2139,12 @@ impl<'t> Walker<'t> {
                 }
                 let line = self.line_of(at);
                 let column = self.col_of(at);
-                self.fn_ref_cands.push(Cand { from, name, line, column });
+                self.fn_ref_cands.push(Cand {
+                    from,
+                    name,
+                    line,
+                    column,
+                });
             }
         }
     }
@@ -1555,12 +2171,20 @@ impl<'t> Walker<'t> {
         if cands.is_empty() || util::is_generated_file(self.file_path) {
             return;
         }
-        let defined: HashSet<&str> =
-            self.nodes.iter().filter(|n| n.kind == "function" || n.kind == "method").map(|n| n.name.as_str()).collect();
+        let defined: HashSet<&str> = self
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "function" || n.kind == "method")
+            .map(|n| n.name.as_str())
+            .collect();
         let mut seen: HashSet<(u32, String)> = HashSet::new();
         let mut out = Vec::new();
         for c in cands {
-            if !c.name.starts_with("this.") && !c.name.contains("::") && !defined.contains(c.name.as_str()) && !self.imported_names.contains(&c.name) {
+            if !c.name.starts_with("this.")
+                && !c.name.contains("::")
+                && !defined.contains(c.name.as_str())
+                && !self.imported_names.contains(&c.name)
+            {
                 continue;
             }
             // fromNodeId|name: a row stands for one id.
@@ -1601,7 +2225,8 @@ impl<'t> Walker<'t> {
         let mut decl_counts: HashMap<&str, u32> = HashMap::new();
         let src: &'t str = self.src;
         let bump = |nm: Option<Node>, counts: &mut HashMap<&'t str, u32>| {
-            if let Some(nm) = nm.filter(|x| matches!(x.kind(), "identifier" | "simple_identifier")) {
+            if let Some(nm) = nm.filter(|x| matches!(x.kind(), "identifier" | "simple_identifier"))
+            {
                 let t = &src[nm.byte_range()];
                 if targets.contains_key(t) {
                     *counts.entry(t).or_insert(0) += 1;
@@ -1655,7 +2280,11 @@ impl<'t> Walker<'t> {
             // A Pascal `declProc`'s body is the `block` after it in its `defProc`; a nested
             // routine is stored as its whole `defProc`.
             if scope.node.kind() != "defProc" {
-                if let Some(sib) = scope.node.next_named_sibling().filter(|s| matches!(s.kind(), "function_body" | "block")) {
+                if let Some(sib) = scope
+                    .node
+                    .next_named_sibling()
+                    .filter(|s| matches!(s.kind(), "function_body" | "block"))
+                {
                     stack.push(sib);
                 }
             }
@@ -1665,7 +2294,10 @@ impl<'t> Walker<'t> {
                     break;
                 }
                 visited += 1;
-                if matches!(n.kind(), "identifier" | "constant" | "name" | "simple_identifier") {
+                if matches!(
+                    n.kind(),
+                    "identifier" | "constant" | "name" | "simple_identifier"
+                ) {
                     let ref_name = self.text(n);
                     if let Some(&target_row) = targets.get(ref_name) {
                         if self.nodes[target_row as usize].id != self.nodes[scope.row as usize].id
@@ -1699,7 +2331,21 @@ impl<'t> Walker<'t> {
 
 /// NAME_STOPLIST (function-ref.ts).
 fn is_stoplisted(name: &str) -> bool {
-    matches!(name, "this" | "self" | "super" | "null" | "nil" | "true" | "false" | "undefined" | "new" | "NULL" | "nullptr" | "None")
+    matches!(
+        name,
+        "this"
+            | "self"
+            | "super"
+            | "null"
+            | "nil"
+            | "true"
+            | "false"
+            | "undefined"
+            | "new"
+            | "NULL"
+            | "nullptr"
+            | "None"
+    )
 }
 
 /// `text.match(/([A-Za-z_$][A-Za-z0-9_$]*)\s*$/)?.[1]`.
@@ -1707,7 +2353,9 @@ fn trailing_js_ident(text: &str) -> Option<&str> {
     let t = js_trim_end(text);
     let b = t.as_bytes();
     let mut start = b.len();
-    while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_' || b[start - 1] == b'$') {
+    while start > 0
+        && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_' || b[start - 1] == b'$')
+    {
         start -= 1;
     }
     let run = &t[start..];
@@ -1734,8 +2382,17 @@ fn match_header(line: &str) -> Option<(bool, &str, usize)> {
     let mut i = lead;
     let rest = &line[i..];
     let after_kw = |s: &str| -> Option<usize> {
-        for kw in ["procedure", "function", "constructor", "destructor", "operator"] {
-            if s.len() >= kw.len() && s.is_char_boundary(kw.len()) && s[..kw.len()].eq_ignore_ascii_case(kw) {
+        for kw in [
+            "procedure",
+            "function",
+            "constructor",
+            "destructor",
+            "operator",
+        ] {
+            if s.len() >= kw.len()
+                && s.is_char_boundary(kw.len())
+                && s[..kw.len()].eq_ignore_ascii_case(kw)
+            {
                 let r = &s[kw.len()..];
                 let ws = r.len() - js_trim_start(r).len();
                 if ws > 0 {
@@ -1799,7 +2456,10 @@ fn match_header(line: &str) -> Option<(bool, &str, usize)> {
 fn starts_body(line: &str) -> bool {
     let t = js_trim_start(line);
     for kw in ["begin", "asm"] {
-        if t.len() >= kw.len() && t.is_char_boundary(kw.len()) && t[..kw.len()].eq_ignore_ascii_case(kw) {
+        if t.len() >= kw.len()
+            && t.is_char_boundary(kw.len())
+            && t[..kw.len()].eq_ignore_ascii_case(kw)
+        {
             let next = t.as_bytes().get(kw.len()).copied();
             if !next.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
                 return true;
@@ -1816,7 +2476,10 @@ fn resumes_unit(line: &str) -> bool {
     }
     let t = js_trim_start(line);
     for kw in ["initialization", "finalization"] {
-        if t.len() >= kw.len() && t.is_char_boundary(kw.len()) && t[..kw.len()].eq_ignore_ascii_case(kw) {
+        if t.len() >= kw.len()
+            && t.is_char_boundary(kw.len())
+            && t[..kw.len()].eq_ignore_ascii_case(kw)
+        {
             let next = t.as_bytes().get(kw.len()).copied();
             if !next.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
                 return true;
@@ -1977,18 +2640,29 @@ fn read_text_routines(src: &str) -> Vec<TextRoutine> {
     let mut outer: Option<usize> = None;
     for (i, text) in lines.iter().enumerate() {
         if resumes_unit(text) {
-            routines.push(TextRoutine { line: i as u32 + 1, class_qn: None, routine: None, locals: HashMap::new() });
+            routines.push(TextRoutine {
+                line: i as u32 + 1,
+                class_qn: None,
+                routine: None,
+                locals: HashMap::new(),
+            });
             outer = None;
             continue;
         }
-        let Some((indented, name, end)) = match_header(text) else { continue };
+        let Some((indented, name, end)) = match_header(text) else {
+            continue;
+        };
         let nested = indented && outer.is_some();
         let stripped = strip_angles(name);
         let mut parts: Vec<&str> = stripped.split('.').collect();
         let routine = parts.pop().unwrap_or("").to_lowercase();
         let mut decl = text[end..].to_string();
         let mut j = i + 1;
-        while j < lines.len() && j <= i + 200 && !starts_body(lines[j]) && match_header(lines[j]).is_none() {
+        while j < lines.len()
+            && j <= i + 200
+            && !starts_body(lines[j])
+            && match_header(lines[j]).is_none()
+        {
             decl.push('\n');
             decl.push_str(lines[j]);
             j += 1;
@@ -1998,9 +2672,22 @@ fn read_text_routines(src: &str) -> Vec<TextRoutine> {
             (true, Some(o)) => routines[o].locals.clone(),
             _ => HashMap::new(),
         };
-        locals.insert("result".to_string(), result_type(&decl).map(|t| t.rsplit('.').next().unwrap_or("").to_string()));
+        locals.insert(
+            "result".to_string(),
+            result_type(&decl).map(|t| t.rsplit('.').next().unwrap_or("").to_string()),
+        );
         for (names, ty) in declared_names(&decl) {
-            let ty = ty.map(|t| t.rsplit('.').next().unwrap_or("").to_string());
+            let ty = ty.map(|t| {
+                let simple = t.rsplit('.').next().unwrap_or("");
+                if matches!(
+                    simple.to_ascii_lowercase().as_str(),
+                    "procedure" | "function" | "reference"
+                ) {
+                    PASCAL_ROUTINE_TYPE.to_string()
+                } else {
+                    simple.to_string()
+                }
+            });
             for n in names {
                 locals.insert(js_trim(n).to_lowercase(), ty.clone());
             }
@@ -2008,10 +2695,20 @@ fn read_text_routines(src: &str) -> Vec<TextRoutine> {
         if nested {
             let o = &routines[outer.unwrap()];
             let (class_qn, routine) = (o.class_qn.clone(), o.routine.clone());
-            routines.push(TextRoutine { line: i as u32 + 1, class_qn, routine, locals });
+            routines.push(TextRoutine {
+                line: i as u32 + 1,
+                class_qn,
+                routine,
+                locals,
+            });
         } else {
             let class_qn = (!parts.is_empty()).then(|| parts.join("::"));
-            routines.push(TextRoutine { line: i as u32 + 1, class_qn, routine: Some(routine), locals });
+            routines.push(TextRoutine {
+                line: i as u32 + 1,
+                class_qn,
+                routine: Some(routine),
+                locals,
+            });
             outer = Some(routines.len() - 1);
         }
     }
@@ -2020,7 +2717,9 @@ fn read_text_routines(src: &str) -> Vec<TextRoutine> {
 
 /// `source.split(/\r?\n/)`.
 fn split_lines(src: &str) -> Vec<&str> {
-    src.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect()
+    src.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect()
 }
 
 #[cfg(test)]
@@ -2035,33 +2734,61 @@ mod tests {
         assert_eq!(strip_angles("TList<T>.Add<U>"), "TList.Add");
         assert_eq!(strip_angles("a<b"), "a<b");
         assert_eq!(file_stem("src/Edge.pas"), "Edge");
-        assert_eq!(result_type("(const A: string): TFoo.TBar;"), Some("TFoo.TBar"));
+        assert_eq!(
+            result_type("(const A: string): TFoo.TBar;"),
+            Some("TFoo.TBar")
+        );
         assert_eq!(result_type(": Integer;"), Some("Integer"));
-        let names = declared_names("(const A, B: string; var C: Integer): Boolean;\nvar\n  I := 0; S: TStrings;");
+        let names = declared_names(
+            "(const A, B: string; var C: Integer): Boolean;\nvar\n  I := 0; S: TStrings;",
+        );
         let flat: Vec<(Vec<&str>, Option<&str>)> = names;
         assert_eq!(flat[0], (vec!["A", " B"], Some("string")));
         assert_eq!(flat[1], (vec!["C"], Some("Integer")));
-        assert!(flat.iter().any(|(n, t)| n == &vec!["S"] && *t == Some("TStrings")));
-        assert!(match_header("  class procedure TFoo<T>.Bar(X: Integer);").is_some_and(|(ind, n, _)| ind && n == "TFoo<T>.Bar"));
-        assert!(match_header("function Helper: Integer;").is_some_and(|(ind, n, _)| !ind && n == "Helper"));
+        assert!(flat
+            .iter()
+            .any(|(n, t)| n == &vec!["S"] && *t == Some("TStrings")));
+        assert!(match_header("  class procedure TFoo<T>.Bar(X: Integer);")
+            .is_some_and(|(ind, n, _)| ind && n == "TFoo<T>.Bar"));
+        assert!(match_header("function Helper: Integer;")
+            .is_some_and(|(ind, n, _)| !ind && n == "Helper"));
         assert!(match_header("procedurex Foo;").is_none());
     }
 
     #[test]
     fn units_routines_calls_and_function_values() {
         let src = "unit Edge;\ninterface\nuses System.SysUtils;\nconst MAX_ITEMS = 100;\ntype\n  TShape = class(TObject, IShape)\n  private\n    FName: string;\n    procedure DoChange;\n  public\n    constructor Create(const [ref] AName: string);\n  end;\nfunction Helper(X: Integer): Integer;\nimplementation\nfunction Helper(X: Integer): Integer;\nbegin\n  Result := X + MAX_ITEMS;\nend;\nconstructor TShape.Create(const [ref] AName: string);\n  procedure Inner;\n  begin\n    Helper(1);\n  end;\nbegin\n  Inner;\n  FName := AName;\n  Register(@DoChange);\n  Self.DoChange;\nend;\nprocedure TShape.DoChange;\nbegin\nend;\nend.\n";
-        let r = crate::extract_source("Edge.pas", src, codegraph_types::Language::parse("pascal").unwrap()).unwrap();
-        let has = |kind: &str, qn: &str| r.nodes.iter().any(|n| n.kind.as_str() == kind && n.qualified_name == qn);
+        let r = crate::extract_source(
+            "Edge.pas",
+            src,
+            codegraph_types::Language::parse("pascal").unwrap(),
+        )
+        .unwrap();
+        let has = |kind: &str, qn: &str| {
+            r.nodes
+                .iter()
+                .any(|n| n.kind.as_str() == kind && n.qualified_name == qn)
+        };
         assert!(has("module", "Edge"));
         assert!(has("class", "TShape"));
         assert!(has("method", "TShape::Create"));
         assert!(has("function", "Helper"));
         assert!(has("function", "TShape::Create::Inner"));
         assert!(has("constant", "MAX_ITEMS"));
-        let ctor = r.nodes.iter().find(|n| n.qualified_name == "TShape::Create").unwrap();
-        assert_eq!(ctor.signature.as_deref(), Some("(const [ref] AName: string)"));
-        let refs: Vec<(&str, &str)> =
-            r.unresolved_references.iter().map(|x| (x.reference_kind.as_str(), x.reference_name.as_str())).collect();
+        let ctor = r
+            .nodes
+            .iter()
+            .find(|n| n.qualified_name == "TShape::Create")
+            .unwrap();
+        assert_eq!(
+            ctor.signature.as_deref(),
+            Some("(const [ref] AName: string)")
+        );
+        let refs: Vec<(&str, &str)> = r
+            .unresolved_references
+            .iter()
+            .map(|x| (x.reference_kind.as_str(), x.reference_name.as_str()))
+            .collect();
         assert!(refs.contains(&("extends", "TObject")));
         assert!(refs.contains(&("implements", "IShape")));
         assert!(refs.contains(&("imports", "System.SysUtils")));

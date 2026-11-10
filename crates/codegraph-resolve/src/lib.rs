@@ -2,6 +2,7 @@
 
 pub mod alias_binding;
 pub mod c_feature_variants;
+pub mod c_macro_renames;
 pub mod cpp_constructor;
 pub mod cpp_includers;
 pub mod cpp_macro_visibility;

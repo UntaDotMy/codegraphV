@@ -69,6 +69,7 @@ struct Cache {
     includes: HashMap<String, Option<String>>,
     by_basename: Option<HashMap<String, Vec<String>>>,
     roots: IndexMap<String, Rc<Timeline>>,
+    watched: HashMap<String, Rc<Timeline>>,
 }
 
 #[derive(Default)]
@@ -117,6 +118,32 @@ pub fn is_visible_cpp_macro(r: &UnresolvedRef, ctx: &Ctx) -> bool {
     }
     let before = timeline.events.get(&r.reference_name).map(|e| e.iter().filter(|e| e.line <= r.line as usize).last().copied());
     matches!(before, Some(Some(e)) if e.defined == Some(true))
+}
+
+/// Is `name` certainly defined as a macro at `line` of `file`, read as a translation unit?
+///
+/// A `#define` under a flag no file sets is not: redis's `#define RedisModuleString robj`
+/// holds in the core, which sets `REDISMODULE_CORE`, and not in a module that includes the
+/// same header.
+pub fn is_cpp_macro_defined_at(name: &str, file: &str, line: usize, language: Language, ctx: &Ctx) -> bool {
+    let cache = ctx.memo::<CacheCell>();
+    let key = format!("{}\0{}\0{}", language.as_str(), file, name);
+    let timeline = {
+        let existing = cache.0.borrow().watched.get(&key).cloned();
+        match existing {
+            Some(t) => t,
+            None => {
+                let t = Rc::new(walk_translation_unit_watched(file, language, ctx, &cache, Some(name)));
+                cache.0.borrow_mut().watched.insert(key, Rc::clone(&t));
+                t
+            }
+        }
+    };
+    if line >= timeline.cutoff {
+        return false;
+    }
+    let before = timeline.events.get(name).and_then(|events| events.iter().filter(|e| e.line <= line).last().copied());
+    matches!(before, Some(e) if e.defined == Some(true))
 }
 
 fn summarize(file: &str, ctx: &Ctx, cache: &CacheCell) -> Rc<Vec<FileEvent>> {
@@ -327,6 +354,8 @@ struct Walker<'a> {
     ctx: &'a Ctx,
     cache: &'a CacheCell,
     language: Language,
+    /// Follow this macro alone, and record whether it is defined, not whether it is function-like.
+    watched: Option<String>,
     timeline: HashMap<String, Vec<Event>>,
     definitions: HashMap<String, Definition>,
     scanning: HashSet<String>,
@@ -473,13 +502,19 @@ impl Walker<'_> {
                     {
                         self.version += 1;
                     }
+                    let next_defined = next.defined;
                     self.definitions.insert(name.clone(), next);
                     if *function_like && !self.macro_names.contains(name) {
                         self.macro_names.insert(name.clone());
                         self.version += 1;
                     }
-                    if self.macro_names.contains(name) {
-                        self.timeline.entry(name.clone()).or_default().push(Event { line, defined: now });
+                    let tracked = match &self.watched {
+                        Some(watched) => name == watched,
+                        None => self.macro_names.contains(name),
+                    };
+                    if tracked {
+                        let defined = if self.watched.is_some() { next_defined } else { now };
+                        self.timeline.entry(name.clone()).or_default().push(Event { line, defined });
                     }
                 }
                 FileEvent::Branch { .. } => {}
@@ -503,10 +538,21 @@ impl Walker<'_> {
 }
 
 fn walk_translation_unit(root_file: &str, language: Language, ctx: &Ctx, cache: &CacheCell) -> Timeline {
+    walk_translation_unit_watched(root_file, language, ctx, cache, None)
+}
+
+fn walk_translation_unit_watched(
+    root_file: &str,
+    language: Language,
+    ctx: &Ctx,
+    cache: &CacheCell,
+    watched: Option<&str>,
+) -> Timeline {
     let mut walker = Walker {
         ctx,
         cache,
         language,
+        watched: watched.map(String::from),
         timeline: HashMap::new(),
         definitions: HashMap::new(),
         scanning: HashSet::new(),

@@ -623,7 +623,7 @@ impl Driver {
     }
     fn ignores_dir(&self, path: &str) -> bool {
         let rel = nodepath::relative(&self.root, path).replace('\\', "/");
-        if rel.is_empty() || rel == "." || rel.starts_with("..") {
+        if rel.is_empty() || rel == "." || nodepath::leaves_root(&rel) {
             return false;
         }
         Self::always_ignored(&rel)
@@ -641,7 +641,7 @@ impl Driver {
         if !self.shared.lock().snapshot.active
             || rel.is_empty()
             || rel == "."
-            || rel.starts_with("..")
+            || nodepath::leaves_root(rel)
         {
             return;
         }

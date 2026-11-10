@@ -11,8 +11,9 @@ mod tables;
 pub use config::config_href_expression;
 pub use tables::is_table_route;
 
+pub(crate) use self::loader::initializer_at;
 use self::loader::{
-    first_import, function_parts, initializer_at, loaded_page, loader_value, new_scope, object_entries, statement_end, top_level_items,
+    first_import, function_parts, loaded_page, loader_value, new_scope, object_entries, statement_end, top_level_items,
     LAZY_ROUTE_PREFIX,
 };
 use self::scan::{compose_route_path, scan_route_declarations, RoutePart};
@@ -692,7 +693,7 @@ fn conditional_branches(text: &str) -> Option<(String, String)> {
 }
 
 /// A declarator's own source text: `B = lazy(…)` in `const A = lazy(…), B = lazy(…)`.
-fn declaration_text(node: &Node, ctx: &Ctx) -> String {
+pub(crate) fn declaration_text(node: &Node, ctx: &Ctx) -> String {
     let all: Rc<Vec<String>> = match ctx.get_file_lines(&node.file_path) {
         Some(lines) => lines,
         None => Rc::new(ctx.read_file(&node.file_path).map(|c| split_lines(&c)).unwrap_or_default()),

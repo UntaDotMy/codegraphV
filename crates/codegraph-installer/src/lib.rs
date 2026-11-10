@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    io::{self, Write},
     path::{Path, PathBuf},
 };
 mod edit;
 pub mod upgrade;
 mod markers;
+mod transaction;
+use transaction::read;
 pub mod original;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const TARGETS: &[&str] = &[
@@ -191,6 +192,9 @@ impl Environment {
     }
     pub fn instructions_path(&self, id: &str, loc: Location) -> Option<PathBuf> {
         match id {
+            "claude" if loc == Location::Local
+                && !self.project.join("CLAUDE.md").exists()
+                && !self.project.join(".claude/CLAUDE.md").exists() => Some(self.project.join("AGENTS.md")),
             "claude" => Some(
                 self.profile(loc, "CLAUDE_CONFIG_DIR", ".claude")
                     .join("CLAUDE.md"),
@@ -348,32 +352,92 @@ impl Environment {
         options: InstallOptions,
         remove: bool,
     ) -> Result<WriteResult> {
-        self.apply_as(&CODEGRAPHV, id, loc, options, remove)
+        Ok(self.apply_many(&[(id.to_owned(), options)], loc, remove)?.remove(0).1)
+    }
+    /// Plan and commit every target as one transaction: a write failure restores all of them.
+    pub fn apply_many(
+        &self,
+        requests: &[(String, InstallOptions)],
+        loc: Location,
+        remove: bool,
+    ) -> Result<Vec<(String, WriteResult)>> {
+        self.apply_many_as(&CODEGRAPHV, requests, loc, remove)
     }
     /// Remove everything `brand` wrote for `id` (its server entry, permission, prompt hook and
     /// instructions block), leaving every other product's entries alone.
     pub fn remove_as(&self, brand: &Brand, id: &str, loc: Location, dry_run: bool) -> Result<WriteResult> {
-        self.apply_as(brand, id, loc, InstallOptions { dry_run, ..InstallOptions::default() }, true)
+        Ok(self.remove_many_as(brand, &[id.to_owned()], loc, dry_run)?.remove(0).1)
     }
-    fn apply_as(
+    pub fn remove_many_as(&self, brand: &Brand, ids: &[String], loc: Location, dry_run: bool) -> Result<Vec<(String, WriteResult)>> {
+        let requests: Vec<_> = ids.iter().map(|id| (id.clone(), InstallOptions { dry_run, ..InstallOptions::default() })).collect();
+        self.apply_many_as(brand, &requests, loc, true)
+    }
+    fn apply_many_as(
+        &self,
+        brand: &Brand,
+        requests: &[(String, InstallOptions)],
+        loc: Location,
+        remove: bool,
+    ) -> Result<Vec<(String, WriteResult)>> {
+        let dry_run = requests.iter().any(|(_, options)| options.dry_run);
+        // Recovery writes, so a dry run must not trigger it.
+        let recovery = if dry_run { Vec::new() } else { transaction::recover(&self.home)? };
+        let mut merged: Vec<transaction::PlannedFile> = Vec::new();
+        let mut index: HashMap<PathBuf, usize> = HashMap::new();
+        let mut results: Vec<(String, WriteResult)> = Vec::new();
+        let batch: Vec<String> = requests.iter().map(|(id, _)| id.clone()).collect();
+        for (id, options) in requests {
+            let (mut notes, files) = self.plan_as(brand, id, loc, *options, remove, &batch)?;
+            if id == "codex" && loc == Location::Local && !remove {
+                notes.push("Codex applies project configuration only after the project is trusted.".into());
+            }
+            let mut result = WriteResult { files: Vec::new(), notes };
+            for file in files {
+                if let Some(&at) = index.get(&file.path) {
+                    if merged[at].after != file.after {
+                        return Err(format!(
+                            "Two integrations would write different content to {}; nothing was written. Configure them separately.",
+                            file.path.display()
+                        ).into());
+                    }
+                    // A later target observes the file as the earlier one leaves it.
+                    result.files.push(FileChange { path: file.path, action: "unchanged".into() });
+                } else {
+                    index.insert(file.path.clone(), merged.len());
+                    let action = action_for(&file, remove);
+                    result.files.push(FileChange { path: file.path.clone(), action: action.into() });
+                    merged.push(file);
+                }
+            }
+            results.push((id.clone(), result));
+        }
+        let mut notes = transaction::commit(&self.home, &merged, dry_run)?;
+        if let Some((_, first)) = results.first_mut() {
+            first.notes.extend(recovery);
+            first.notes.append(&mut notes);
+        }
+        Ok(results)
+    }
+    /// Compute one target's complete write set without touching the disk.
+    fn plan_as(
         &self,
         brand: &Brand,
         id: &str,
         loc: Location,
         options: InstallOptions,
         remove: bool,
-    ) -> Result<WriteResult> {
+        batch: &[String],
+    ) -> Result<(Vec<String>, Vec<transaction::PlannedFile>)> {
         // Only codegraphV is ever installed; another brand is only removed.
         let remove = remove || brand.server != CODEGRAPHV.server;
         if !self.supports(id, loc) {
-            return Ok(WriteResult {
-                files: vec![],
-                notes: vec![format!(
-                    "{id} supports global configuration only; use --location global."
-                )],
-            });
+            return Ok((
+                vec![format!("{id} supports global configuration only; use --location global.")],
+                vec![],
+            ));
         }
         let file = self.config_path(id, loc)?;
+        let existed = file.exists();
         let before = read(&file)?;
         let entry = self.entry(id, loc);
         let value = (!remove).then_some(&entry);
@@ -388,31 +452,72 @@ impl Environment {
                     before.clone()
                 };
                 match value {
-                    Some(value) => Some(edit::json(&legacy, &config_keys(id, brand.server), Some(value))?),
+                    Some(value) => {
+                        let keys = config_keys(id, brand.server);
+                        let data = jsonc_parser::parse_to_serde_value(if legacy.trim().is_empty() { "{}" } else { &legacy }, &Default::default())?.unwrap_or(json!({}));
+                        let mut existing = &data;
+                        for key in &keys { existing = &existing[*key]; }
+                        if !existing.is_null() && !existing.is_object() {
+                            return Err("Managed MCP entry must be an object; nothing was changed.".into());
+                        }
+                        let mut merged = legacy.clone();
+                        for (key, val) in value.as_object().unwrap() {
+                            // Refresh launch wiring, retaining per-server user preferences.
+                            if matches!(key.as_str(), "command" | "args") || existing.get(key).is_none() {
+                                let mut path = keys.clone();
+                                path.push(key);
+                                merged = edit::json(&merged, &path, Some(val))?;
+                            }
+                        }
+                        Some(merged)
+                    },
                     None => remove_json(&before, &legacy, &config_keys(id, brand.server))?,
                 }
             }
         };
         // `None` deletes the file: uninstall left nothing in it.
-        let mut planned: Vec<(PathBuf, String, Option<String>)> = vec![(file, before, after)];
-        if let Some(file) = self.instructions_path(id, loc) {
+        let mut planned = vec![planned_file(file, existed, before, after)];
+        // Installation writes one primary path. Removal also looks where an earlier install
+        // wrote before the user created a file that shadows it (A34/A35).
+        let instruction_paths: Vec<PathBuf> = if remove {
+            self.instruction_files(id, loc)
+        } else {
+            self.instructions_path(id, loc).into_iter().collect()
+        };
+        for file in instruction_paths {
+            let existed = file.exists();
             let before = read(&file)?;
-            let after = if remove {
-                match markers::strip(&before, brand.start, brand.end) {
-                    Some(rest) if markers::is_blank(&rest) => None,
-                    Some(rest) => Some(rest),
-                    None => Some(before.clone()),
+            if remove {
+                // Only files that name this product's markers can be edited, so an unrelated
+                // malformed example elsewhere never blocks an uninstall.
+                if !before.contains(brand.start) && !before.contains(brand.end) {
+                    continue;
                 }
+                let shared = TARGETS.iter().any(|other| *other != id
+                    && !batch.iter().any(|removed| removed == other)
+                    && self.supports(other, loc)
+                    && self.instructions_path(other, loc).as_ref() == Some(&file)
+                    && self.configured_as(brand, other, loc));
+                if shared {
+                    continue;
+                }
+                markers::validate(&before, brand.start, brand.end)?;
+                let Some(after) = markers::strip_preserving(&before, brand.start, brand.end) else {
+                    continue;
+                };
+                planned.push(planned_file(file, existed, before, after));
             } else {
-                let existing = file.exists().then_some(before.as_str());
-                Some(markers::upsert(existing, INSTRUCTIONS, brand.start, brand.end))
-            };
-            planned.push((file, before, after));
+                markers::validate(&before, brand.start, brand.end)?;
+                let existing = existed.then_some(before.as_str());
+                let after = markers::upsert_preserving(existing, INSTRUCTIONS, brand.start, brand.end);
+                planned.push(transaction::PlannedFile { path: file, before: existed.then_some(before), after: Some(after) });
+            }
         }
         if id == "claude" {
             let settings = self
                 .profile(loc, "CLAUDE_CONFIG_DIR", ".claude")
                 .join("settings.json");
+            let existed = settings.exists();
             let before = read(&settings)?;
             let parse = |text: &str| -> Result<Value> {
                 Ok(jsonc_parser::parse_to_serde_value(if text.trim().is_empty() { "{}" } else { text }, &Default::default())?
@@ -420,7 +525,8 @@ impl Environment {
             };
             // Permissions, then the prompt hook, applied in turn to the same file.
             let mut after: Option<String> = Some(before.clone());
-            if !before.is_empty() || !remove && options.auto_allow {
+            validate_claude_settings(&parse(&before)?)?;
+            if (remove || !options.preserve_permissions) && (!before.is_empty() || options.auto_allow) {
                 let data = parse(&before)?;
                 let mut allow = data["permissions"]["allow"]
                     .as_array()
@@ -459,14 +565,15 @@ impl Environment {
                 }
             }
             if after.as_ref() != Some(&before) {
-                planned.push((settings, before, after));
+                planned.push(planned_file(settings, existed, before, after));
             }
             if loc == Location::Local {
                 let file = self.project.join(".claude.json");
+                let existed = file.exists();
                 let before = read(&file)?;
                 if !before.is_empty() {
                     let after = remove_json(&before, &before, &["mcpServers", brand.server])?;
-                    planned.push((file, before, after));
+                    planned.push(planned_file(file, existed, before, after));
                 }
             }
         }
@@ -476,52 +583,50 @@ impl Environment {
                 ".gemini/antigravity/mcp_config.json",
             ] {
                 let path = self.home.join(suffix);
-                if !planned.iter().any(|(p, _, _)| p == &path) {
+                if !planned.iter().any(|p| p.path == path) {
+                    let existed = path.exists();
                     let before = read(&path)?;
                     if !before.is_empty() {
                         let after = remove_json(&before, &before, &["mcpServers", brand.server])?;
-                        planned.push((path, before, after));
+                        planned.push(planned_file(path, existed, before, after));
                     }
                 }
             }
         }
-        let mut result = WriteResult::default();
-        for (path, before, after) in planned {
-            let exists = path.exists();
-            let action = if after.as_ref() == Some(&before) || after.is_none() && !exists {
-                if exists {
-                    "unchanged"
-                } else {
-                    "not-found"
-                }
-            } else {
-                match &after {
-                    _ if options.dry_run => {}
-                    Some(text) => write_atomic(&path, text)?,
-                    // A link is emptied through, never replaced by deleting it.
-                    None if path.is_symlink() => write_atomic(&path, "")?,
-                    None => std::fs::remove_file(&path)?,
-                }
-                if remove {
-                    "removed"
-                } else if exists {
-                    "updated"
-                } else {
-                    "created"
-                }
-            };
-            result.files.push(FileChange {
-                path,
-                action: action.into(),
-            });
-        }
-        if id == "codex" && loc == Location::Local && !remove {
-            result.notes.push(
-                "Codex applies project configuration only after the project is trusted.".into(),
-            );
-        }
-        Ok(result)
+        Ok((Vec::new(), planned))
     }
+    /// Every path this target may have written its instructions block to. Claude uses
+    /// AGENTS.md only while no CLAUDE.md exists; removal must still find a block the user has
+    /// since shadowed by creating one (A34/A35).
+    fn instruction_files(&self, id: &str, loc: Location) -> Vec<PathBuf> {
+        let primary = self.instructions_path(id, loc);
+        if id == "claude" && loc == Location::Local {
+            let mut files = vec![self.project.join("AGENTS.md")];
+            files.extend(primary);
+            files.sort();
+            files.dedup();
+            files
+        } else {
+            primary.into_iter().collect()
+        }
+    }
+}
+fn action_for(file: &transaction::PlannedFile, remove: bool) -> &'static str {
+    if file.after == file.before {
+        if file.before.is_some() { "unchanged" } else { "not-found" }
+    } else if remove {
+        "removed"
+    } else if file.before.is_some() {
+        "updated"
+    } else {
+        "created"
+    }
+}
+/// A missing file whose planned result is empty stays missing: removal of an entry that was
+/// never there must not create an empty config file.
+fn planned_file(path: PathBuf, existed: bool, before: String, after: Option<String>) -> transaction::PlannedFile {
+    let after = if !existed && after.as_deref().is_some_and(str::is_empty) { None } else { after };
+    transaction::PlannedFile { path, before: existed.then_some(before), after }
 }
 fn config_keys<'a>(id: &str, server: &'a str) -> Vec<&'a str> {
     match id {
@@ -533,6 +638,8 @@ fn config_keys<'a>(id: &str, server: &'a str) -> Vec<&'a str> {
 #[derive(Debug, Clone, Copy)]
 pub struct InstallOptions {
     pub auto_allow: bool,
+    /// Refresh leaves the user's current allow list exactly as configured.
+    pub preserve_permissions: bool,
     /// Claude's front-load `UserPromptSubmit` hook: Some(true) writes it, Some(false) strips it
     /// (an opt-out round-trips), None leaves whatever is there (a refresh).
     pub prompt_hook: Option<bool>,
@@ -543,6 +650,7 @@ impl Default for InstallOptions {
     fn default() -> Self {
         Self {
             auto_allow: true,
+            preserve_permissions: false,
             prompt_hook: None,
             dry_run: false,
         }
@@ -553,16 +661,48 @@ impl Default for InstallOptions {
 /// (BUG-95). Still recognized, and replaced by [`prompt_hook_command`].
 pub const PROMPT_HOOK_COMMAND: &str = "codegraphV prompt-hook";
 
-/// The hook command `install` writes: the binary's absolute path, quoted, with forward slashes
-/// so Git Bash (Claude Code's hook shell on Windows) and sh read it alike. Like the MCP entry,
-/// it then runs whatever PATH the agent inherited.
+/// Executable for Claude's direct-exec hook form; paired with an explicit argument vector.
+/// Requires a host supporting command hooks with `args` (current Claude hook contract).
 pub fn prompt_hook_command(executable: &str) -> String {
-    format!("\"{}\" prompt-hook", executable.replace('\\', "/"))
+    executable.to_owned()
+}
+
+fn is_prompt_hook(brand: &Brand, hook: &Value) -> bool {
+    if hook["type"] != "command" { return false; }
+    if hook.get("args").is_some() {
+        if hook["args"] != json!(["prompt-hook"]) { return false; }
+        let Some(program) = hook["command"].as_str() else { return false; };
+        let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+        return name.eq_ignore_ascii_case(brand.binary)
+            || name.eq_ignore_ascii_case(&format!("{}.exe", brand.binary));
+    }
+    is_prompt_hook_command(brand, &hook["command"])
+}
+
+fn validate_claude_settings(data: &Value) -> Result<()> {
+    if !data.is_object() { return Err("Claude settings must be an object".into()); }
+    if let Some(permissions) = data.get("permissions") {
+        if !permissions.is_object() || permissions.get("allow").is_some_and(|v| !v.is_array()) {
+            return Err("Malformed Claude permissions; nothing was changed".into());
+        }
+    }
+    if let Some(hooks) = data.get("hooks") {
+        let events = hooks.as_object().ok_or("Claude hooks must be an object; nothing was changed")?;
+        for groups in events.values() {
+            let groups = groups.as_array().ok_or("Claude hook event must be an array; nothing was changed")?;
+            for group in groups {
+                if !group.is_object() || !group.get("hooks").is_some_and(Value::is_array) {
+                    return Err("Malformed Claude hook group; nothing was changed".into());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_prompt_hook_command(brand: &Brand, command: &Value) -> bool {
     let Some(command) = command.as_str() else { return false };
-    if brand.hook_forms.iter().any(|f| command.contains(f)) {
+    if brand.hook_forms.iter().any(|f| command.trim() == *f) {
         return true;
     }
     // `"<dir>/<binary>[.exe]" prompt-hook` or `<dir>/<binary> prompt-hook`.
@@ -572,7 +712,11 @@ fn is_prompt_hook_command(brand: &Brand, command: &Value) -> bool {
             Some(split) => split,
             None => return false,
         },
-        None => command.split_once(char::is_whitespace).unwrap_or((command, "")),
+        None => {
+            let split = command.split_once(char::is_whitespace).unwrap_or((command, ""));
+            if split.0.contains([';', '&', '|', '<', '>', '$', '`', '(', ')']) { return false; }
+            split
+        },
     };
     if rest.trim() != "prompt-hook" {
         return false;
@@ -586,7 +730,7 @@ fn is_prompt_hook_command(brand: &Brand, command: &Value) -> bool {
 fn has_prompt_hook(brand: &Brand, hooks: Option<&Value>) -> bool {
     hooks.and_then(Value::as_object).is_some_and(|events| {
         events.values().filter_map(Value::as_array).flatten().any(|group| {
-            group["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_prompt_hook_command(brand, &h["command"])))
+            group["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_prompt_hook(brand, h)))
         })
     })
 }
@@ -603,15 +747,16 @@ fn prompt_hook_hooks(brand: &Brand, hooks: Option<&Value>, on: bool, command: &s
         let groups = hooks["UserPromptSubmit"].as_array_mut().unwrap();
         let mut already = false;
         for hook in groups.iter_mut().filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut)).flatten() {
-            if is_prompt_hook_command(brand, &hook["command"]) {
+            if is_prompt_hook(brand, hook) {
                 already = true;
                 if hook["command"] != command {
                     hook["command"] = json!(command);
                 }
+                hook["args"] = json!(["prompt-hook"]);
             }
         }
         if !already {
-            groups.push(json!({"hooks": [{"type": "command", "command": command}]}));
+            groups.push(json!({"hooks": [{"type": "command", "command": command, "args": ["prompt-hook"]}]}));
         }
         return Some(hooks);
     }
@@ -619,23 +764,25 @@ fn prompt_hook_hooks(brand: &Brand, hooks: Option<&Value>, on: bool, command: &s
     let mut hooks = original.clone();
     let Some(events) = hooks.as_object_mut() else { return Some(hooks) };
     let mut removed = false;
-    for groups in events.values_mut().filter_map(Value::as_array_mut) {
-        for group in groups.iter_mut() {
+    events.retain(|_, groups| {
+        let Some(groups) = groups.as_array_mut() else { return true; };
+        let was_empty = groups.is_empty();
+        groups.retain_mut(|group| {
+            let mut changed = false;
             if let Some(hs) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 let before = hs.len();
-                hs.retain(|h| !is_prompt_hook_command(brand, &h["command"]));
-                removed |= hs.len() != before;
+                hs.retain(|h| !is_prompt_hook(brand, h));
+                changed = hs.len() != before;
+                removed |= changed;
             }
-        }
-    }
+            !changed || !group["hooks"].as_array().is_some_and(|hs| hs.is_empty())
+                || group.as_object().is_some_and(|g| g.len() > 1)
+        });
+        was_empty || !groups.is_empty()
+    });
     if !removed {
         return Some(original.clone());
     }
-    // Prune emptied groups, then events with no groups left, then `hooks` itself.
-    for groups in events.values_mut().filter_map(Value::as_array_mut) {
-        groups.retain(|g| !g["hooks"].as_array().is_some_and(|hs| hs.is_empty()));
-    }
-    events.retain(|_, groups| !groups.as_array().is_some_and(|g| g.is_empty()));
     (!events.is_empty()).then_some(hooks)
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -647,13 +794,6 @@ pub struct WriteResult {
 pub struct FileChange {
     pub path: PathBuf,
     pub action: String,
-}
-fn read(path: &Path) -> io::Result<String> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => Ok(s),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e),
-    }
 }
 /// `text` (`original` after earlier edits) without the value at `path` and without the
 /// objects that removal leaves empty; `None` when the document is then empty.
@@ -672,31 +812,4 @@ fn remove_json(original: &str, text: &str, path: &[&str]) -> Result<Option<Strin
     }
     let empty = !out.trim().is_empty() && parse(&out)?.as_object().is_some_and(|o| o.is_empty());
     Ok(if out != original && empty { None } else { Some(out) })
-}
-fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
-    let target = if path.is_symlink() {
-        std::fs::canonicalize(path)?
-    } else {
-        path.to_owned()
-    };
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut temp = target.as_os_str().to_os_string();
-    temp.push(format!(".codegraph-{}.tmp", std::process::id()));
-    let temp = PathBuf::from(temp);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let result = (|| {
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temp, &target)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
 }

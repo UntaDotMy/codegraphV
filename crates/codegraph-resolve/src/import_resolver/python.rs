@@ -56,6 +56,32 @@ pub struct PythonStarExportMemo(RefCell<HashMap<String, Option<Rc<HashSet<String
 const PYTHON_NON_PROJECT_DIRS: &[&str] =
     &["tests", "test", "testing", "fixtures", "testdata", "examples", "example", "samples", "vendor", "third_party"];
 
+/// `sys.stdlib_module_names`, less the private `_x` modules. A folder only a script has on
+/// its path never takes one of these. CPython's own `test` package is not one of them.
+const PYTHON_STDLIB_MODULES: &[&str] = &[
+    "__future__", "abc", "annotationlib", "antigravity", "argparse", "array", "ast", "asyncio", "atexit", "base64", "bdb",
+    "binascii", "bisect", "builtins", "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections",
+    "colorsys", "compileall", "compression", "concurrent", "configparser", "contextlib", "contextvars", "copy", "copyreg", "csv",
+    "ctypes", "curses", "dataclasses", "datetime", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "ensurepip",
+    "enum", "errno", "faulthandler", "fcntl", "filecmp", "fileinput", "fnmatch", "fractions", "ftplib", "functools", "gc", "genericpath",
+    "getopt", "getpass", "gettext", "glob", "graphlib", "grp", "gzip", "hashlib", "heapq", "hmac", "html", "http", "idlelib", "imaplib",
+    "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword", "linecache", "locale", "logging", "lzma", "mailbox",
+    "marshal", "math", "mimetypes", "mmap", "modulefinder", "msvcrt", "multiprocessing", "netrc", "nt", "ntpath", "nturl2path", "numbers",
+    "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle", "pickletools", "pkgutil", "platform", "plistlib", "poplib", "posix",
+    "posixpath", "pprint", "profile", "profiling", "pstats", "pty", "pwd", "py_compile", "pyclbr", "pydoc", "pydoc_data", "pyexpat", "queue",
+    "quopri", "random", "re", "readline", "reprlib", "resource", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve",
+    "shlex", "shutil", "signal", "site", "smtplib", "socket", "socketserver", "sqlite3", "ssl", "stat", "statistics", "string", "stringprep",
+    "struct", "subprocess", "symtable", "sys", "sysconfig", "syslog", "tabnanny", "tarfile", "tempfile", "termios", "textwrap", "this",
+    "threading", "time", "timeit", "tkinter", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc", "tty", "turtle",
+    "turtledemo", "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "venv", "warnings", "wave", "weakref", "webbrowser",
+    "winreg", "winsound", "wsgiref", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo",
+];
+
+fn python_stdlib_module(specifier: &str) -> bool {
+    let head = specifier.split('.').next().unwrap_or("");
+    PYTHON_STDLIB_MODULES.contains(&head)
+}
+
 pub fn parent_dir(dir: &str) -> String {
     match dir.rfind('/') {
         Some(i) => dir[..i].to_string(),
@@ -189,7 +215,7 @@ fn declared_python_roots(ctx: &Ctx, service: &str) -> Vec<String> {
         let t = re!(r#"^["']|["']$"#, "g").replace_all_str(t, "");
         let t = re!(r"^\.(?:/|$)").replace_all_str(&t, "");
         let dir = re!(r"/+$").replace_all_str(&t, "");
-        if dir.is_empty() || dir.starts_with("..") || nodepath::is_absolute(&dir) {
+        if dir.is_empty() || nodepath::leaves_root(&dir) {
             return;
         }
         out.push(join_rel(service, &dir));
@@ -423,7 +449,62 @@ pub fn resolve_python_module(specifier: &str, from_file: &str, ctx: &Ctx) -> Opt
         }
         found = Some(hit);
     }
-    found
+    found.or_else(|| python_module_of_script(specifier, &rel_path, from_file, &importer_dir, &index, ctx))
+}
+
+/// The module only a script's own `sys.path[0]` provides, which no root does. That includes
+/// the importer's own folder, even when it holds an `__init__.py`, and a folder above a script
+/// that is not a package. A stdlib name never qualifies. A module that imports its own name
+/// wraps the real one, so it is not the answer for its neighbours or for itself. Otherwise
+/// every name the importer takes must be one the file defines at module level. A plain import
+/// or a star import takes no name and stays unresolved. Nearest folder first. A package above
+/// the importer is passed over.
+fn python_module_of_script(
+    specifier: &str,
+    rel_path: &str,
+    from_file: &str,
+    importer_dir: &str,
+    index: &PythonModuleIndex,
+    ctx: &Ctx,
+) -> Option<String> {
+    if python_stdlib_module(specifier) {
+        return None;
+    }
+    let taken: Vec<String> = ctx
+        .get_import_mappings(from_file, Language::Python)
+        .iter()
+        .filter(|imp| imp.source == specifier && !imp.is_namespace && imp.exported_name != "*")
+        .map(|imp| imp.exported_name.clone())
+        .collect();
+    if taken.is_empty() {
+        return None;
+    }
+    let mut dir = importer_dir.to_string();
+    while !dir.is_empty() {
+        let skip_package = dir != importer_dir && index.package_dirs.contains(&dir);
+        if !skip_package {
+            if let Some(file) = python_module_under(&dir, rel_path, index) {
+                let wraps = ctx.get_import_mappings(&file, Language::Python).iter().any(|imp| imp.source == specifier);
+                if !wraps {
+                    let defined: HashSet<String> = ctx
+                        .get_nodes_in_file(&file)
+                        .iter()
+                        .filter(|n| is_python_module_level_name(n))
+                        .map(|n| n.name.clone())
+                        .collect();
+                    if taken.iter().all(|name| defined.contains(name)) {
+                        return Some(file);
+                    }
+                }
+            }
+        }
+        dir = parent_dir(&dir);
+    }
+    None
+}
+
+fn is_python_module_level_name(n: &NodeRef) -> bool {
+    matches!(n.kind, NodeKind::Function | NodeKind::Class | NodeKind::Variable | NodeKind::Constant) && !n.qualified_name.contains("::")
 }
 
 /// A digest of the Python root set — each root with its tier and reach. A change here can move
@@ -513,6 +594,54 @@ pub fn python_reopen_scope(ctx: &Ctx, changed_files: &[String]) -> PythonReopenS
         leaves.insert(m[m.rfind('.').map_or(0, |i| i + 1)..].to_string());
     }
     PythonReopenScope { target_files, source_dirs: source_dirs.into_iter().collect(), module_leaves: leaves.into_iter().collect() }
+}
+
+/// What an edit of these Python files can move through [`python_module_of_script`]. Such a
+/// module binds only while it defines the names its importers take, so an edit links or unlinks
+/// them though no file appeared or vanished. Each folder above a module asks for the spelling
+/// that reaches it from there: a file in a package folder, or a file anywhere below a plain
+/// folder that is not a root. An edit nobody imports that way re-opens nothing.
+pub fn python_script_module_scope(ctx: &Ctx, edited_files: &[String]) -> PythonReopenScope {
+    let index = python_module_index(ctx);
+    let mut target_files = Vec::new();
+    let mut module_leaves = Vec::new();
+    for raw in edited_files {
+        let file = raw.replace('\\', "/");
+        if !re!(r"\.py$").is_match(&file) {
+            continue;
+        }
+        let stripped = re!(r"(?:^|/)__init__\.py$").replace_all_str(&file, "");
+        let module = re!(r"\.py$").replace_all_str(&stripped, "");
+        let mut dir = parent_dir(&module);
+        while !dir.is_empty() {
+            let specifier = module[dir.len() + 1..].replace('/', ".");
+            if python_stdlib_module(&specifier) {
+                dir = parent_dir(&dir);
+                continue;
+            }
+            let importers: Vec<String> = ctx
+                .get_nodes_by_name(&specifier)
+                .iter()
+                .filter(|n| n.kind == NodeKind::Import && re!(r"\.py$").is_match(&n.file_path))
+                .map(|n| parent_dir(&n.file_path))
+                .collect();
+            let reached = if index.package_dirs.contains(&dir) {
+                importers.iter().any(|d| d == &dir)
+            } else {
+                !index.project_roots.contains(&dir)
+                    && !index.local_roots.contains_key(&dir)
+                    && importers.iter().any(|d| d.starts_with(&format!("{dir}/")))
+            };
+            if reached {
+                let leaf = module[module.rfind('/').map(|i| i + 1).unwrap_or(0)..].to_string();
+                target_files.push(file);
+                module_leaves.push(leaf);
+                break;
+            }
+            dir = parent_dir(&dir);
+        }
+    }
+    PythonReopenScope { target_files, source_dirs: Vec::new(), module_leaves }
 }
 
 /// The Python files that import one of the packages whose `__init__.py` is in `init_files`, each

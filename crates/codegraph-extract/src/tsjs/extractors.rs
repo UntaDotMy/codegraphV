@@ -151,18 +151,30 @@ impl<'t> Walker<'t> {
             return None;
         }
         let left = assignment.child_by_field_name("left")?;
-        if left.kind() != "member_expression" {
-            return None;
-        }
-        let object = left.child_by_field_name("object")?;
-        let property = left.child_by_field_name("property")?;
-        if property.kind() != "property_identifier" {
-            return None;
-        }
+        let object = match left.kind() {
+            "member_expression" => left.child_by_field_name("object")?,
+            // `exports["name"] = …` is the same export as `exports.name = …`; a computed
+            // `exports[key]` or a template is not a name.
+            "subscript_expression" => left.child_by_field_name("object")?,
+            _ => return None,
+        };
         if !matches!(self.text(object), "exports" | "module.exports") {
             return None;
         }
-        Some(self.text(property).to_string())
+        if left.kind() == "member_expression" {
+            let property = left.child_by_field_name("property")?;
+            return (property.kind() == "property_identifier").then(|| self.text(property).to_string());
+        }
+        let index = left.child_by_field_name("index").or_else(|| left.named_child(1))?;
+        if !matches!(index.kind(), "string" | "string_fragment") {
+            return None;
+        }
+        let raw = self.text(index);
+        let name = raw.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+        let valid = !name.is_empty()
+            && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+        valid.then(|| name.to_string())
     }
 
     // --- reactComponentHoc / extractReactComponentNode (#841) --------------------

@@ -153,6 +153,24 @@ pub static JAVA_STD_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| 
     ])
 });
 
+/// The `?` and `!` methods of Ruby's core classes. Nearly every receiver answers them, so the one
+/// project method of such a name says nothing about one.
+pub static RUBY_STD_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    set(&[
+        "nil?", "is_a?", "kind_of?", "instance_of?", "respond_to?", "frozen?", "equal?", "eql?", "instance_variable_defined?",
+        "between?", "zero?", "positive?", "negative?", "nonzero?", "even?", "odd?", "finite?", "infinite?", "nan?", "integer?",
+        "empty?", "any?", "all?", "none?", "one?", "include?", "member?", "key?", "has_key?", "value?", "has_value?", "cover?",
+        "disjoint?", "intersect?", "subset?", "superset?", "proper_subset?", "proper_superset?",
+        "start_with?", "end_with?", "match?", "ascii_only?", "valid_encoding?", "casecmp?",
+        "eof?", "closed?", "tty?", "exist?", "file?", "directory?", "absolute?", "relative?", "alive?", "lambda?",
+        "blank?", "present?",
+        "merge!", "map!", "collect!", "select!", "filter!", "reject!", "compact!", "flatten!", "uniq!", "sort!", "sort_by!",
+        "reverse!", "rotate!", "shuffle!", "slice!", "transform_keys!", "transform_values!", "gsub!", "sub!", "strip!",
+        "lstrip!", "rstrip!", "chomp!", "chop!", "squeeze!", "upcase!", "downcase!", "capitalize!", "swapcase!", "tr!",
+        "delete!", "next!", "succ!", "encode!", "scrub!", "delete_prefix!", "delete_suffix!",
+    ])
+});
+
 /// `isStdMethodName(language, name)`: is `name` a standard-library method of `language`?
 pub fn is_std_method_name(language: &str, name: &str) -> bool {
     match language {
@@ -165,6 +183,7 @@ pub fn is_std_method_name(language: &str, name: &str) -> bool {
         "csharp" => CSHARP_STD_METHODS.contains(name),
         "vbnet" => VBNET_STD_METHODS.contains(js_lower(name).as_str()),
         "dart" => DART_STD_METHODS.contains(name),
+        "ruby" => RUBY_STD_METHODS.contains(name),
         _ => false,
     }
 }

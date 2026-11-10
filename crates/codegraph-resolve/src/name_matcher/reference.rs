@@ -539,6 +539,12 @@ fn match_reference_inner(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     if let Some(result) = match_by_file_path(r, ctx) {
         return Some(result);
     }
+    // A dotted Java, Kotlin or C# supertype (`extends Outer.Inner`) is a nested
+    // type's path: the type the file can name, or nothing.
+    let dotted = super::exact::match_dotted_supertype(r, ctx);
+    if !dotted.is_undefined() {
+        return dotted.value();
+    }
     if let Some(result) = match_by_qualified_name(r, ctx) {
         return Some(result);
     }

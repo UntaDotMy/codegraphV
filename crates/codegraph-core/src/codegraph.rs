@@ -20,7 +20,7 @@ use codegraph_extract::languages::is_file_level_only_language;
 use codegraph_extract::scan::config::load_deprioritize_patterns;
 use codegraph_extract::scan::ignore::Ignore;
 use codegraph_graph::{GraphQueryManager, GraphTraverser};
-use codegraph_resolve::callback_synthesizer::{has_synthesis_pattern, is_jsx_child_candidate, synthesize_callback_edges};
+use codegraph_resolve::callback_synthesizer::{alias_may_name, has_synthesis_pattern, is_jsx_child_candidate, synthesize_callback_edges};
 use codegraph_resolve::module_importers::{
     reopen_name_matched_imports, reopen_references_through_added_files, reopen_references_through_barrels,
     reopen_references_through_changed_defaults, reopen_references_through_declared_packages, ChangedFile, ImportReader,
@@ -350,7 +350,7 @@ impl CodeGraph {
             } else {
                 file_path.replace('\\', "/")
             };
-            if rel.is_empty() || rel.starts_with("..") {
+            if rel.is_empty() || codegraph_types::nodepath::leaves_root(&rel) {
                 return false;
             }
             slot.as_ref().map(|(_, ig)| ig.ignores(&rel).unwrap_or(false)).unwrap_or(false)
@@ -568,6 +568,10 @@ impl CodeGraph {
         if result.success {
             self.stamp_python_root_fingerprint(None);
             self.stamp_workspace_fingerprint(None);
+            let (aliases, go, cargo) = self.resolver().context().refresh_module_configuration();
+            self.store.set_metadata("module_alias_config", &aliases)?;
+            self.store.set_metadata("module_go_config", &go)?;
+            self.store.set_metadata("module_cargo_config", &cargo)?;
             self.stamp_indexed_frameworks();
         }
         if result.success && result.files_indexed > 0 {
@@ -831,11 +835,13 @@ impl CodeGraph {
 
         // A component a tag in an unchanged file may render: `<Team />` links to the `Team` this
         // sync adds. Removing one needs no check: a component a tag rendered had synthesized edges
-        // into its file.
+        // into its file. A function a const in an unchanged file names is the same: `const late =
+        // fns.join` links to the `join` this sync adds.
         if !refresh_synthesis {
             if let (Some(delta), Some(changed)) = (&result.definition_delta, &result.changed_file_paths) {
                 let delta: HashSet<&str> = delta.iter().map(String::as_str).collect();
-                if store.get_nodes_by_files(changed)?.iter().any(|n| delta.contains(n.name.as_str()) && is_jsx_child_candidate(n.kind, &n.name, n.language)) {
+                let defined: Vec<Node> = store.get_nodes_by_files(changed)?.into_iter().filter(|n| delta.contains(n.name.as_str())).collect();
+                if defined.iter().any(|n| is_jsx_child_candidate(n.kind, &n.name, n.language)) || alias_may_name(store, &defined) {
                     refresh_synthesis = true;
                     store.set_metadata("synthesis_pending", "1")?;
                 }
@@ -892,6 +898,23 @@ impl CodeGraph {
         }
 
         // Resolve references if files were updated.
+        let (aliases, go, cargo) = self.resolver().context().refresh_module_configuration();
+        for (key, current, languages) in [
+            ("module_alias_config", aliases, ESM_IMPORT_LANGUAGES.to_vec()),
+            ("module_go_config", go, vec![Language::Go]),
+            ("module_cargo_config", cargo, vec![Language::Rust]),
+        ] {
+            let previous = store.get_metadata(key)?;
+            if previous.as_deref().is_some_and(|old| old != current) {
+                self.resolver().clear_caches();
+                for language in languages { self.orchestrator.resurrect_resolution_edges_for_language(language)?; }
+                refresh_synthesis = true;
+                store.set_metadata("synthesis_pending", "1")?;
+            }
+            if previous.as_deref() != Some(current.as_str()) { store.set_metadata(key, &current)?; }
+        }
+
+        // Resolve references if files were updated.
         let files_changed = result.files_added > 0 || result.files_modified > 0;
         // The last edge before the failed-ref retry below: the rebind's per-name ceiling counts
         // only edges up to it (see resurrect_stale_resolution_edges).
@@ -899,14 +922,19 @@ impl CodeGraph {
         // And the last edge before this sync resolved anything: an importer's edge up to it was
         // bound before a module this sync adds was there.
         let edges_before_resolution = store.get_max_edge_id()?;
-        if files_changed {
+        // A sync that only deleted or renamed definitions still has work: failed references that
+        // shared the removed name can now bind (upstream 2d98c1b6).
+        let has_delta = result.definition_delta.as_ref().is_some_and(|delta| !delta.is_empty());
+        if files_changed || has_delta {
             if let Some(changed) = result.changed_file_paths.clone() {
                 self.resolve_changed_files(&result, &changed, edges_before_resolution, &mut edges_before_retry, on_progress)?;
-            } else {
+            } else if files_changed {
                 // No git info — use batched resolution to avoid OOM.
                 let unresolved_count = store.get_unresolved_references_count()? as usize;
                 emit(on_progress, IndexPhase::Resolving, 0, unresolved_count);
                 self.resolve_references_batched(on_progress, false)?;
+            } else {
+                self.resolve_changed_files(&result, &[], edges_before_resolution, &mut edges_before_retry, on_progress)?;
             }
         }
 
@@ -976,6 +1004,26 @@ impl CodeGraph {
                         self.resolver().clear_caches();
                         let bindings = self.resolver().get_python_package_importers(&edited_inits);
                         reopened.extend(self.orchestrator.resurrect_python_package_importers(&bindings)?);
+                    }
+                    // An edit can give a module that only a script's folder provides the names its importers take, or take them away.
+                    let edited_modules: Vec<String> = result
+                        .changed_file_paths
+                        .iter()
+                        .flatten()
+                        .filter(|f| python_files_before.contains(*f) && after.contains(*f))
+                        .cloned()
+                        .collect();
+                    if !edited_modules.is_empty() {
+                        let scope = self.resolver().get_python_script_module_scope(&edited_modules);
+                        if !scope.target_files.is_empty() {
+                            self.resolver().clear_caches();
+                            reopened.extend(self.orchestrator.resurrect_resolution_edges_touching(
+                                Language::Python,
+                                &scope.target_files,
+                                &scope.source_dirs,
+                                &scope.module_leaves,
+                            )?);
+                        }
                     }
                     // Resolve the narrow set now, the way the changed files' own references were
                     // resolved above, rather than leaving a handful of refs to the orphan sweep.
@@ -1103,6 +1151,10 @@ impl CodeGraph {
         let t = Instant::now();
         *edges_before_retry = Some(store.get_max_edge_id()?);
         let mut names: IndexSet<String> = store.get_node_names_by_files(changed, None)?.into_iter().collect();
+        // A deletion or a rename removes definitions the changed files no longer list, so the
+        // failed references that shared those names are only visible through the delta
+        // (upstream 2d98c1b6).
+        names.extend(result.definition_delta.iter().flatten().cloned());
         for f in changed {
             names.extend(codegraph_db::reference_tail::module_reference_keys(f));
         }
@@ -1224,6 +1276,10 @@ impl CodeGraph {
         let name_matched = reopen_name_matched_imports(store, &reader, &edited_modules, edges_before_resolution, &module_resolver, &resolve_now)?;
         if timings() {
             eprintln!("[phase-timing] sync-name-matched-imports: {}ms ({} refs re-opened)", t.elapsed().as_millis(), name_matched);
+        }
+        if let Some(paths) = &result.re_exports_changed_file_paths {
+            let modules: Vec<_> = edited_modules.into_iter().filter(|m| paths.contains(&m.path)).collect();
+            codegraph_resolve::module_importers::reopen_references_through_retargeted_modules(store, &reader, &modules)?;
         }
         Ok(())
     }

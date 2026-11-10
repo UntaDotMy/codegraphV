@@ -12,6 +12,7 @@ use super::same_language_family;
 use crate::ambient_modules::is_merged_ambient_declaration;
 use crate::ctx::Ctx;
 use crate::types::{NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
+use codegraph_extract::strip_comments::strip_comments_for_regex;
 use codegraph_jsre::{escape_regex, re, Re};
 use codegraph_types::jscompat::js_trim;
 use codegraph_types::{EdgeKind, Language, Node, NodeKind};
@@ -63,6 +64,7 @@ memo_map!(WrapperMemo, String, bool);
 memo_map!(CreateInstanceMemo, String, bool);
 memo_map!(NamedClassMemo, String, Option<NodeRef>);
 memo_map!(NamedTypeMemo, String, TsNamed);
+memo_map!(AliasedTypeMemo, String, Option<NodeRef>);
 memo_map!(AmbientFileMemo, String, Option<String>);
 
 #[derive(Clone)]
@@ -561,12 +563,88 @@ fn ts_method_up_chain(cls: &NodeRef, name: &str, at: &UnresolvedRef, ctx: &Ctx, 
     UpChain { method: None, complete }
 }
 
-/// `typeName.method` when the type is declared in `file` (or imported): the method up its chain, null when provably absent, undefined when unknown.
+/// The one type a TS or Flow alias's value names, as written: `Bridge` of
+/// `Bridge<A, B>`, `Bridge | null`, or Flow's `?Bridge`. Nothing for a union of
+/// two types, a function type, or an array.
+fn ts_alias_value_name(alias: &Node, ctx: &Ctx) -> Option<String> {
+    let lines = lines_of(ctx, &alias.file_path);
+    let start = (alias.start_line as usize).saturating_sub(1);
+    let end = (alias.end_line as usize).min(lines.len());
+    if start >= end {
+        return None;
+    }
+    let mut slice: Vec<String> = lines[start..end].iter().cloned().collect();
+    let last = slice.len() - 1;
+    slice[last] = before_col(&slice[last], alias.end_column).to_string();
+    let joined = slice.join("\n");
+    let text = strip_comments_for_regex(after_col(&joined, alias.start_column), "typescript");
+    let chars: Vec<char> = text.chars().collect();
+    let mut depth = 0i32;
+    let mut value: Option<String> = None;
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '<' {
+            depth += 1;
+        } else if ch == '>' && !(i > 0 && chars[i - 1] == '=') {
+            depth -= 1;
+        } else if depth > 0 {
+            continue;
+        } else if let Some(so_far) = value.as_mut() {
+            so_far.push(ch);
+        } else if ch == '=' && chars.get(i + 1) != Some(&'>') {
+            value = Some(String::new());
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    let raw = re!(r";\s*$").replace_first(value.as_deref().unwrap_or(""), |_| String::new());
+    let parts: Vec<&str> = raw.split('|').map(js_trim).filter(|p| !p.is_empty() && *p != "null" && *p != "undefined").collect();
+    let name = if parts.len() == 1 { re!(r"^\?\s*").replace_first(parts[0], |_| String::new()) } else { String::new() };
+    re!(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$").is_match(&name).then_some(name)
+}
+
+/// The class or interface a type alias in `file` stands for, through an alias of
+/// an alias. Each name is read the way the alias's own file reads it.
+fn ts_aliased_type(name: &str, file: &str, at: &UnresolvedRef, ctx: &Ctx, depth: u32) -> Option<NodeRef> {
+    let key = format!("{file}\0{name}");
+    if let Some(hit) = ctx.memo::<AliasedTypeMemo>().lookup(&key) {
+        return hit;
+    }
+    let alias = ctx.get_nodes_in_file(file).iter().find(|n| n.name == name && n.kind == NodeKind::TypeAlias).cloned();
+    let written = alias.as_ref().filter(|_| depth < 4).and_then(|alias| ts_alias_value_name(alias, ctx));
+    let found = if let (Some(alias), Some(written)) = (&alias, written) {
+        if ts_class_type_parameter(alias, &written, ctx) {
+            None
+        } else {
+            match ts_named_type(&written, &alias.file_path, alias.language, &alias.id, at, ctx) {
+                TsNamed::Node(n) => Some(n),
+                TsNamed::Outside => None,
+                TsNamed::None => {
+                    let mut there = at.clone();
+                    there.file_path = alias.file_path.clone();
+                    there.language = alias.language;
+                    let next_file = ts_imported_type_file(&written, &there, ctx).unwrap_or_else(|| alias.file_path.clone());
+                    let next_name = written.rsplit('.').next().unwrap_or("");
+                    ts_aliased_type(next_name, &next_file, at, ctx, depth + 1)
+                }
+            }
+        }
+    } else {
+        None
+    };
+    ctx.memo::<AliasedTypeMemo>().store(key, found.clone());
+    found
+}
+
+/// `typeName.method` when the type is declared in `file` (or imported), or a type
+/// alias of one: the method up its chain, null when provably absent, undefined when unknown.
 pub fn ts_known_type_call(type_name: &str, file: &str, method_name: &str, r: &UnresolvedRef, at: &UnresolvedRef, ctx: &Ctx, confidence: f64) -> Tri<ResolvedRef> {
     let mut known = ts_type_declared_in(file, type_name, ctx);
     if known.is_none() {
-        if let TsNamed::Node(n) = ts_named_type(type_name, &at.file_path, at.language, "", at, ctx) {
-            known = Some(n);
+        match ts_named_type(type_name, &at.file_path, at.language, "", at, ctx) {
+            TsNamed::Node(n) => known = Some(n),
+            TsNamed::None => known = ts_aliased_type(type_name, file, at, ctx, 0),
+            TsNamed::Outside => {}
         }
     }
     let Some(known) = known else { return Tri::Undefined };
