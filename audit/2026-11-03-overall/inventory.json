@@ -1,0 +1,152 @@
+{
+  "baseline": "8182ee403d2ca64a2516cf67f0b4f3a2bbd0fc79",
+  "scope": "Tracked source inventory, including reference/tests/vendor. Lexical, not AST-complete or function coverage.",
+  "native_src_declarations": 7349,
+  "groups": {
+    "__tests__": {
+      "files": 835,
+      "lines": 219265,
+      "declarations": 5146
+    },
+    "assets": {
+      "files": 1,
+      "lines": 268,
+      "declarations": 11
+    },
+    "codegraph-kernel": {
+      "files": 27,
+      "lines": 29448,
+      "declarations": 1033
+    },
+    "codegraph-cli": {
+      "files": 19,
+      "lines": 4369,
+      "declarations": 176
+    },
+    "codegraph-context": {
+      "files": 9,
+      "lines": 1977,
+      "declarations": 46
+    },
+    "codegraph-core": {
+      "files": 41,
+      "lines": 10412,
+      "declarations": 660
+    },
+    "codegraph-db": {
+      "files": 18,
+      "lines": 6192,
+      "declarations": 324
+    },
+    "codegraph-extract": {
+      "files": 82,
+      "lines": 50340,
+      "declarations": 1988
+    },
+    "codegraph-graph": {
+      "files": 24,
+      "lines": 10058,
+      "declarations": 428
+    },
+    "codegraph-installer": {
+      "files": 6,
+      "lines": 1863,
+      "declarations": 93
+    },
+    "codegraph-jsre": {
+      "files": 2,
+      "lines": 1027,
+      "declarations": 67
+    },
+    "codegraph-mcp": {
+      "files": 19,
+      "lines": 5479,
+      "declarations": 241
+    },
+    "codegraph-resolve": {
+      "files": 177,
+      "lines": 91006,
+      "declarations": 3646
+    },
+    "codegraph-search": {
+      "files": 9,
+      "lines": 2688,
+      "declarations": 116
+    },
+    "codegraph-sync": {
+      "files": 17,
+      "lines": 2924,
+      "declarations": 149
+    },
+    "codegraph-text": {
+      "files": 1,
+      "lines": 646,
+      "declarations": 25
+    },
+    "codegraph-types": {
+      "files": 12,
+      "lines": 2857,
+      "declarations": 139
+    },
+    "codegraph-ui-server": {
+      "files": 9,
+      "lines": 1711,
+      "declarations": 66
+    },
+    "codegraph-viewer": {
+      "files": 2,
+      "lines": 946,
+      "declarations": 32
+    },
+    "install-rust.ps1": {
+      "files": 1,
+      "lines": 95,
+      "declarations": 0
+    },
+    "install-rust.sh": {
+      "files": 1,
+      "lines": 96,
+      "declarations": 0
+    },
+    "install.ps1": {
+      "files": 1,
+      "lines": 170,
+      "declarations": 0
+    },
+    "install.sh": {
+      "files": 1,
+      "lines": 151,
+      "declarations": 0
+    },
+    "scripts": {
+      "files": 123,
+      "lines": 15248,
+      "declarations": 303
+    },
+    "site": {
+      "files": 3,
+      "lines": 145,
+      "declarations": 3
+    },
+    "src": {
+      "files": 298,
+      "lines": 183448,
+      "declarations": 3798
+    },
+    "telemetry-dashboard": {
+      "files": 12,
+      "lines": 3826,
+      "declarations": 81
+    },
+    "telemetry-worker": {
+      "files": 7,
+      "lines": 1971,
+      "declarations": 18
+    },
+    "ui": {
+      "files": 91,
+      "lines": 25052,
+      "declarations": 398
+    }
+  }
+}
