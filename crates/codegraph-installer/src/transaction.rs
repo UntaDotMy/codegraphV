@@ -323,6 +323,17 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    // These tests open the same install-lock file from several homes in one process, and
+    // `killed_installer_releases_lock_for_immediate_recovery` forks the test binary. A fork
+    // briefly shares every open lock description with the child, so a parallel test can see a
+    // lock that its own dropped handle no longer owns (Linux flock). Run them one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn plan(dir: &Path) -> (PlannedFile, PlannedFile) {
         let a = dir.join("a.json");
@@ -337,6 +348,7 @@ mod tests {
 
     #[test]
     fn one_failed_write_restores_every_file_and_removes_the_journal() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = plan(dir.path());
@@ -350,6 +362,7 @@ mod tests {
 
     #[test]
     fn an_intervening_edit_aborts_before_any_write() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = plan(dir.path());
@@ -362,6 +375,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_writes_nothing() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = plan(dir.path());
@@ -372,6 +386,7 @@ mod tests {
 
     #[test]
     fn a_recent_journal_is_a_live_installation_not_a_recovery() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = plan(dir.path());
@@ -385,6 +400,7 @@ mod tests {
 
     #[test]
     fn a_stale_journal_restores_only_files_still_matching_what_it_wrote() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = plan(dir.path());
@@ -404,6 +420,7 @@ mod tests {
 
     #[test]
     fn a_committed_journal_never_rolls_a_finished_installation_back() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = plan(dir.path());
@@ -416,6 +433,7 @@ mod tests {
 
     #[test]
     fn unreadable_journal_is_retained_for_recovery() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let path = journal_path(home.path());
         write_atomic(&path, "{partial").unwrap();
@@ -425,6 +443,7 @@ mod tests {
 
     #[test]
     fn failed_restore_keeps_the_journal_for_retry() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, _) = plan(dir.path());
@@ -447,6 +466,7 @@ mod tests {
 
     #[test]
     fn edit_after_preflight_is_not_overwritten_by_forward_write_or_rollback() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = plan(dir.path());
@@ -460,6 +480,7 @@ mod tests {
 
     #[test]
     fn lock_excludes_even_an_old_live_journal_and_recovery_is_immediate_after_release() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, _) = plan(dir.path());
@@ -480,6 +501,7 @@ mod tests {
 
     #[test]
     fn lock_owner_subprocess() {
+        let _serial = serial();
         let Some(home) = std::env::var_os("CODEGRAPHV_TEST_INSTALL_LOCK_HOME") else { return };
         let home = PathBuf::from(home);
         let _owner = lock(&home).unwrap();
@@ -489,6 +511,7 @@ mod tests {
 
     #[test]
     fn killed_installer_releases_lock_for_immediate_recovery() {
+        let _serial = serial();
         let home = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (a, _) = plan(dir.path());
