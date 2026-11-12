@@ -165,7 +165,30 @@ impl FileWatcher {
                             .unwrap_or_else(|e| e.into_inner()) = Some(thread::current().id());
                         let callback = catch_unwind(AssertUnwindSafe(factory));
                         let mut callback = callback.ok();
-                        while let Ok(Some(request)) = sync_rx.recv() {
+                        // When a sync put work off, the callback runs again with no paths once
+                        // it is due, even if no edit follows (upstream 17395382).
+                        let mut rerun_at: Option<std::time::Instant> = None;
+                        loop {
+                            let next = match rerun_at {
+                                Some(at) => match sync_rx.recv_timeout(at.saturating_duration_since(std::time::Instant::now())) {
+                                    Ok(next) => next,
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                        rerun_at = None;
+                                        if let Some(cb) = callback.as_mut() {
+                                            if let Ok(Ok(result)) = catch_unwind(AssertUnwindSafe(|| cb(Some(Vec::new())))) {
+                                                rerun_at = result.rerun_after_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                },
+                                None => match sync_rx.recv() {
+                                    Ok(next) => next,
+                                    Err(_) => break,
+                                },
+                            };
+                            let Some(request) = next else { break };
                             let result = match callback.as_mut() {
                                 Some(cb) => {
                                     catch_unwind(AssertUnwindSafe(|| cb(request.paths.clone())))
@@ -177,6 +200,9 @@ impl FileWatcher {
                                 }
                                 None => Err(SyncError::Other("Watch sync factory panicked".into())),
                             };
+                            if let Ok(done) = &result {
+                                rerun_at = done.rerun_after_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
+                            }
                             if result_tx.send(Message::Finished(request, result)).is_err() {
                                 break;
                             }

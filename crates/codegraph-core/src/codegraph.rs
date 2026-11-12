@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The extraction version this engine stamps into an index it builds (`extraction-version.ts`).
 /// Bump when a release changes extraction output enough that existing indexes should be rebuilt.
@@ -187,6 +187,23 @@ pub struct CodeGraph {
     /// Set when this instance followed a database replaced on disk (#1902): the next sync that
     /// can run reconciles the whole tree.
     pending_full_reconcile: Cell<bool>,
+    /// When this instance last rebuilt the synthesized edges, for
+    /// `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS` (upstream 17395382). Per instance: the watcher's own
+    /// engine is what syncs on every edit, and its first synthesis is never held.
+    last_synthesis_at: Cell<Option<Instant>>,
+}
+
+/// `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS`: the least time between two whole-graph synthesis passes a
+/// long-lived instance's syncs run (upstream 17395382, #2911). Whole milliseconds, 1 s to 24 h;
+/// unset, empty or out of range means no hold.
+pub fn parse_synth_min_interval(raw: Option<&str>) -> Option<Duration> {
+    let raw = raw?.trim();
+    let ms: u64 = raw.parse().ok()?;
+    (1_000..=86_400_000).contains(&ms).then(|| Duration::from_millis(ms))
+}
+
+fn synth_min_interval() -> Option<Duration> {
+    parse_synth_min_interval(std::env::var("CODEGRAPHV_SYNTH_MIN_INTERVAL_MS").ok().as_deref())
 }
 
 impl CodeGraph {
@@ -202,6 +219,7 @@ impl CodeGraph {
             file_lock: RefCell::new(file_lock),
             indexing: Cell::new(false),
             pending_full_reconcile: Cell::new(false),
+            last_synthesis_at: Cell::new(None),
         }
     }
 
@@ -740,6 +758,7 @@ impl CodeGraph {
         if synthesize {
             let t = Instant::now();
             let count = synthesize_callback_edges(&self.store, self.resolver().context()).unwrap_or(0);
+            self.last_synthesis_at.set(Some(Instant::now()));
             stats.by_method.insert("callback-synthesis".to_string(), count);
             if timings() {
                 eprintln!("[phase-timing]   synthesis: {}ms", t.elapsed().as_millis());
@@ -781,6 +800,53 @@ impl CodeGraph {
         self.indexing.set(false);
         self.file_lock.borrow_mut().release();
         outcome
+    }
+
+    /// How much longer a sync must wait before it may rebuild the synthesized edges: the rest of
+    /// `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS` since this instance last did. Zero when the variable is
+    /// unset or invalid, the instance has not synthesized yet, or the interval has passed.
+    fn synthesis_hold(&self) -> Duration {
+        match (synth_min_interval(), self.last_synthesis_at.get()) {
+            (Some(interval), Some(last)) => interval.saturating_sub(last.elapsed()),
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// Run the synthesis a sync put off under `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS`, under the lock a
+    /// sync takes. `Ok(None)` when it ran or nothing was pending; `Ok(Some(ms))` to try again
+    /// after `ms`: the interval is not up yet, or another process holds the index. The watcher
+    /// calls this when the interval is up, so a held synthesis runs even if no edit follows.
+    pub fn run_deferred_synthesis(&mut self) -> Result<Option<u64>> {
+        let retry_ms = || synth_min_interval().map_or(1_000, |d| d.as_millis() as u64);
+        if self.indexing.get() {
+            return Ok(Some(retry_ms()));
+        }
+        if self.store().get_metadata("synthesis_pending")?.as_deref() != Some("1") {
+            return Ok(None);
+        }
+        let hold = self.synthesis_hold();
+        if !hold.is_zero() {
+            return Ok(Some(hold.as_millis().max(1) as u64));
+        }
+        if self.file_lock.borrow_mut().acquire().is_err() {
+            return Ok(Some(retry_ms()));
+        }
+        self.indexing.set(true);
+        let outcome = (|| -> Result<()> {
+            // A rebuild may have replaced the file meanwhile, as sync checks.
+            self.reopen_replaced_database()?;
+            if self.store().get_metadata("synthesis_pending")?.as_deref() != Some("1") {
+                return Ok(());
+            }
+            self.resolver().refresh_synthesis()?;
+            self.store().set_metadata("synthesis_pending", "0")?;
+            self.last_synthesis_at.set(Some(Instant::now()));
+            self.store().run_maintenance();
+            Ok(())
+        })();
+        self.indexing.set(false);
+        self.file_lock.borrow_mut().release();
+        outcome.map(|()| None)
     }
 
     fn sync_inner(&self, options: &IndexOptions, on_progress: &mut Option<ProgressFn<'_>>, started: Instant) -> Result<SyncResult> {
@@ -1109,9 +1175,21 @@ impl CodeGraph {
             self.resolver().resolve_deferred_this_member_refs()?;
         }
 
+        // The synthesis passes read the whole graph whatever this sync changed, so on a large repo
+        // almost every edit paid for a whole-repo pass (#2911). With CODEGRAPHV_SYNTH_MIN_INTERVAL_MS
+        // set, one within that long of this instance's last is put off, not dropped:
+        // `synthesis_pending` stays set, a later sync or `run_deferred_synthesis` runs it.
+        let mut synthesized = false;
         if refresh_synthesis {
-            self.resolver().refresh_synthesis()?;
-            store.set_metadata("synthesis_pending", "0")?;
+            let hold = self.synthesis_hold();
+            if hold.is_zero() {
+                self.resolver().refresh_synthesis()?;
+                store.set_metadata("synthesis_pending", "0")?;
+                self.last_synthesis_at.set(Some(Instant::now()));
+                synthesized = true;
+            } else {
+                result.synthesis_deferred_ms = Some(hold.as_millis().max(1) as u64);
+            }
         }
 
         // Last, as in a full index.
@@ -1120,7 +1198,7 @@ impl CodeGraph {
         }
 
         // Refresh planner stats + checkpoint the WAL after bulk writes.
-        if files_changed || result.files_removed > 0 || orphan_count > 0 || refresh_synthesis {
+        if files_changed || result.files_removed > 0 || orphan_count > 0 || synthesized {
             store.run_maintenance();
         }
 

@@ -140,6 +140,10 @@ pub struct SyncResult {
     /// detection read had changed (#2516). `None` when the cached detection still held.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detected_frameworks: Option<Vec<String>>,
+    /// How long until the synthesis this sync put off under `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS`
+    /// may run (upstream 17395382). `None` when nothing was held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthesis_deferred_ms: Option<u64>,
 }
 
 /// SHA-256 of file contents, hex.
