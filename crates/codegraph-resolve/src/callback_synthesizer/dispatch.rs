@@ -141,12 +141,79 @@ pub fn spring_event_edges(ctx: &Ctx) -> Vec<Edge> {
 }
 
 // ── MediatR request/notification dispatch (C#/.NET) ───────────────────────────
+//
+// A project often derives its own interfaces from MediatR's (`ICommandHandler<T>`,
+// `IQueryHandler<T, R>`), or takes them from a package the index doesn't hold, so no list of names
+// can be complete. What every handler writes is the type twice: in its base list and as the first
+// parameter of its `Handle` (upstream 84c7fbae).
 
 const MEDIATR_FANOUT_CAP: usize = 80;
 const MEDIATR_HANDLER_DECL_LOOKAHEAD: usize = 4; // lines from a class startLine to find a wrapped base list
+const MEDIATR_CLASS_HEAD_LINES: usize = 16; // a primary constructor can push the base list down
+
+/// How many leading folders two files share.
+fn shared_folders(a: &str, b: &str) -> usize {
+    let left: Vec<&str> = a.split('/').collect();
+    let right: Vec<&str> = b.split('/').collect();
+    let mut n = 0;
+    while n + 1 < left.len() && n + 1 < right.len() && left[n] == right[n] {
+        n += 1;
+    }
+    n
+}
+
+/// The handlers a dispatch in `file` can reach of several sharing a type's name: `Send` has one
+/// handler, so the nearest wins; `Publish` fans out, so only a handler in another top-level folder goes.
+fn reachable_handlers<'a>(targets: &'a [NodeRef], file: &str, verb: &str) -> Vec<&'a NodeRef> {
+    if targets.len() < 2 {
+        return targets.iter().collect();
+    }
+    let shared: Vec<usize> = targets.iter().map(|t| shared_folders(file, &t.file_path)).collect();
+    let best = shared.iter().copied().max().unwrap_or(0);
+    if verb == "Send" {
+        return targets.iter().zip(&shared).filter(|(_, s)| **s == best).map(|(t, _)| t).collect();
+    }
+    if best > 0 {
+        targets.iter().zip(&shared).filter(|(_, s)| **s > 0).map(|(t, _)| t).collect()
+    } else {
+        targets.iter().collect()
+    }
+}
+
+/// The types a class's base list names as generic arguments, its own type parameters and primary
+/// constructor aside.
+fn mediatr_base_list_types(lines: &[&str], class_start: u32) -> HashSet<String> {
+    let from = (class_start as usize).saturating_sub(1).min(lines.len());
+    let to = (from + MEDIATR_CLASS_HEAD_LINES).min(lines.len());
+    let head = lines[from..to].join("\n");
+    let head = head.find('{').map_or(head.as_str(), |open| &head[..open]);
+    let text = re!(r"\([^()]*(?:\([^()]*\)[^()]*)*\)", "g").replace_all_str(head, " ");
+    let mut types = HashSet::new();
+    let Some(colon) = text.find(':') else { return types };
+    let own: Vec<String> = re!(r"<([^<>]*)>")
+        .captures(&text[..colon])
+        .and_then(|c| c.text(1).map(|t| t.split(',').map(|s| s.trim().to_string()).collect()))
+        .unwrap_or_default();
+    for m in re!(r"[<,]\s*(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)", "g").captures_iter(&text[colon + 1..]) {
+        let name = m.text(1).unwrap_or("");
+        if !own.iter().any(|o| o == name) {
+            types.insert(name.to_string());
+        }
+    }
+    types
+}
+
+/// The type a `Handle` method takes first, or `None` when its head can't be read.
+fn mediatr_handled_type(lines: &[&str], handle: &NodeRef) -> Option<String> {
+    let from = (handle.start_line as usize).saturating_sub(1).min(lines.len());
+    let to = (handle.start_line as usize + 2).min(lines.len());
+    let head = lines[from..to.max(from)].join(" ");
+    re!(r"\bHandle\s*\(\s*(?:\[[^\]]*\]\s*)?(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)").captures(&head).and_then(|c| c.text(1).map(String::from))
+}
 
 /// The type sent at a MediatR `.Send(arg)`/`.Publish(arg)` site: an inline `new X(…)`, else `arg`
-/// as an identifier resolved within the enclosing method.
+/// as an identifier resolved within the enclosing method (`arg = new X`, a mapper's
+/// `mapper.Map<X>(r)` / `.Adapt<X>()`, or an `X arg` declaration).
 fn resolve_mediatr_arg_type(arg: &str, lines: &[&str], method_start: u32, dispatch_line: u32) -> Option<String> {
     if let Some(inl) = re!(r"^new\s+([A-Z]\w*)").captures(arg) {
         return inl.text(1).map(String::from);
@@ -155,6 +222,7 @@ fn resolve_mediatr_arg_type(arg: &str, lines: &[&str], method_start: u32, dispat
         return None;
     }
     let assign_re = Re::cached(&format!(r"\b{arg}\b\s*=\s*new\s+([A-Z]\w*)"), "");
+    let mapped_re = Re::cached(&format!(r"\b{arg}\b\s*=[^;]*?\.\s*\w+<(?:[^<>;]*,\s*)?(?:\w+\.)*([A-Z]\w*)>\s*\("), "");
     let decl_re = Re::cached(&format!(r"\b([A-Z]\w*)\b\s+{arg}\b"), "");
     let mut decl_type: Option<String> = None;
     let mut i = (method_start as usize).saturating_sub(1);
@@ -162,6 +230,9 @@ fn resolve_mediatr_arg_type(arg: &str, lines: &[&str], method_start: u32, dispat
         let ln = lines[i];
         if let Some(a) = assign_re.captures(ln) {
             return a.text(1).map(String::from); // an explicit `arg = new X` is the most specific
+        }
+        if let Some(m) = mapped_re.captures(ln) {
+            return m.text(1).map(String::from);
         }
         if decl_type.is_none() {
             if let Some(d) = decl_re.captures(ln) {
@@ -175,45 +246,19 @@ fn resolve_mediatr_arg_type(arg: &str, lines: &[&str], method_start: u32, dispat
 
 pub fn mediatr_dispatch_edges(ctx: &Ctx) -> Vec<Edge> {
     let cs_ext = re!(r"\.cs$");
-    let base_re = re!(r"(?:IRequestHandler|INotificationHandler)\s*<\s*([A-Za-z_]\w*)");
-    // Pass 1 — request/notification type → the Handle method of each handler class.
-    let mut handlers: IndexMap<String, Vec<NodeRef>> = IndexMap::new();
     let files = ctx.get_all_files();
-    for file in &files {
-        if !cs_ext.is_match(file) {
-            continue;
-        }
-        let Some(content) = ctx.read_file(file) else { continue };
-        if content.is_empty() || (!content.contains("IRequestHandler<") && !content.contains("INotificationHandler<")) {
-            continue;
-        }
-        let lines: Vec<&str> = content.split('\n').collect();
-        let nodes_in_file = ctx.get_nodes_in_file(file);
-        for cls in nodes_in_file.iter() {
-            if cls.kind != NodeKind::Class {
-                continue;
-            }
-            let from = (cls.start_line as usize).saturating_sub(1).min(lines.len());
-            let to = (from + MEDIATR_HANDLER_DECL_LOOKAHEAD).min(lines.len());
-            let decl = lines[from..to].join("\n");
-            let Some(m) = base_re.captures(&decl) else { continue };
-            let ty = m.text(1).unwrap_or("").to_string();
-            let handle = nodes_in_file
-                .iter()
-                .find(|n| n.kind == NodeKind::Method && n.name == "Handle" && n.start_line >= cls.start_line && n.start_line <= cls.end_line);
-            let Some(handle) = handle else { continue };
-            handlers.entry(ty).or_default().push(handle.clone());
-        }
+    // Pass 1 — the mediator-ish .Send(x)/.Publish(x) sites and the type each sends. A project with
+    // none is done here, before any handler is looked for.
+    struct Site {
+        file: String,
+        line: u32,
+        verb: String,
+        ty: String,
+        from: NodeRef,
     }
-    if handlers.is_empty() {
-        return Vec::new();
-    }
-
-    // Pass 2 — link each mediator-ish .Send(x)/.Publish(x) → the handler of x's type.
-    let mut edges = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let dispatch_re = re!(r"([A-Za-z_][\w.]*)\s*\.\s*(?:Send|Publish)\s*\(\s*(new\s+[A-Z]\w*|[A-Za-z_]\w*)", "g");
+    let dispatch_re = re!(r"([A-Za-z_][\w.]*)\s*\.\s*(Send|Publish)\s*\(\s*(new\s+[A-Z]\w*|[A-Za-z_]\w*)", "g");
     let receiver_re = re!(r"(?:mediator|sender|publisher)", "i");
+    let mut sites: Vec<Site> = Vec::new();
     for file in &files {
         if !cs_ext.is_match(file) {
             continue;
@@ -225,30 +270,95 @@ pub fn mediatr_dispatch_edges(ctx: &Ctx) -> Vec<Edge> {
         let safe = codegraph_text::strip_comments_for_regex(&content, "csharp");
         let safe_lines: Vec<&str> = safe.split('\n').collect();
         let nodes_in_file = ctx.get_nodes_in_file(file);
-        let mut added = 0;
         for m in dispatch_re.captures_iter(&safe) {
-            if added >= MEDIATR_FANOUT_CAP {
-                break;
-            }
             if !receiver_re.is_match(m.text(1).unwrap_or("")) {
                 continue; // not a mediator (MessagingCenter, HttpClient, …)
             }
             let line = line_of(&safe, m.get(0).unwrap().start());
-            let Some(disp) = enclosing_fn(&nodes_in_file, line) else { continue };
-            let Some(ty) = resolve_mediatr_arg_type(m.text(2).unwrap_or(""), &safe_lines, disp.start_line, line) else { continue };
-            let Some(targets) = handlers.get(&ty) else { continue };
-            for target in targets {
-                if target.id == disp.id || !seen.insert(format!("{}>{}", disp.id, target.id)) {
-                    continue;
-                }
-                edges.push(calls_edge(
-                    &disp.id,
-                    &target.id,
-                    Some(line),
-                    meta! { "synthesizedBy" => "mediatr-dispatch", "via" => ty.as_str(), "registeredAt" => format!("{file}:{line}") },
-                ));
-                added += 1;
+            let Some(from) = enclosing_fn(&nodes_in_file, line) else { continue };
+            if let Some(ty) = resolve_mediatr_arg_type(m.text(3).unwrap_or(""), &safe_lines, from.start_line, line) {
+                sites.push(Site { file: file.clone(), line, verb: m.text(2).unwrap_or("").to_string(), ty, from: from.clone() });
             }
+        }
+    }
+    if sites.is_empty() {
+        return Vec::new();
+    }
+
+    // Pass 2 — request/notification type → the Handle methods of each handler class.
+    let base_re = re!(r"(?:IRequestHandler|INotificationHandler)\s*<\s*([A-Za-z_]\w*)");
+    let mut handlers: IndexMap<String, Vec<NodeRef>> = IndexMap::new();
+    let mut add_handler = |ty: String, handle: &NodeRef| {
+        let known = handlers.entry(ty).or_default();
+        if !known.iter().any(|k| k.id == handle.id) {
+            known.push(handle.clone());
+        }
+    };
+    for file in &files {
+        if !cs_ext.is_match(file) {
+            continue;
+        }
+        let Some(content) = ctx.read_file(file) else { continue };
+        if !content.contains("Handle(") {
+            continue;
+        }
+        let lines: Vec<&str> = content.split('\n').collect();
+        let nodes_in_file = ctx.get_nodes_in_file(file);
+        let handle_methods: Vec<&NodeRef> = nodes_in_file.iter().filter(|n| n.kind == NodeKind::Method && n.name == "Handle").collect();
+        if handle_methods.is_empty() {
+            continue;
+        }
+        for cls in nodes_in_file.iter() {
+            if cls.kind != NodeKind::Class {
+                continue;
+            }
+            let handles: Vec<&NodeRef> = handle_methods.iter().copied().filter(|n| n.start_line >= cls.start_line && n.start_line <= cls.end_line).collect();
+            if handles.is_empty() {
+                continue;
+            }
+            let from = (cls.start_line as usize).saturating_sub(1).min(lines.len());
+            let to = (from + MEDIATR_HANDLER_DECL_LOOKAHEAD).min(lines.len());
+            let lookahead = lines[from..to].join("\n");
+            // Up to the body: the next lines can be the next class's.
+            let decl = lookahead.split('{').next().unwrap_or("");
+            if let Some(m) = base_re.captures(decl) {
+                add_handler(m.text(1).unwrap_or("").to_string(), handles[0]);
+            }
+            let base_types = mediatr_base_list_types(&lines, cls.start_line);
+            for handle in &handles {
+                if let Some(ty) = mediatr_handled_type(&lines, handle) {
+                    if base_types.contains(&ty) {
+                        add_handler(ty, handle);
+                    }
+                }
+            }
+        }
+    }
+    if handlers.is_empty() {
+        return Vec::new();
+    }
+
+    // Pass 3 — link each site → the handler of the type it sends.
+    let mut edges = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut added_per_file: HashMap<String, usize> = HashMap::new();
+    for site in &sites {
+        let Some(targets) = handlers.get(&site.ty) else { continue };
+        let added = added_per_file.entry(site.file.clone()).or_insert(0);
+        if *added >= MEDIATR_FANOUT_CAP {
+            continue;
+        }
+        for target in reachable_handlers(targets, &site.file, &site.verb) {
+            if target.id == site.from.id || !seen.insert(format!("{}>{}", site.from.id, target.id)) {
+                continue;
+            }
+            edges.push(calls_edge(
+                &site.from.id,
+                &target.id,
+                Some(site.line),
+                meta! { "synthesizedBy" => "mediatr-dispatch", "via" => site.ty.as_str(), "registeredAt" => format!("{}:{}", site.file, site.line) },
+            ));
+            *added += 1;
         }
     }
     edges
