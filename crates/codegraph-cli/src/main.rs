@@ -443,6 +443,26 @@ fn print_language_coverage(cg: &CodeGraph, coverage: &codegraph_core::codegraph:
     Ok(())
 }
 
+/// `init` on a project whose index is complete and built by this engine: sync the files changed
+/// since, and leave the rest to the watcher and git hooks. Returns false when a full index is
+/// needed instead: no index, an unfinished one, or one an older extraction engine built.
+fn sync_current_index(root: &str) -> Result<bool> {
+    if !directory::is_initialized(root) {
+        return Ok(false);
+    }
+    let mut cg = CodeGraph::open(root, OpenOptions::default())?;
+    let current = cg.get_last_indexed_at()?.is_some()
+        && matches!(cg.get_index_state(), Some(codegraph_core::codegraph::IndexState::Complete))
+        && !cg.is_index_stale();
+    if current {
+        let result = cg.sync(&IndexOptions::default(), None)?;
+        let changed = result.files_added + result.files_modified + result.files_removed;
+        println!("Already indexed; synced {changed} changed file(s). Run \"codegraphV index\" for a full rebuild.");
+    }
+    cg.close();
+    Ok(current)
+}
+
 fn index_project(path: &str, force: bool, verbose: bool, quiet: bool) -> Result<()> {
     let root = nodepath::resolve(&[path]);
     if let Some(reason) = codegraph_core::utils::validate_project_path(&root) {
@@ -527,7 +547,7 @@ fn run() -> Result<()> {
         } => {
             let root = nodepath::resolve(&[&path]);
             // `--local-only` on an initialized project only converts the file (upstream fb71a9f4).
-            if !(local_only && directory::is_initialized(&root)) {
+            if !(local_only && directory::is_initialized(&root)) && !sync_current_index(&root)? {
                 index_project(&path, force, verbose, false)?;
             }
             if local_only {
