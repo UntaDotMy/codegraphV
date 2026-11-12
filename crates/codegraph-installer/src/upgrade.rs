@@ -191,9 +191,9 @@ pub fn canonical_version_tag(v: &str) -> Option<String> {
 pub fn reindex_advisory() -> String {
     [
         "Your existing project indexes keep working, but were built by the previous version.",
-        "`sync` only reconciles changed files; this version's extraction improvements need a",
-        "full rebuild, in each project:",
-        "  codegraphV index -f    # full rebuild",
+        "To pick up this version's extraction improvements, rebuild each project:",
+        "  codegraphV index    # full rebuild",
+        "(`codegraphV status` flags any index that predates the engine you're running.)",
     ]
     .join("\n")
 }
@@ -435,6 +435,16 @@ pub fn initialize_instructions(base: &str, notice: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Upstream 0410b310: sync can't advance the extraction stamp and `index` is always a full
+    /// rebuild (`-f` only allows a home or root folder), so the reminder names `index` alone.
+    #[test]
+    fn reindex_advisory_names_only_codegraphv_index() {
+        let advisory = reindex_advisory();
+        assert!(advisory.contains("codegraphV index"), "{advisory}");
+        assert!(!advisory.contains("index -f"), "{advisory}");
+        assert!(!advisory.contains("codegraphV sync"), "{advisory}");
+    }
 
     #[test]
     fn semver_parse_compare_and_normalize() {

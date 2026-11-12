@@ -542,6 +542,12 @@ fn run() -> Result<()> {
                     println!("Project: {}\nFiles: {}\nSymbols: {}\nEdges: {}\nBackend: {}\nIndex state: {}",cg.project_root(),status["fileCount"],status["nodeCount"],status["edgeCount"],status["backend"],status["index"]["state"]);
                     if status["rebuildInProgress"] == true {
                         println!("\n{REBUILD_NOTE}");
+                    } else if cg.is_index_stale() {
+                        // Sync never advances the extraction stamp, so only a full index helps
+                        // (upstream 0410b310).
+                        let built = cg.get_index_build_info().version.filter(|v| !v.is_empty())
+                            .map_or_else(|| "an earlier version".to_string(), |v| format!("v{}", v.trim_start_matches('v')));
+                        println!("\nIndex was built by {built}; re-index to pick up this engine's improvements.\nRun \"codegraphV index\" for a full rebuild");
                     }
                     if let Some(changes) = cg.get_framework_changes_since_index().filter(|_| status["rebuildInProgress"] != true) {
                         let changed = [("added", &changes.added), ("removed", &changes.removed)]
