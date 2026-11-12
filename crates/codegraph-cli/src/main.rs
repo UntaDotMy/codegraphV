@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+mod implementations;
 mod migrate;
 mod prompt_hook;
 mod remove_cli;
@@ -180,6 +181,20 @@ enum Command {
         file: Option<String>,
         #[arg(short, long, default_value_t = 2)]
         depth: usize,
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// List the types that implement or extend a trait, interface or class.
+    Implementations {
+        symbol: String,
+        #[command(flatten)]
+        project: Project,
+        /// Narrow definitions by file path or suffix (no match: show all with a note).
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Levels of subtypes to list (1: direct implementors only).
+        #[arg(short, long, default_value_t = 1)]
+        depth: u32,
         #[arg(short, long)]
         json: bool,
     },
@@ -772,6 +787,18 @@ fn run() -> Result<()> {
         }
         Command::Callers(s) => symbol_command(s, true)?,
         Command::Callees(s) => symbol_command(s, false)?,
+        Command::Implementations {
+            symbol,
+            project,
+            file,
+            depth,
+            json: as_json,
+        } => {
+            let cg = open_read_only(&project, true)?;
+            let request = implementations::Request { symbol: &symbol, file: file.as_deref(), depth, json: as_json };
+            println!("{}", implementations::run(&cg, &request)?);
+            cg.close();
+        }
         Command::Impact {
             symbol,
             project,

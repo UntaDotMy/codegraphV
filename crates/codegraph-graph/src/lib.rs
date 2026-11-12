@@ -11,6 +11,7 @@ pub mod named_symbol_flow;
 pub mod queries;
 pub mod symbol_lookup;
 pub mod synthesized_hop;
+pub mod test_code;
 pub mod traversal;
 pub mod type_hierarchy;
 
