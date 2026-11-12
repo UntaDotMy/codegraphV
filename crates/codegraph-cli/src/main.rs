@@ -69,6 +69,10 @@ enum Command {
         /// Install CodeGraphV's Git sync hooks (post-commit, post-merge, post-checkout).
         #[arg(long)]
         git_hooks: bool,
+        /// Keep .codegraphV/ out of git entirely: its .gitignore ignores itself too. Also converts
+        /// an initialized project, without indexing again.
+        #[arg(long)]
+        local_only: bool,
     },
     /// Rebuild the code graph.
     Index {
@@ -518,9 +522,23 @@ fn run() -> Result<()> {
             force,
             verbose,
             git_hooks,
+            local_only,
             ..
         } => {
-            index_project(&path, force, verbose, false)?;
+            let root = nodepath::resolve(&[&path]);
+            // `--local-only` on an initialized project only converts the file (upstream fb71a9f4).
+            if !(local_only && directory::is_initialized(&root)) {
+                index_project(&path, force, verbose, false)?;
+            }
+            if local_only {
+                let file = format!("{}/.gitignore", std::path::Path::new(&directory::get_code_graph_dir(&root)).file_name().unwrap_or_default().to_string_lossy());
+                match directory::make_gitignore_local_only(&root)? {
+                    directory::LocalOnlyGitignore::Written => println!("{file} now ignores itself, so nothing of CodeGraphV's shows in git."),
+                    directory::LocalOnlyGitignore::Unchanged => println!("{file} already ignores itself."),
+                    directory::LocalOnlyGitignore::Customized => println!("Left {file} as it is because it has your own rules. A lone * in it would keep the whole folder out of git."),
+                    directory::LocalOnlyGitignore::Tracked => println!("Left {file} as it is because it is committed to this repository, so changing it would show up in git."),
+                }
+            }
             if git_hooks {
                 let root = nodepath::resolve(&[&path]);
                 let result = codegraph_sync::git_hooks::install_git_sync_hook(&root, None)?;
