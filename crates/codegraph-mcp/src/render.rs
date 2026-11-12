@@ -546,8 +546,9 @@ pub fn file_view(cg: &CodeGraph, file: &str, args: &Value) -> Result<ToolResult>
     let nodes = cg.get_nodes_by_file(&f.path)?;
     let deps = cg.get_file_dependents(&f.path)?;
     let mut out = format!(
-        "**{}** — {} symbols, used by {} indexed files{}\n\n",
+        "**{}**{} — {} symbols, used by {} indexed files{}\n\n",
         f.path,
+        if codegraph_search::query_utils::is_test_path(&f.path) { " · test file" } else { "" },
         nodes.len(),
         deps.len(),
         if deps.is_empty() {
@@ -1165,6 +1166,9 @@ pub fn explore(
 }
 pub fn files(cg: &CodeGraph, args: &Value) -> Result<String> {
     let mut files = cg.get_files()?;
+    if files.is_empty() {
+        return Ok("No files indexed. Run `codegraphV index` first.".into());
+    }
     let path = args["path"].as_str().unwrap_or("").replace('\\', "/");
     let path = path.trim_matches('/').trim_start_matches("./");
     let pattern = args["pattern"].as_str();
@@ -1176,6 +1180,13 @@ pub fn files(cg: &CodeGraph, args: &Value) -> Result<String> {
                     .unwrap_or(false)
             })
     });
+    // `tests` is the CLI's `--tests` / `--no-tests` (upstream b6ea6179); not in the tool schema.
+    if let Some(only) = args["tests"].as_bool() {
+        files.retain(|f| codegraph_search::query_utils::is_test_path(&f.path) == only);
+    }
+    if files.is_empty() {
+        return Ok("No files found matching the criteria.".into());
+    }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let format = args["format"].as_str().unwrap_or("tree");
     let metadata = args["includeMetadata"].as_bool().unwrap_or(true);

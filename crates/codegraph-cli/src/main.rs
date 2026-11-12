@@ -150,6 +150,12 @@ enum Command {
         filter: Option<String>,
         #[arg(long)]
         pattern: Option<String>,
+        /// Show only test files.
+        #[arg(long, conflicts_with = "no_tests")]
+        tests: bool,
+        /// Exclude test files.
+        #[arg(long)]
+        no_tests: bool,
         #[arg(long,default_value="tree",value_parser=["tree","flat","grouped","package"])]
         format: String,
         #[arg(long)]
@@ -662,15 +668,25 @@ fn run() -> Result<()> {
             project,
             filter,
             pattern,
+            tests,
+            no_tests,
             format,
             max_depth,
             no_metadata,
             json: as_json,
         } => {
-            let args = json!({"path":filter,"pattern":pattern,"format":format,"maxDepth":max_depth,"includeMetadata":!no_metadata});
+            // `--tests` / `--no-tests` filter before any output format (upstream b6ea6179).
+            let only_tests = (tests || no_tests).then_some(tests);
+            let mut args = json!({"path":filter,"pattern":pattern,"format":format,"maxDepth":max_depth,"includeMetadata":!no_metadata});
+            if let Some(only) = only_tests {
+                args["tests"] = json!(only);
+            }
             if as_json {
                 let cg = open_read_only(&project, true)?;
-                let files = wire::files(&cg, filter.as_deref(), pattern.as_deref())?;
+                let mut files = wire::files(&cg, filter.as_deref(), pattern.as_deref())?;
+                if let Some(only) = only_tests {
+                    files.retain(|f| codegraph_search::query_utils::is_test_path(&f.path) == only);
+                }
                 print_json(&wire::file_json(&files))?;
                 cg.close();
             } else {

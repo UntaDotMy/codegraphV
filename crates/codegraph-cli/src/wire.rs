@@ -136,7 +136,7 @@ pub fn files(
         .collect())
 }
 pub fn file_json(files: &[FileRecord]) -> Value {
-    json!(files.iter().map(|f|{let errors=f.errors.as_deref().unwrap_or(&[]).iter().map(|e|{let mut out=json!({"severity":e.severity,"message":e.message});if let Some(code)=&e.code{out["code"]=json!(code);}if let Some(line)=e.line{out["line"]=json!(line);}out}).collect::<Vec<_>>();json!({"path":f.path,"language":f.language,"nodeCount":f.node_count,"size":f.size,"errors":errors})}).collect::<Vec<_>>())
+    json!(files.iter().map(|f|{let errors=f.errors.as_deref().unwrap_or(&[]).iter().map(|e|{let mut out=json!({"severity":e.severity,"message":e.message});if let Some(code)=&e.code{out["code"]=json!(code);}if let Some(line)=e.line{out["line"]=json!(line);}out}).collect::<Vec<_>>();json!({"path":f.path,"isTest":codegraph_search::query_utils::is_test_path(&f.path),"language":f.language,"nodeCount":f.node_count,"size":f.size,"errors":errors})}).collect::<Vec<_>>())
 }
 pub fn affected(
     cg: &CodeGraph,
