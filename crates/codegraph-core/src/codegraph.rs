@@ -54,6 +54,11 @@ const FRAMEWORKS_AT_INDEX_KEY: &str = "frameworks_at_index";
 /// Metadata key: `{added, removed}` — the frameworks a sync detected since the last full index,
 /// against `FRAMEWORKS_AT_INDEX_KEY`; '' when none.
 const FRAMEWORKS_SINCE_INDEX_KEY: &str = "frameworks_since_index";
+/// Metadata key: the frameworks (sorted JSON names) the resolver had at the last full index
+/// (upstream 5526e33d). A sync detects again only when it extracts a file, so one that finds just
+/// `package.json` changed records nothing in `FRAMEWORKS_SINCE_INDEX_KEY`; the resolver detects on
+/// every open, so its set is compared with this one as it is now.
+const RESOLVER_FRAMEWORKS_AT_INDEX_KEY: &str = "resolver_frameworks_at_index";
 /// The ES module family whose references a moved workspace map re-opens (ESM_IMPORT_LANGUAGES).
 const ESM_IMPORT_LANGUAGES: [Language; 8] =
     [Language::TypeScript, Language::Tsx, Language::JavaScript, Language::Jsx, Language::ArkTs, Language::Svelte, Language::Vue, Language::Astro];
@@ -695,6 +700,11 @@ impl CodeGraph {
         if let Ok(json) = serde_json::to_string(&names) {
             let _ = self.store.set_metadata(FRAMEWORKS_AT_INDEX_KEY, &json);
             let _ = self.store.set_metadata(FRAMEWORKS_SINCE_INDEX_KEY, "");
+        }
+        let mut resolver_names = self.resolver().detected_frameworks();
+        resolver_names.sort();
+        if let Ok(json) = serde_json::to_string(&resolver_names) {
+            let _ = self.store.set_metadata(RESOLVER_FRAMEWORKS_AT_INDEX_KEY, &json);
         }
     }
 
@@ -1501,13 +1511,29 @@ impl CodeGraph {
     /// The frameworks a sync detected since the last full index, against the ones that index
     /// extracted every file with. `None` when nothing changed, or for an index built before this
     /// was recorded.
+    ///
+    /// A sync that only finds a manifest changed (`express` added to `package.json`, no source
+    /// edited) extracts nothing, so it records nothing; the resolver's set as detected now, against
+    /// the one the last full index stamped, covers that (upstream 5526e33d).
     pub fn get_framework_changes_since_index(&self) -> Option<FrameworkChanges> {
-        let value = self.store().get_metadata(FRAMEWORKS_SINCE_INDEX_KEY).ok().flatten().filter(|v| !v.is_empty())?;
-        let parsed: serde_json::Value = serde_json::from_str(&value).ok()?;
-        let names = |key: &str| -> Vec<String> {
-            parsed.get(key).and_then(|l| l.as_array()).map(|l| l.iter().filter_map(|n| n.as_str().map(String::from)).collect()).unwrap_or_default()
-        };
-        let changes = FrameworkChanges { added: names("added"), removed: names("removed") };
+        let mut added = std::collections::BTreeSet::new();
+        let mut removed = std::collections::BTreeSet::new();
+        if let Some(value) = self.store().get_metadata(FRAMEWORKS_SINCE_INDEX_KEY).ok().flatten().filter(|v| !v.is_empty()) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value) {
+                for (key, into) in [("added", &mut added), ("removed", &mut removed)] {
+                    if let Some(list) = parsed.get(key).and_then(|l| l.as_array()) {
+                        into.extend(list.iter().filter_map(|n| n.as_str().map(String::from)));
+                    }
+                }
+            }
+        }
+        let at_index = self.store().get_metadata(RESOLVER_FRAMEWORKS_AT_INDEX_KEY).ok().flatten().and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok());
+        if let Some(at_index) = at_index {
+            let now = self.get_detected_frameworks();
+            added.extend(now.iter().filter(|n| !at_index.contains(n)).cloned());
+            removed.extend(at_index.iter().filter(|n| !now.contains(n)).cloned());
+        }
+        let changes = FrameworkChanges { added: added.into_iter().collect(), removed: removed.into_iter().collect() };
         (!changes.added.is_empty() || !changes.removed.is_empty()).then_some(changes)
     }
 
