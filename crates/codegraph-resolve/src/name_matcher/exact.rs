@@ -256,6 +256,15 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
     let best = cpp_function_overload(&nearest, pool, r, ctx);
     if is_cross_file_reachable(&best, r, ctx) {
         let proximity = compute_path_proximity(&r.file_path, &best.file_path);
+        // A view's `<script>` calls a global, and the page's script tags decide which file
+        // answers: nopCommerce's admin and public bundles both define `setLocation`, and a
+        // storefront view has no path nearer to either (upstream 97492056).
+        if is_js_family(r.language)
+            && re!(r"\.(?:cshtml|razor)$", "i").is_match(&r.file_path)
+            && pool.iter().any(|c| c.id != best.id && compute_path_proximity(&r.file_path, &c.file_path) == proximity)
+        {
+            return None;
+        }
         // Every candidate is a copy of one symbol and this is the caller's own copy: the name
         // itself is not ambiguous, only which copy — so rank it above a proximity guess, but below
         // a unique name or the file's own definition (0.9). The candidates are those

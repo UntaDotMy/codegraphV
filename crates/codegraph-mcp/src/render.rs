@@ -984,13 +984,36 @@ pub fn explore(
             && extracted.line_anchors.iter().any(|a| a.file == file);
         let deps = if source_only { Vec::new() } else { cg.get_file_dependents(&file)? };
         if !deps.is_empty() {
-            header.push_str(&format!("Used by {} files", deps.len()));
-            for (i, dep) in deps.iter().take(8).enumerate() {
-                let part = format!("{}{dep}", if i == 0 { ": " } else { ", " });
+            // A view depends on a helper across a layer, and is easily outnumbered by
+            // same-language dependents: "which views use this?" gets its own slot (upstream
+            // 97492056).
+            let template_view = codegraph_jsre::re!(r"\.(?:cshtml|razor|vue|svelte|astro)$", "i");
+            let (views, code): (Vec<&String>, Vec<&String>) = deps.iter().partition(|d| template_view.is_match(d));
+            let push_capped = |header: &mut String, part: String| {
                 if header.chars().count() + part.chars().count() > 1180 {
-                    break;
+                    return false;
                 }
                 header.push_str(&part);
+                true
+            };
+            header.push_str(&format!("Used by {} files", deps.len()));
+            for (i, dep) in code.iter().take(8).enumerate() {
+                if !push_capped(&mut header, format!("{}{dep}", if i == 0 { ": " } else { ", " })) {
+                    break;
+                }
+            }
+            if !views.is_empty() {
+                let lead = format!("{} {} view{}", if code.is_empty() { ":" } else { ";" }, views.len(), if views.len() == 1 { "" } else { "s" });
+                if push_capped(&mut header, lead) {
+                    for (i, view) in views.iter().take(4).enumerate() {
+                        if !push_capped(&mut header, format!("{}{view}", if i == 0 { ": " } else { ", " })) {
+                            break;
+                        }
+                    }
+                    if views.len() > 4 {
+                        push_capped(&mut header, format!(" +{}", views.len() - 4));
+                    }
+                }
             }
             header.push('\n');
         }
