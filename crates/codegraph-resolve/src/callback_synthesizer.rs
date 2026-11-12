@@ -20,6 +20,7 @@ pub use jsx::is_jsx_child_candidate;
 mod native;
 mod routers;
 mod stores;
+mod tauri;
 mod tier;
 
 use crate::ctx::Ctx;
@@ -42,6 +43,7 @@ struct SynthPass {
 
 const JS: [&str; 4] = ["typescript", "javascript", "tsx", "jsx"];
 const VUE_AND_JS: [&str; 5] = ["vue", "typescript", "javascript", "tsx", "jsx"];
+const VUE_SVELTE_AND_JS: [&str; 6] = ["vue", "svelte", "typescript", "javascript", "tsx", "jsx"];
 const IFACE_LANGUAGES: [&str; 12] =
     ["java", "kotlin", "csharp", "swift", "scala", "go", "rust", "arkts", "typescript", "javascript", "tsx", "jsx"];
 
@@ -61,6 +63,8 @@ fn synth_passes() -> Vec<SynthPass> {
         // its consumer, a bus / socket event onto its handler. Before the in-process emitter
         // pass: the same (source, target) pair keeps the more specific edge.
         p("tierEdges", |has| has(&JS), tier::cross_tier_edges),
+        // A Tauri frontend's `invoke('x')` onto the Rust command, and events across that seam.
+        p("tauriEdges", |has| has(&["rust"]) && has(&VUE_SVELTE_AND_JS), tauri::tauri_edges),
         // A Spring / Laravel test's request onto the route it reaches.
         p("testRequestEdges", |has| has(&["java", "kotlin", "php"]), tier::test_request_edges),
         p("emitterEdges", always, channels::event_emitter_edges),
@@ -310,7 +314,10 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
     if file_path.ends_with(".go") {
         return true;
     }
-    if tier::has_cross_tier_pattern(content) || tier::has_test_request_pattern(file_path, content) {
+    if tier::has_cross_tier_pattern(content)
+        || tier::has_test_request_pattern(file_path, content)
+        || tauri::has_tauri_pattern(file_path, content)
+    {
         return true;
     }
     if re!(r"\b(?:render|build|setState|defineStore|createStore|createApi|Store|href|sendEvent|sendEventWithName)\b|</|/>")

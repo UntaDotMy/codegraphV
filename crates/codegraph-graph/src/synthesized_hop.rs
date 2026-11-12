@@ -70,6 +70,19 @@ pub fn describe_synthesized_hop(edge: Option<&Edge>) -> Option<SynthesizedHop> {
             format!("{what} {}", quoted("event", "an event"))
         }
         "event-emitter" => format!("event {}", quoted("event", "an event")),
+        "tauri-command" => {
+            detail = " — the frontend's invoke onto its Rust handler".into();
+            format!("Tauri command {}", quoted("command", "a command"))
+        }
+        "tauri-event" => {
+            detail = match get("tier").as_str() {
+                Some("server→client") => " → frontend",
+                Some("client→server") => " → Rust",
+                _ => "",
+            }
+            .into();
+            format!("Tauri event {}", quoted("event", "an event"))
+        }
         "react-render" => "React re-render via setState".into(),
         "jsx-render" => format!(
             "renders {}",
