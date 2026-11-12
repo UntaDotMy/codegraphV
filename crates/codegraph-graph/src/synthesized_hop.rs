@@ -108,6 +108,13 @@ pub fn describe_synthesized_hop(edge: Option<&Edge>) -> Option<SynthesizedHop> {
                 String::new()
             }
         ),
+        "next-proxy" => {
+            if truthy(get("matcher")) {
+                format!("Next proxy, matcher {}", quoted("matcher", ""))
+            } else {
+                "Next proxy, on every request".into()
+            }
+        }
         "const-alias" => format!("const alias of {}", quoted("via", "a function")),
         "go-func-field" => format!(
             "func field {}{}",

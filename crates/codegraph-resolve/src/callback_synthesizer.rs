@@ -108,6 +108,8 @@ fn synth_passes() -> Vec<SynthPass> {
         p("expoRouterReturnEdges", |has| has(&JS), routers::expo_router_return_edges),
         // `<Link href="/x">` / an internal `<a href>` — markup, not a call; the component navigates.
         p("nextLinkEdges", |has| has(&JS), routers::next_link_edges),
+        // `proxy.ts` / `middleware.ts` — every route its `config.matcher` accepts runs it first.
+        p("nextProxyEdges", |has| has(&JS), routers::next_proxy_edges),
         p("reactRouterLinkEdges", |has| has(&JS), routers::react_router_link_edges),
         p("tanstackLinkEdges", |has| has(&JS), routers::tanstack_link_edges),
         p("vueRouterLinkEdges", |has| has(&VUE_AND_JS), routers::vue_router_link_edges),
@@ -288,6 +290,11 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
     // These passes consume declarations/layouts as well as dispatch sites. A header or markup
     // edit can change a channel whose endpoints live elsewhere.
     if re!(r"\.(?:vue|svelte|dfm|fmx|nix|xml)$").is_match(file_path) {
+        return true;
+    }
+    // A Next proxy and the routes its matcher covers are joined by path and config, not by any line
+    // of code.
+    if crate::frameworks::next_proxy::is_next_proxy_file(file_path) || crate::frameworks::nextjs::next_route_for_file(file_path).is_some() {
         return true;
     }
     if re!(r"\.(?:c|h|cc|cpp|cxx|hpp|hh|hxx|cppm|ipp|inl|tcc|def|inc|tbl)$", "i").is_match(file_path)

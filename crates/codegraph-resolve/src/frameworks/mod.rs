@@ -15,6 +15,7 @@ pub mod fabric;
 pub mod go;
 pub mod goframe;
 pub mod nextjs;
+pub mod next_proxy;
 pub mod java;
 pub mod laravel;
 pub mod name_heuristic;
