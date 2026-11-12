@@ -150,7 +150,7 @@ enum Command {
         filter: Option<String>,
         #[arg(long)]
         pattern: Option<String>,
-        #[arg(long,default_value="tree",value_parser=["tree","flat","grouped"])]
+        #[arg(long,default_value="tree",value_parser=["tree","flat","grouped","package"])]
         format: String,
         #[arg(long)]
         max_depth: Option<usize>,

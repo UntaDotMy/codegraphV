@@ -276,11 +276,12 @@
         },
         "format": {
           "type": "string",
-          "description": "Output format: \"tree\" (hierarchical, default), \"flat\" (simple list), \"grouped\" (by language)",
+          "description": "Output format: \"tree\" (hierarchical, default), \"flat\" (simple list), \"grouped\" (by language), \"package\" (by the nearest package.json or composer.json that names a package)",
           "enum": [
             "tree",
             "flat",
-            "grouped"
+            "grouped",
+            "package"
           ],
           "default": "tree"
         },

@@ -1180,6 +1180,25 @@ pub fn files(cg: &CodeGraph, args: &Value) -> Result<String> {
     let format = args["format"].as_str().unwrap_or("tree");
     let metadata = args["includeMetadata"].as_bool().unwrap_or(true);
     let max_depth = number(args, "maxDepth", usize::MAX, 1, usize::MAX);
+    if format == "package" {
+        use crate::owning_package::{group_files_by_package, package_group_title, package_listing_title};
+        let groups = group_files_by_package(cg.project_root(), &files, |f| f.path.as_str());
+        let mut out = format!("**{}**\n\n", package_listing_title(&groups));
+        for group in &groups {
+            out.push_str(&format!("**{}**\n", package_group_title(group)));
+            for f in &group.files {
+                if metadata {
+                    out.push_str(&format!("- {} ({}, {} symbols)\n", f.path, f.language, f.node_count));
+                } else {
+                    out.push_str(&format!("- {}\n", f.path));
+                }
+            }
+            out.push('\n');
+        }
+        // Sections are separated by one blank line, with none after the last (upstream's join).
+        out.pop();
+        return Ok(out);
+    }
     let mut out = format!("**Indexed Files ({} files)**\n\n", files.len());
     let mut last_group = String::new();
     for f in files {
