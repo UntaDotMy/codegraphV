@@ -1529,6 +1529,62 @@ impl ReferenceResolver {
         self.persist_deferred_references(&deferred, resolved)
     }
 
+    /// Move each call on a parameter whose class its call sites settle to that class's method,
+    /// and put back through resolution a call whose flow is gone (see `parameter_flow`). The last
+    /// pass on `calls` edges, once every call has an answer. Returns how many calls it changed; a
+    /// failure leaves the graph as resolution left it.
+    pub fn resolve_parameter_flows(&self) -> usize {
+        let started = std::time::Instant::now();
+        match self.apply_parameter_flows() {
+            Ok((changed, stats)) => {
+                if std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty()) {
+                    if let Some(stats) = stats {
+                        eprintln!("[phase-timing] parameter-flow: {}ms {stats:?}", started.elapsed().as_millis());
+                    }
+                }
+                changed
+            }
+            Err(error) => {
+                log_debug("Parameter flows failed", &[("error", error.to_string())]);
+                0
+            }
+        }
+    }
+
+    fn apply_parameter_flows(&self) -> codegraph_db::Result<(usize, Option<crate::parameter_flow::ParameterFlowStats>)> {
+        self.clear_caches();
+        let Some(plan) = crate::parameter_flow::plan_parameter_flows(&self.store, &self.ctx)? else { return Ok((0, None)) };
+        let store = &self.store;
+        let resolved: Vec<ResolvedRef> = plan.retarget.iter().map(|r| r.resolved.clone()).collect();
+        store.pf_retarget_calls(
+            &plan.retarget.iter().filter_map(|r| r.edge_id).collect::<Vec<_>>(),
+            &plan.retarget.iter().filter_map(|r| r.row_id).collect::<Vec<_>>(),
+            &self.create_edges(&resolved),
+        )?;
+        store.pf_replace_edges_with_flow_marked_refs(
+            &plan.drop.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            &plan.drop.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
+        )?;
+        if !plan.retarget.is_empty() || !plan.drop.is_empty() {
+            store.pf_note_parameter_flows()?;
+        }
+        if !plan.restore.is_empty() {
+            store.pf_restore_calls(
+                &plan.restore.iter().filter_map(|(e, _, _)| *e).collect::<Vec<_>>(),
+                &plan.restore.iter().filter_map(|(_, r, _)| *r).collect::<Vec<_>>(),
+                &plan.restore.iter().map(|(_, _, r)| r.clone()).collect::<Vec<_>>(),
+            )?;
+            let mut files: Vec<String> = plan.restore.iter().filter_map(|(_, _, r)| r.file_path.clone()).collect();
+            files.sort();
+            files.dedup();
+            self.clear_caches();
+            let pending = store.get_unresolved_references_by_files(&files)?;
+            self.resolve_and_persist(&pending)?;
+        }
+        self.clear_caches();
+        Ok((plan.retarget.len() + plan.drop.len() + plan.restore.len(), Some(plan.stats)))
+    }
+
     // -- Index run -------------------------------------------------------------------
 
     /// Resolve every pending reference in keyset batches, persisting each batch before the next

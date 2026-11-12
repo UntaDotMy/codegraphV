@@ -164,6 +164,15 @@ fn innermost_namespace(r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
     inner
 }
 
+/// The class `@name` holds where `r` is written, when its class's `initialize` says exactly
+/// (see `ivar_class`); `None` for anything else. The parameter-flow pass types an argument by it.
+pub fn ivar_class_node(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
+    match ivar_class(name, r, ctx) {
+        IvarClass::Found(n) => Some(n),
+        _ => None,
+    }
+}
+
 /// The class of what `@name` holds where `r` is written, an instance method of a class, read
 /// from that class's `initialize`. Undefined for the other strategies when the call is not in
 /// an instance method of a class, or `initialize` doesn't assign the variable, or assigns it

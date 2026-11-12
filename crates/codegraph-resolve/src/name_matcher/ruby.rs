@@ -153,7 +153,7 @@ pub fn ruby_ancestry(qn: &str, ctx: &Ctx, instance: bool) -> Rc<indexmap::IndexS
 }
 
 /// The Ruby methods `name` whose owner is exactly `owner`.
-fn ruby_methods_of(owner: &str, name: &str, ctx: &Ctx) -> Vec<NodeRef> {
+pub fn ruby_methods_of(owner: &str, name: &str, ctx: &Ctx) -> Vec<NodeRef> {
     let owners = memoized::<RubyMethodOwnersMemo>(ctx, name.to_string(), || {
         let mut by_owner: HashMap<String, Vec<NodeRef>> = HashMap::new();
         for n in ctx.get_nodes_by_name(name).iter() {
@@ -211,7 +211,7 @@ pub fn ruby_instance_method_of(type_name: &str, name: &str, r: &UnresolvedRef, c
 }
 
 /// The class method `name` a Ruby class answers past its own `def self`.
-fn ruby_class_method_of(qn: &str, name: &str, ctx: &Ctx) -> Option<NodeRef> {
+pub fn ruby_class_method_of(qn: &str, name: &str, ctx: &Ctx) -> Option<NodeRef> {
     let named = |owner: &str, is_static: bool| -> Option<NodeRef> {
         ruby_methods_of(owner, name, ctx).into_iter().find(|n| (n.is_static == Some(true)) == is_static)
     };

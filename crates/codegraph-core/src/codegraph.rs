@@ -16,7 +16,7 @@ use crate::orchestrator::{ChangedFiles, ExtractionOrchestrator, IndexPhase, Inde
 use crate::utils::FileLock;
 use crate::directory::database_path;
 use codegraph_db::{remove_database_files, OpenOptions as DbOpenOptions, Store};
-use codegraph_extract::languages::is_file_level_only_language;
+use codegraph_extract::languages::{detect_language, is_file_level_only_language};
 use codegraph_extract::scan::config::load_deprioritize_patterns;
 use codegraph_extract::scan::ignore::Ignore;
 use codegraph_graph::{GraphQueryManager, GraphTraverser};
@@ -538,6 +538,9 @@ impl CodeGraph {
             // callback registrations whose member is inherited (#808).
             self.resolver().resolve_chained_calls_via_conformance()?;
             self.resolver().resolve_deferred_this_member_refs()?;
+            // A call on a Ruby parameter takes its class from the method's call sites: last, once
+            // every call has an answer.
+            self.resolver().resolve_parameter_flows();
 
             // Over an existing graph the vocabulary was kept (see the top of the run). Every write
             // of this run has landed, so drop the rows of names deleted or renamed since they
@@ -810,8 +813,12 @@ impl CodeGraph {
         // navigation calls to routes.
         let watch_routes = self.resolver().has_navigation_routers();
         let mut routes_before: Option<Vec<Node>> = None;
+        // A call in one Ruby file types a parameter in another, so an edit of the caller can move
+        // the callee's edges.
+        let mut ruby_changed = false;
         let mut result = {
             let mut on_file_change = |file_path: &str, content: Option<&str>| {
+                ruby_changed = ruby_changed || detect_language(file_path, content, None, None) == Language::Ruby;
                 if watch_routes && routes_before.is_none() {
                     routes_before = store.get_nodes_by_kind(NodeKind::Route).ok();
                 }
@@ -1094,6 +1101,11 @@ impl CodeGraph {
         if refresh_synthesis {
             self.resolver().refresh_synthesis()?;
             store.set_metadata("synthesis_pending", "0")?;
+        }
+
+        // Last, as in a full index.
+        if ruby_changed || orphan_count > 0 {
+            self.resolver().resolve_parameter_flows();
         }
 
         // Refresh planner stats + checkpoint the WAL after bulk writes.
