@@ -471,6 +471,12 @@ fn run() -> Result<()> {
             let result = cg.sync(&IndexOptions::default(), None)?;
             if !quiet {
                 print_json(&result)?;
+                // Sync re-reads changed files only, so files left alone keep what an older engine
+                // extracted. Warn and carry on: the git hooks discard this output, so refusing
+                // would quietly stop them after every upgrade (upstream 0603ad9e).
+                if cg.is_index_stale() {
+                    eprintln!("Warning: this index was built by an older CodeGraphV engine, and sync only re-reads changed files. Run \"codegraphV index\" for a full rebuild.");
+                }
             }
             cg.close();
         }
