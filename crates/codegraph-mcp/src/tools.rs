@@ -96,6 +96,28 @@ pub struct ToolHandler {
     pub idle_timeout: Option<Duration>,
     pub(crate) shown: std::collections::HashMap<String, std::collections::HashSet<u32>>,
     pub(crate) cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Project roots this session has already been told were indexed by an older engine
+    /// (upstream 737ee961). Per session, never swapped with the daemon's project pool: one
+    /// daemon serves many clients and each is warned once.
+    index_version_warned: std::collections::HashSet<String>,
+}
+
+/// Starts the one-time warning for a project indexed by an older extraction engine.
+pub const INDEX_VERSION_WARNING_PREFIX: &str =
+    "⚠ This project's CodeGraphV index predates the running extraction engine.";
+
+/// The warning for an index whose build stamp is `build`, worded as the user's decision.
+pub fn index_version_warning(build: &codegraph_core::codegraph::IndexBuildInfo) -> String {
+    let extraction = build.extraction_version.map_or_else(|| "unknown".to_string(), |v| v.to_string());
+    let built = match build.version.as_deref().filter(|v| !v.is_empty()) {
+        Some(v) => format!("CodeGraphV v{} (extraction {extraction})", v.trim_start_matches('v')),
+        None => format!("an earlier CodeGraphV version (extraction {extraction})"),
+    };
+    format!(
+        "{INDEX_VERSION_WARNING_PREFIX} It was built with {built}; the running engine is CodeGraphV v{} (extraction {}). Answers can miss symbols and relationships this engine adds. Indexing is the user's decision: they can run `codegraphV index` in the project to rebuild it.",
+        env!("CARGO_PKG_VERSION"),
+        codegraph_core::codegraph::EXTRACTION_VERSION
+    )
 }
 
 /// How long an explicit-`projectPath` project may go unused before the handler releases it
@@ -126,6 +148,7 @@ impl ToolHandler {
             idle_timeout: project_idle_timeout(),
             shown: Default::default(),
             cancellation: None,
+            index_version_warned: Default::default(),
         }
     }
 
@@ -284,12 +307,22 @@ impl ToolHandler {
         };
         let pending = cg.get_pending_files();
         let degraded = cg.get_watcher_degraded_reason();
+        // Read-only handlers are the one-shot CLI commands, where `codegraphV status` says this.
+        let version_warning = (!self.read_only && !result.is_error && cg.is_index_stale()
+            && self.index_version_warned.insert(root.clone()))
+            .then(|| index_version_warning(&cg.get_index_build_info()));
         self.used_at.insert(root.clone(), Instant::now());
         self.projects.insert(root, cg);
         if result.is_error {
             return result;
         }
         let mut text = String::new();
+        if let Some(warning) = version_warning {
+            text.push_str(&warning);
+            text.push_str("
+
+");
+        }
         if let Some(reason) = degraded {
             text.push_str(&format!("⚠ Index may be stale: {reason}\n\n"));
         }
