@@ -6,6 +6,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
+mod dsh;
 mod edit;
 pub mod upgrade;
 mod markers;
@@ -25,6 +26,15 @@ pub const TARGETS: &[&str] = &[
     "copilot-vscode",
     "copilot-cli",
     "copilot-jetbrains",
+    "bob",
+    "droid",
+    "windsurf",
+    "qwen",
+    "dsh",
+    "grok",
+    "kimi",
+    "qoder",
+    "pi",
 ];
 pub const INSTRUCTIONS: &str = include_str!("assets/instructions.md");
 /// The names one product writes into agent configuration, so removing it touches only its own
@@ -91,6 +101,56 @@ impl Environment {
     fn xdg(&self) -> PathBuf {
         self.env("XDG_CONFIG_HOME", self.home.join(".config"))
     }
+    /// The folder an agent's `*_HOME`-style variable names, or `fallback` when it is unset or
+    /// blank. A leading `~` is the home and a relative path is taken from the project, so the
+    /// installer writes where the agent reads (upstream `configDirFromEnv`).
+    fn home_var(&self, key: &str, fallback: PathBuf) -> PathBuf {
+        let Some(value) = self.vars.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return fallback;
+        };
+        if value == "~" {
+            return self.home.clone();
+        }
+        if let Some(rest) = value.strip_prefix("~/").or_else(|| value.strip_prefix("~\\")) {
+            return self.home.join(rest);
+        }
+        self.project.join(value)
+    }
+    fn agent_home(&self, loc: Location, key: &str, global: &str, local: &str) -> PathBuf {
+        if loc == Location::Local {
+            self.project.join(local)
+        } else {
+            self.home_var(key, self.home.join(global))
+        }
+    }
+    /// The configuration folder of an agent added in upstream 61e16218: its presence is how
+    /// `auto` detects the agent, and its files live in it.
+    fn agent_dir(&self, id: &str, loc: Location) -> Option<PathBuf> {
+        Some(match id {
+            "bob" => self.base(loc, ".bob"),
+            "droid" => self.base(loc, ".factory"),
+            "windsurf" => self.home.join(".codeium/windsurf"),
+            "qwen" => self.agent_home(loc, "QWEN_HOME", ".qwen", ".qwen"),
+            "grok" => self.agent_home(loc, "GROK_HOME", ".grok", ".grok"),
+            "kimi" => self.agent_home(loc, "KIMI_CODE_HOME", ".kimi-code", ".kimi-code"),
+            "qoder" => self.agent_home(loc, "QODER_CONFIG_DIR", ".qoder", ".qoder"),
+            "pi" => self.agent_home(loc, "PI_CODING_AGENT_DIR", ".pi/agent", ".pi"),
+            "dsh" => self.home_var("DSH_HOME", self.home.join(".dsh")),
+            _ => return None,
+        })
+    }
+    /// The dsh profiles' own patch files that exist.
+    fn dsh_profile_patches(&self) -> Vec<PathBuf> {
+        let Some(home) = self.agent_dir("dsh", Location::Global) else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(home.join("profiles")) else { return Vec::new() };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join(dsh::PATCH_FILE))
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        files
+    }
     fn profile(&self, loc: Location, key: &str, dir: &str) -> PathBuf {
         if loc == Location::Local {
             self.project.join(dir)
@@ -102,7 +162,7 @@ impl Environment {
         loc == Location::Global
             || !matches!(
                 id,
-                "hermes" | "antigravity" | "copilot-cli" | "copilot-jetbrains"
+                "hermes" | "antigravity" | "copilot-cli" | "copilot-jetbrains" | "windsurf" | "dsh"
             )
     }
     pub fn config_path(&self, id: &str, loc: Location) -> Result<PathBuf> {
@@ -183,6 +243,23 @@ impl Environment {
                 };
                 base.join("github-copilot/intellij/mcp.json")
             }
+            "bob" => {
+                let dir = self.agent_dir(id, loc).unwrap();
+                if loc == Location::Local {
+                    dir.join("mcp.json")
+                } else {
+                    // Bob's earlier settings file stays in use until the current one exists.
+                    let current = dir.join("settings/mcp.json");
+                    let earlier = dir.join("settings/mcp_settings.json");
+                    if !current.exists() && earlier.exists() { earlier } else { current }
+                }
+            }
+            "droid" | "kimi" | "pi" => self.agent_dir(id, loc).unwrap().join("mcp.json"),
+            "windsurf" => self.agent_dir(id, loc).unwrap().join("mcp_config.json"),
+            "qwen" => self.agent_dir(id, loc).unwrap().join("settings.json"),
+            "grok" => self.agent_dir(id, loc).unwrap().join("config.toml"),
+            "qoder" => self.agent_dir(id, loc).unwrap().join(if loc == Location::Local { "settings.local.json" } else { "settings.json" }),
+            "dsh" => self.agent_dir(id, loc).unwrap().join(dsh::PATCH_FILE),
             _ => {
                 return Err(
                     format!("Unknown target: {id}. Available: {}", TARGETS.join(", ")).into(),
@@ -214,6 +291,18 @@ impl Environment {
             } else {
                 self.home.join(".gemini/GEMINI.md")
             }),
+            "droid" | "kimi" | "pi" => Some(if loc == Location::Local {
+                self.project.join("AGENTS.md")
+            } else {
+                self.agent_dir(id, loc)?.join("AGENTS.md")
+            }),
+            "qwen" => Some(if loc == Location::Local {
+                self.project.join("QWEN.md")
+            } else {
+                self.agent_dir(id, loc)?.join("QWEN.md")
+            }),
+            "grok" => Some(self.agent_dir(id, loc)?.join("rules/codegraphV.md")),
+            "dsh" => Some(self.agent_dir(id, loc)?.join("AGENTS.md")),
             _ => None,
         }
     }
@@ -233,8 +322,12 @@ impl Environment {
             return json!({"type":"local","command":command,"disabled":false,"codemode":false});
         }
         let mut entry = json!({"type":"stdio","command":self.executable,"args":args});
-        if id == "antigravity" {
+        // Agents whose documented stdio entry is a bare `{ command, args }`.
+        if matches!(id, "antigravity" | "bob" | "windsurf" | "qwen" | "kimi" | "qoder" | "pi") {
             entry.as_object_mut().unwrap().remove("type");
+        }
+        if id == "pi" {
+            entry["exposure"] = json!("direct");
         }
         if id == "claude" {
             entry["alwaysLoad"] = json!(true);
@@ -248,8 +341,11 @@ impl Environment {
     pub fn print_config(&self, id: &str, loc: Location) -> Result<String> {
         let entry = self.entry(id, loc);
         self.config_path(id, loc)?;
-        if id == "codex" {
+        if id == "codex" || id == "grok" {
             return edit::toml("", CODEGRAPHV.server, Some(&entry));
+        }
+        if id == "dsh" {
+            return Ok(dsh::render_entry(CODEGRAPHV.server, &self.executable, &mcp_args(&entry)).join("\n") + "\n");
         }
         if id == "hermes" {
             return edit::yaml("", CODEGRAPHV.server, Some(&entry));
@@ -263,6 +359,9 @@ impl Environment {
         Ok(serde_json::to_string_pretty(&object)?)
     }
     pub fn detected(&self, id: &str, loc: Location) -> bool {
+        if let Some(dir) = self.agent_dir(id, loc) {
+            return self.supports(id, loc) && dir.exists();
+        }
         self.config_path(id, loc)
             .is_ok_and(|p| p.exists() || p.parent().is_some_and(Path::exists))
     }
@@ -289,10 +388,15 @@ impl Environment {
         let Ok(path) = self.config_path(id, loc) else {
             return false;
         };
+        if id == "dsh" {
+            return std::iter::once(path)
+                .chain(self.dsh_profile_patches())
+                .any(|p| std::fs::read_to_string(p).is_ok_and(|t| dsh::has_server(&t, brand.server)));
+        }
         let Ok(text) = std::fs::read_to_string(path) else {
             return false;
         };
-        if id == "codex" {
+        if id == "codex" || id == "grok" {
             return text
                 .parse::<toml_edit::DocumentMut>()
                 .ok()
@@ -441,13 +545,49 @@ impl Environment {
         let before = read(&file)?;
         let entry = self.entry(id, loc);
         let value = (!remove).then_some(&entry);
+        let mut notes = if remove { Vec::new() } else { self.install_notes(id, loc, &file) };
+        let mut extra = Vec::new();
         let after = match id {
-            "codex" => Some(edit::toml(&before, brand.server, value)?),
+            "codex" | "grok" => Some(edit::toml(&before, brand.server, value)?),
             "hermes" => Some(edit::yaml(&before, brand.server, value)?),
+            "dsh" if remove => {
+                for profile in self.dsh_profile_patches() {
+                    let text = read(&profile)?;
+                    let (after, note) = dsh::remove(&text, &profile, brand.server, false);
+                    notes.extend(note);
+                    if after.as_deref() != Some(text.as_str()) {
+                        extra.push(planned_file(profile, true, text, after));
+                    }
+                }
+                let (after, note) = dsh::remove(&before, &file, brand.server, true);
+                notes.extend(note);
+                after
+            }
+            "dsh" => {
+                let elsewhere = if dsh::has_server(&before, brand.server) {
+                    None
+                } else {
+                    self.dsh_profile_patches().into_iter().find(|p| read(p).is_ok_and(|t| dsh::has_server(&t, brand.server)))
+                };
+                match elsewhere {
+                    Some(profile) => {
+                        notes.insert(0, format!(
+                            "Left the CodeGraphV entry in {} as you wrote it: a second one in {} would fail to load. Move it there to use CodeGraphV in every profile.",
+                            profile.display(), file.display()
+                        ));
+                        Some(before.clone())
+                    }
+                    None => Some(dsh::install(&before, &file, brand.server, &self.executable, &mcp_args(&entry))?),
+                }
+            }
             _ => {
                 // opencode: drop a pre-#1698 `mcp.<server>` entry either way.
                 let legacy = if id == "opencode" {
                     edit::json(&before, &["mcp", brand.server], None)?
+                } else if id == "qwen" {
+                    // Qwen Code's allow rule names the server (upstream 61e16218).
+                    let rule = format!("mcp__{}", brand.server);
+                    qwen_allow_rule(&before, &rule, if remove { Some(false) } else { options.auto_allow.then_some(true) })?
                 } else {
                     before.clone()
                 };
@@ -477,6 +617,7 @@ impl Environment {
         };
         // `None` deletes the file: uninstall left nothing in it.
         let mut planned = vec![planned_file(file, existed, before, after)];
+        planned.append(&mut extra);
         // Installation writes one primary path. Removal also looks where an earlier install
         // wrote before the user created a file that shadows it (A34/A35).
         let instruction_paths: Vec<PathBuf> = if remove {
@@ -593,7 +734,24 @@ impl Environment {
                 }
             }
         }
-        Ok((Vec::new(), planned))
+        Ok((notes, planned))
+    }
+    /// What a person should know after installing one of upstream 61e16218's agents.
+    fn install_notes(&self, id: &str, loc: Location, file: &Path) -> Vec<String> {
+        let local = loc == Location::Local;
+        let shown = file.display();
+        let (always, trusted): (&str, Option<String>) = match id {
+            "droid" => ("", local.then(|| format!("Droid shares {shown} with your team: it is meant to be committed."))),
+            "windsurf" => ("Restart Windsurf, or refresh its MCP list, to load CodeGraphV.", None),
+            "qwen" => ("Restart any running Qwen Code session to pick up the MCP server.", None),
+            "dsh" => ("Start a new dsh session to pick up the MCP server, after a restart if dsh-hmr is off.", None),
+            "grok" => ("Start a new Grok session, or press r in /mcps, to pick up the MCP server.", local.then(|| format!("Grok applies {shown} only in a trusted folder: run /hooks-trust there, or start grok with --trust."))),
+            "kimi" => ("Start a new Kimi Code session: a server added mid-session only joins later ones.", local.then(|| format!("Kimi Code runs {shown} only in a trusted folder: trust this folder when Kimi Code asks."))),
+            "qoder" => ("This sets up the Qoder CLI. In the Qoder IDE, add the server under Settings > MCP.", local.then(|| format!("Qoder loads {shown} only in a trusted folder."))),
+            "pi" => ("Run /reload in Pi, or restart it, to pick up the MCP server.", local.then(|| format!("Pi reads {shown} only after you trust this project."))),
+            _ => ("", None),
+        };
+        (!always.is_empty()).then(|| always.to_owned()).into_iter().chain(trusted).collect()
     }
     /// Every path this target may have written its instructions block to. Claude uses
     /// AGENTS.md only while no CLAUDE.md exists; removal must still find a block the user has
@@ -627,6 +785,45 @@ fn action_for(file: &transaction::PlannedFile, remove: bool) -> &'static str {
 fn planned_file(path: PathBuf, existed: bool, before: String, after: Option<String>) -> transaction::PlannedFile {
     let after = if !existed && after.as_deref().is_some_and(str::is_empty) { None } else { after };
     transaction::PlannedFile { path, before: existed.then_some(before), after }
+}
+/// The launch arguments of an MCP entry.
+fn mcp_args(entry: &Value) -> Vec<String> {
+    entry["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_owned)).collect()
+}
+/// Qwen Code's `permissions.allow` with `rule` added (`Some(true)`), removed (`Some(false)`, with
+/// an emptied `allow` and a then-empty `permissions` dropped) or left alone (`None`). A shape
+/// other than an object holding an array is the user's and is never changed.
+fn qwen_allow_rule(text: &str, rule: &str, add: Option<bool>) -> Result<String> {
+    let Some(add) = add else { return Ok(text.to_owned()) };
+    let data = jsonc_parser::parse_to_serde_value(if text.trim().is_empty() { "{}" } else { text }, &Default::default())?
+        .unwrap_or(json!({}));
+    let permissions = data.get("permissions");
+    let allow = permissions.and_then(|p| p.get("allow"));
+    if add {
+        let next = match (permissions, allow) {
+            (None, _) => json!([rule]),
+            (Some(p), _) if !p.is_object() => return Ok(text.to_owned()),
+            (Some(_), None) => json!([rule]),
+            (Some(_), Some(Value::Array(rules))) if !rules.iter().any(|r| r == rule) => {
+                let mut rules = rules.clone();
+                rules.push(json!(rule));
+                Value::Array(rules)
+            }
+            _ => return Ok(text.to_owned()),
+        };
+        return edit::json(text, &["permissions", "allow"], Some(&next));
+    }
+    let Some(Value::Array(rules)) = allow else { return Ok(text.to_owned()) };
+    if !rules.iter().any(|r| r == rule) {
+        return Ok(text.to_owned());
+    }
+    if rules.len() > 1 {
+        let rest: Vec<Value> = rules.iter().filter(|r| *r != rule).cloned().collect();
+        return edit::json(text, &["permissions", "allow"], Some(&Value::Array(rest)));
+    }
+    let only_allow = permissions.and_then(Value::as_object).is_some_and(|p| p.len() == 1);
+    let path: &[&str] = if only_allow { &["permissions"] } else { &["permissions", "allow"] };
+    edit::json(text, path, None)
 }
 fn config_keys<'a>(id: &str, server: &'a str) -> Vec<&'a str> {
     match id {

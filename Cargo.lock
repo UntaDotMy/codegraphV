@@ -377,6 +377,7 @@ version = "0.0.10"
 dependencies = [
  "codegraph-types",
  "jsonc-parser",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

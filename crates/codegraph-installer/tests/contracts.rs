@@ -216,7 +216,7 @@ fn every_target_installs_idempotently_and_uninstalls_without_removing_siblings()
             }
             let config = env.config_path(id, loc).unwrap();
             fs::create_dir_all(config.parent().unwrap()).unwrap();
-            let before=match *id{"codex"=>"# keep comment\nmodel = \"example\"\n[mcp_servers.sibling]\ncommand = \"sibling\"\n", "hermes"=>"# keep comment\nmodel: example\nmcp_servers:\n  sibling:\n    command: sibling\n",_=>"{\n  // keep comment\n  \"sibling\": {\"value\": true},\n}\n"};
+            let before=match *id{"dsh"=>"# keep comment\n- insert:\n    - id: sibling\n      name: sibling\n", "codex"|"grok"=>"# keep comment\nmodel = \"example\"\n[mcp_servers.sibling]\ncommand = \"sibling\"\n", "hermes"=>"# keep comment\nmodel: example\nmcp_servers:\n  sibling:\n    command: sibling\n",_=>"{\n  // keep comment\n  \"sibling\": {\"value\": true},\n}\n"};
             fs::write(&config, before).unwrap();
             env.apply(id, loc, InstallOptions::default(), false)
                 .unwrap();
