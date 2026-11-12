@@ -132,6 +132,7 @@ pub mod call_chain;
 pub mod go;
 pub mod java;
 pub mod java_receiver;
+pub mod java_overload;
 pub mod php;
 pub mod kotlin;
 pub mod swift;

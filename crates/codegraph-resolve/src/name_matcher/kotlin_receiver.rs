@@ -10,6 +10,7 @@
 //! class) gets no edge instead of a name-only guess, unless the project extends that type.
 
 use super::infer::infer_local_receiver_type;
+use super::members::angle_arguments;
 use super::reach::is_anonymous_class;
 use super::method::resolve_method_on_type;
 use super::same_language_family;
@@ -536,6 +537,43 @@ fn kotlin_local_scan_lines(r: &UnresolvedRef, ctx: &Ctx, line_count: usize) -> V
     out
 }
 
+/// `KOTLIN_VALUE_HOLDERS`: library types whose member is one of their type arguments
+/// (`uiState.value` on a `StateFlow<UiState>` is a `UiState`); the index of that argument.
+fn kotlin_value_holder(ty: &str, member: &str) -> Option<usize> {
+    match (ty, member) {
+        ("StateFlow" | "MutableStateFlow" | "State" | "MutableState" | "LiveData" | "MutableLiveData" | "Lazy", "value") => Some(0),
+        ("Pair" | "Triple", "first") => Some(0),
+        ("Pair" | "Triple", "second") => Some(1),
+        ("Triple", "third") => Some(2),
+        _ => None,
+    }
+}
+
+/// `kotlinHeldType`: what `name.member` is when `name` is declared in `text` as a value holder: the
+/// type argument its declaration writes.
+fn kotlin_held_type(text: &str, name: &str, member: &str) -> Option<String> {
+    let m = Re::cached(&format!(r"\b{}\s*:\s*(?:[a-z_]\w*\.)*([A-Z]\w*)\s*<", escape_regex(name)), "").captures(text)?;
+    let index = kotlin_value_holder(m.text(1)?, member)?;
+    let start = m.get(0)?.start();
+    let arg = angle_arguments(&text[start..]).get(index).cloned().unwrap_or_default();
+    kotlin_type_name(&arg)
+}
+
+/// `kotlinDeclaringText`: the source a chain's value is declared in: `owner`'s lines for a property,
+/// else the enclosing class's and the lines above the call.
+fn kotlin_declaring_text(owner: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> String {
+    let file = owner.map_or(r.file_path.as_str(), |o| o.file_path.as_str());
+    let lines = kotlin_file_lines(file, ctx).unwrap_or_default();
+    let slice = |from: usize, to: usize| lines[from.min(lines.len())..to.min(lines.len()).max(from.min(lines.len()))].join("\n");
+    if let Some(o) = owner {
+        return slice((o.start_line as usize).saturating_sub(1), o.end_line.max(o.start_line) as usize);
+    }
+    match kotlin_enclosing_class(r, ctx) {
+        Some(around) => slice((around.start_line as usize).saturating_sub(1), around.end_line as usize),
+        None => slice(0, r.line as usize),
+    }
+}
+
 /// The declared type of a Kotlin receiver chain `a.b.c` / `this.a.b`: the first value typed as a
 /// single receiver (`this` is the enclosing class, a type name its object or companion), each next
 /// segment as a property or enum entry declared in the class of the type before it, read from that
@@ -560,11 +598,19 @@ fn kotlin_chain_declared_type(receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> O
         }
         owner = Some(classes[0].clone());
     }
-    for segment in &segments[1..] {
+    let mut holder: Option<NodeRef> = None;
+    for i in 1..segments.len() {
+        let segment = &segments[i];
         let current = match owner.take() {
             Some(o) => o,
             None => {
                 let t = ty.clone()?;
+                // A holder's member is its type argument (upstream 41587d38).
+                if t != KOTLIN_EXTERNAL_TYPE && kotlin_value_holder(&t, segment).is_some() && !is_project_type(&t, r, ctx) {
+                    ty = Some(kotlin_held_type(&kotlin_declaring_text(holder.as_ref(), r, ctx), segments[i - 1], segment).unwrap_or_else(|| KOTLIN_EXTERNAL_TYPE.to_string()));
+                    holder = None;
+                    continue;
+                }
                 if t == KOTLIN_EXTERNAL_TYPE || !is_project_type(&t, r, ctx) {
                     return Some(KOTLIN_EXTERNAL_TYPE.to_string());
                 }
@@ -594,6 +640,7 @@ fn kotlin_chain_declared_type(receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> O
             Tri::Null => None,
             Tri::Undefined => kotlin_inherited_property_type(segment, &current, r, ctx),
         };
+        holder = Some(current);
     }
     ty
 }

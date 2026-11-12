@@ -187,6 +187,8 @@ pub fn match_function_ref(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             })
             .cloned()
             .collect();
+        // Of a Java `Type::method`'s candidates, those of a `Type` the file can see (upstream fab65e9d).
+        let scoped = if r.language == Language::Java && scoped.len() > 1 { java_members_of_visible_type(scoped, r, ctx) } else { scoped };
         if scoped.is_empty() {
             return None;
         }
@@ -262,4 +264,24 @@ pub fn match_function_ref(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         return Some(ResolvedRef::new(r, candidates[0].id.clone(), 0.8, ResolvedBy::FunctionRef));
     }
     None
+}
+
+/// Of the members a Java `Type::method` could name, those of a `Type` the file can see: elasticsearch's
+/// `Template::lifecycle` under `import …metadata.Template` is that class's method, not the accessor of a
+/// record `Template` nested elsewhere.
+fn java_members_of_visible_type(members: Vec<NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> Vec<NodeRef> {
+    let mut ty = r.clone();
+    ty.reference_name = r.reference_name[..r.reference_name.rfind("::").unwrap_or(0)].to_string();
+    members
+        .into_iter()
+        .filter(|n| {
+            let owner_qn = &n.qualified_name[..n.qualified_name.rfind("::").unwrap_or(0)];
+            let owner = ctx
+                .get_nodes_by_qualified_name(owner_qn)
+                .iter()
+                .find(|t| t.file_path == n.file_path && matches!(t.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum))
+                .cloned();
+            owner.is_none_or(|o| super::java::is_java_type_visible(&o, &ty, ctx))
+        })
+        .collect()
 }

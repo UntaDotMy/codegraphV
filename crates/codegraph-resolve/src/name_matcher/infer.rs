@@ -166,6 +166,7 @@ fn build_local_receiver_type_patterns(language: Language, r: &str) -> Vec<Arc<Re
                 s(r"\b@R@\b\s*=\s*new\s+([A-Za-z_][\w.]*)"),
                 format!(r"\b([A-Z][\w.]*)\s*{ta}\??\s+{r}\b\s*[=;,)]"),
                 format!(r"\bforeach\s*\(\s*([A-Z][\w.]*)\s*{ta}\??\s+{r}\s+in\b"),
+                format!(r"\b(bool|byte|sbyte|char|decimal|double|float|int|uint|long|ulong|short|ushort|string)\??\s+{r}\b\s*(?:[=;,)]|in\b)"),
             ],
             "",
         ),

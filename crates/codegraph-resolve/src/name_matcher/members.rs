@@ -156,7 +156,7 @@ fn member_type_through_hierarchy(cls: &NodeRef, name: &str, ctx: &Ctx) -> Option
 }
 
 /// The top-level arguments of the first `<…>` in `text`.
-fn angle_arguments(text: &str) -> Vec<String> {
+pub(crate) fn angle_arguments(text: &str) -> Vec<String> {
     let Some(open) = text.find('<') else { return Vec::new() };
     let mut out = Vec::new();
     let mut depth = 0i32;

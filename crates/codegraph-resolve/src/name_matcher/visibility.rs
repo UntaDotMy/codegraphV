@@ -165,6 +165,7 @@ pub fn is_visible_by_language(n: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
         && matches!(n.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Struct)
         && re!(r"^[A-Za-z_]\w*$").is_match(&r.reference_name)
         && (!is_csharp_nested_type_in_scope(n, r, ctx) || (n.file_path != r.file_path && !is_csharp_type_visible(n, r, ctx))))
+        && !(matches!(r.language, Language::CSharp | Language::Razor) && !super::csharp::csharp_type_arity_fits(n, r, ctx))
 }
 
 pub fn is_visible_across_files(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
@@ -175,6 +176,9 @@ pub fn is_visible_across_files(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -
         && candidate.language == Language::Go
         && (is_go_external_qualified(r, ctx) || !is_in_go_qualifier_package(candidate, r, ctx))
     {
+        return false;
+    }
+    if matches!(r.language, Language::CSharp | Language::Razor) && !super::csharp::csharp_type_arity_fits(candidate, r, ctx) {
         return false;
     }
     if candidate.file_path == r.file_path {

@@ -118,7 +118,7 @@ fn is_jvm_declared_type_kind(kind: NodeKind) -> bool {
 }
 
 /// JVM type declarations named `name`.
-fn jvm_type_decls(name: &str, ctx: &Ctx) -> Vec<NodeRef> {
+pub(crate) fn jvm_type_decls(name: &str, ctx: &Ctx) -> Vec<NodeRef> {
     ctx.get_nodes_by_name(name)
         .iter()
         .filter(|n| {
@@ -199,7 +199,7 @@ fn java_file_ancestors(file_path: &str, ctx: &Ctx) -> Rc<HashSet<String>> {
 /// Scala or Kotlin declaration, whose qualified name carries no package to check. A class also names
 /// the nested types of the classes it extends or implements (SystemUI's `AlertEntry` in a subclass
 /// of `AlertingNotificationManager`).
-fn is_java_type_nameable(decl: &codegraph_types::Node, file_path: &str, ctx: &Ctx) -> bool {
+pub(crate) fn is_java_type_nameable(decl: &codegraph_types::Node, file_path: &str, ctx: &Ctx) -> bool {
     if decl.language != Language::Java || decl.file_path == file_path {
         return true;
     }
@@ -486,7 +486,7 @@ fn java_static_field_receiver(receiver: &str) -> Option<(String, String)> {
 
 /// The static field `name` of Java type `owner`, its own or one it inherits from the types it
 /// extends or implements (an interface's constant), a few levels up. An enum's constant counts.
-fn java_static_field(owner: NodeRef, name: &str, ctx: &Ctx) -> Option<NodeRef> {
+pub(crate) fn java_static_field(owner: NodeRef, name: &str, ctx: &Ctx) -> Option<NodeRef> {
     let mut seen: HashSet<String> = HashSet::new();
     seen.insert(owner.id.clone());
     let mut frontier = vec![owner];

@@ -167,6 +167,49 @@ fn pick_closest_jvm_candidate(candidates: &[NodeRef], from_path: &str) -> NodeRe
     best
 }
 
+/// The source set a file is in: `androidMain` of `lib/src/androidMain/kotlin/a/Util.kt`.
+fn kmp_source_set(file_path: &str) -> Option<String> {
+    re!(r"(?:^|/)src/([^/]+)/").captures(file_path).and_then(|c| c.text(1).map(String::from))
+}
+
+/// What a source set builds for: `android` of `androidMain` and `androidUnitTest`.
+fn kmp_build_target(set: &str) -> String {
+    re!(r"(?:Main|(?:Unit|Instrumented|Device|Host)?Test)$").replace_first(set, |_| String::new())
+}
+
+/// `pickJvmDeclaration` (upstream 59bfe6d7): which of a declaration's same-named Kotlin
+/// Multiplatform declarations a JVM reference reaches. Common code sees the `expect` (nearest,
+/// `expect` on a tie); a platform's source sets see their target's `actual`, or that of a target they
+/// build on; Java and a plain Kotlin module see the JVM `actual` their path names, Android's only by
+/// name; an intermediate source set the `expect`.
+fn pick_jvm_declaration(declarations: &[NodeRef], r: &UnresolvedRef) -> NodeRef {
+    let is_actual = |n: &NodeRef| n.decorators.as_ref().is_some_and(|d| d.iter().any(|x| x == "actual"));
+    let actuals: Vec<NodeRef> = declarations.iter().filter(|n| is_actual(n)).cloned().collect();
+    if actuals.is_empty() || actuals.len() == declarations.len() {
+        return pick_closest_jvm_candidate(declarations, &r.file_path);
+    }
+    let target = kmp_source_set(&r.file_path).map(|s| kmp_build_target(&s));
+    let target_of = |n: &NodeRef| kmp_build_target(&kmp_source_set(&n.file_path).unwrap_or_default());
+    let java = r.language == Language::Java;
+    if target.as_deref().is_some_and(|t| t.starts_with("common")) || (target.is_none() && !java) {
+        return pick_closest_jvm_candidate(declarations, &r.file_path);
+    }
+    let own: Vec<NodeRef> = actuals.iter().filter(|n| Some(target_of(n)) == target).cloned().collect();
+    if !own.is_empty() {
+        return pick_closest_jvm_candidate(&own, &r.file_path);
+    }
+    if java || matches!(target.as_deref(), Some("main") | Some("test")) {
+        let jvm: Vec<NodeRef> = actuals.iter().filter(|n| re!(r"^(?:android|jvm|desktop)").is_match(&target_of(n))).cloned().collect();
+        let android = re!(r"android", "i").is_match(&r.file_path);
+        let named: Vec<NodeRef> = jvm.iter().filter(|n| target_of(n).starts_with("android") == android).cloned().collect();
+        let pool = if !named.is_empty() { named } else if !jvm.is_empty() { jvm } else { actuals };
+        return pick_closest_jvm_candidate(&pool, &r.file_path);
+    }
+    let t = target.unwrap_or_default();
+    let above: Vec<NodeRef> = actuals.iter().filter(|n| { let o = target_of(n); !o.is_empty() && t.starts_with(&o) }).cloned().collect();
+    pick_closest_jvm_candidate(if above.is_empty() { declarations } else { &above }, &r.file_path)
+}
+
 /// A Java/Kotlin `import a.b.C` resolved by qualified name.
 pub fn resolve_jvm_import(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     if !r.is_kind(EdgeKind::Imports) || !matches!(r.language, Language::Java | Language::Kotlin) {
@@ -191,7 +234,7 @@ pub fn resolve_jvm_import(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         }
         return None;
     }
-    let best = if candidates.len() == 1 { candidates[0].clone() } else { pick_closest_jvm_candidate(&candidates, &r.file_path) };
+    let best = if candidates.len() == 1 { candidates[0].clone() } else { pick_jvm_declaration(&candidates, r) };
     Some(imported(r, &best.id, 0.95))
 }
 
@@ -219,9 +262,13 @@ fn jvm_file_facade(fqn: &str, ctx: &Ctx) -> Option<NodeRef> {
 /// One step down a JVM declaration's members: a nested class/object, a method, or a top-level
 /// declaration when the parent is the file its facade names.
 fn jvm_child(parent: &NodeRef, name: &str, ctx: &Ctx) -> Option<NodeRef> {
-    ctx.get_nodes_by_qualified_name(&format!("{}::{name}", parent.qualified_name))
+    let members = ctx.get_nodes_by_qualified_name(&format!("{}::{name}", parent.qualified_name));
+    // The member the parent's own declaration holds: a Multiplatform `expect` and each `actual`
+    // share a qualified name, and the parent was already picked for the caller (upstream 59bfe6d7).
+    members
         .iter()
-        .find(|n| n.id != parent.id)
+        .find(|n| n.id != parent.id && n.file_path == parent.file_path)
+        .or_else(|| members.iter().find(|n| n.id != parent.id))
         .cloned()
         .or_else(|| {
             if parent.kind == NodeKind::File {
@@ -233,10 +280,11 @@ fn jvm_child(parent: &NodeRef, name: &str, ctx: &Ctx) -> Option<NodeRef> {
 }
 
 /// The declaration a Java/Kotlin `import` names, whichever JVM language declares it.
-fn jvm_import_node(imp: &ImportMapping, ctx: &Ctx) -> Option<NodeRef> {
+fn jvm_import_node(imp: &ImportMapping, r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
     let qualified = imp.source.split('.').collect::<Vec<_>>().join("::");
-    if let Some(found) = ctx.get_nodes_by_qualified_name(&qualified).iter().find(|n| n.kind != NodeKind::File).cloned() {
-        return Some(found);
+    let found: Vec<NodeRef> = ctx.get_nodes_by_qualified_name(&qualified).iter().filter(|n| n.kind != NodeKind::File).cloned().collect();
+    if !found.is_empty() {
+        return Some(if found.len() == 1 { found[0].clone() } else { pick_jvm_declaration(&found, r) });
     }
     if let Some(file) = jvm_file_facade(&imp.source, ctx) {
         return Some(file);
@@ -254,7 +302,7 @@ pub fn resolve_java_imported_reference(r: &UnresolvedRef, imports: &[ImportMappi
         if !matches_bare && !matches_qualified {
             continue;
         }
-        let Some(target) = jvm_import_node(imp, ctx) else { continue };
+        let Some(target) = jvm_import_node(imp, r, ctx) else { continue };
         let member_path: Vec<&str> = if matches_bare {
             Vec::new()
         } else {

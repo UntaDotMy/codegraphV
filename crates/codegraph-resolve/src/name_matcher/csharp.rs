@@ -486,51 +486,60 @@ pub fn is_csharp_nested_type_in_scope(n: &Node, r: &UnresolvedRef, ctx: &Ctx) ->
     if enclosing.iter().any(|p| p.qualified_name == owner || p.qualified_name.starts_with(&format!("{owner}::"))) {
         return true;
     }
-    enclosing.iter().any(|p| csharp_ancestor_names(&p.qualified_name, ctx, 0).borrow().contains(&owner_type.name))
+    enclosing.iter().any(|p| csharp_ancestor_names(&p.qualified_name, ctx).borrow().contains(&owner_type.name))
 }
 
 /// The simple names of everything the type `qn` derives from, transitively (to a depth).
-fn csharp_ancestor_names(qn: &str, ctx: &Ctx, depth: u32) -> Rc<RefCell<HashSet<String>>> {
+fn csharp_ancestor_names(qn: &str, ctx: &Ctx) -> Rc<RefCell<HashSet<String>>> {
     let memo = ctx.memo::<CsharpAncestorsMemo>();
     if let Some(hit) = memo.lookup(&qn.to_string()) {
         return hit;
     }
-    // A cycle reads what is gathered so far.
-    let names: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
-    memo.store(qn.to_string(), Rc::clone(&names));
-    for decl in ctx.get_nodes_by_qualified_name(qn).iter() {
-        if decl.language != Language::CSharp || !is_csharp_type_kind(decl.kind) {
-            continue;
-        }
-        let lines = lines_of(ctx, &decl.file_path);
-        let mut header = String::new();
-        let mut i = (decl.start_line as usize).saturating_sub(1);
-        while i < lines.len().min(decl.start_line as usize + 6) && !header.contains('{') {
-            header.push_str(&lines[i]);
-            header.push(' ');
-            i += 1;
-        }
-        let before_brace = header.split('{').next().unwrap_or("");
-        let before_brace = re!(r"\bwhere\b[\s\S]*$").replace_first(before_brace, |_| String::new());
-        let list = re!(r":\s*([^{;]*)").captures(&before_brace).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
-        for base in split_cpp_top_level(&list) {
-            if let Some(name) = re!(r"([A-Za-z_]\w*)\s*(?:<.*)?$").captures(base.trim_matches(codegraph_types::jscompat::is_js_space)).and_then(|c| c.text(1).map(String::from)) {
-                names.borrow_mut().insert(name);
-            }
-        }
-    }
-    if depth < 4 {
-        let bases: Vec<String> = names.borrow().iter().cloned().collect();
-        for base in bases {
-            for t in ctx.get_nodes_by_name(&base).iter() {
-                if t.language != Language::CSharp || !is_csharp_type_kind(t.kind) || t.qualified_name == qn {
+    // A walk of its own for every type, memoized only when finished (upstream fab65e9d).
+    let mut names: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::from([qn.to_string()]);
+    let mut level = vec![qn.to_string()];
+    while !level.is_empty() {
+        let mut bases: Vec<String> = Vec::new();
+        for ty in &level {
+            for decl in ctx.get_nodes_by_qualified_name(ty).iter() {
+                if decl.language != Language::CSharp || !is_csharp_type_kind(decl.kind) {
                     continue;
                 }
-                let ups: Vec<String> = csharp_ancestor_names(&t.qualified_name, ctx, depth + 1).borrow().iter().cloned().collect();
-                names.borrow_mut().extend(ups);
+                let lines = lines_of(ctx, &decl.file_path);
+                let mut header = String::new();
+                let mut i = (decl.start_line as usize).saturating_sub(1);
+                while i < lines.len().min(decl.start_line as usize + 6) && !header.contains('{') {
+                    header.push_str(&lines[i]);
+                    header.push(' ');
+                    i += 1;
+                }
+                let before_brace = header.split('{').next().unwrap_or("");
+                let before_brace = re!(r"\bwhere\b[\s\S]*$").replace_first(before_brace, |_| String::new());
+                let list = re!(r":\s*([^{;]*)").captures(&before_brace).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
+                for base in split_cpp_top_level(&list) {
+                    if let Some(name) = re!(r"([A-Za-z_]\w*)\s*(?:<.*)?$").captures(base.trim_matches(codegraph_types::jscompat::is_js_space)).and_then(|c| c.text(1).map(String::from)) {
+                        if !bases.contains(&name) {
+                            bases.push(name);
+                        }
+                    }
+                }
             }
         }
+        let mut next: Vec<String> = Vec::new();
+        for base in bases {
+            for t in ctx.get_nodes_by_name(&base).iter() {
+                if t.language != Language::CSharp || !is_csharp_type_kind(t.kind) || !seen.insert(t.qualified_name.clone()) {
+                    continue;
+                }
+                next.push(t.qualified_name.clone());
+            }
+            names.insert(base);
+        }
+        level = next;
     }
+    let names = Rc::new(RefCell::new(names));
+    memo.store(qn.to_string(), Rc::clone(&names));
     names
 }
 

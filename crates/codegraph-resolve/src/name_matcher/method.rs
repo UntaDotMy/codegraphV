@@ -839,6 +839,8 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let mut local_inferred = false;
     // A PHP declaration read for the receiver, so its name names no class (strategy 2).
     let mut php_declared_receiver = false;
+    // A C# keyword type: an extension method is the only project method it has (upstream 092e6cf8).
+    let mut csharp_builtin_receiver = false;
     // Java: what `java_receiver_declared_type` read for the receiver, once it ran.
     let mut java_declared: Option<Option<JavaDeclared>> = None;
     if inferable_receiver {
@@ -1170,6 +1172,10 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                     PhpDeclaredCall::Unknown => {}
                 }
             }
+            if r.language == Language::CSharp && t.starts_with(|c: char| c.is_ascii_lowercase()) {
+                php_declared_receiver = true;
+                csharp_builtin_receiver = true;
+            }
             let typed_match = if php_whole {
                 None
             } else {
@@ -1331,7 +1337,11 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                     return None;
                 }
             }
-            None => {}
+            None => {
+                if let Some(typed_match) = super::java_overload::match_java_lambda_parameter_call(&object_or_class, &method_name, r, ctx) {
+                    return Some(typed_match);
+                }
+            }
         }
     }
     // Kotlin (Java's fields are read in the branch above): receiver may be a field whose name
@@ -1627,6 +1637,8 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 php_unnamed_class_method(class_node, &method_name, only_of_name, ctx)
             } else if class_node.language == Language::Php {
                 php_class_method(class_node, &method_name, ctx)
+            } else if r.language == Language::CSharp && is_std_method_name("csharp", &method_name) {
+                super::members::find_own_method(&ctx.get_nodes_in_file(&class_node.file_path), class_node, &method_name, None)
             } else {
                 class_strategy_method(class_node, &method_name, ctx, None)
             };
@@ -1684,8 +1696,7 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             &object_or_class,
             &method_name,
             kind == MatchKind::Colon,
-            &through_cpp_namespace,
-        );
+            &through_cpp_namespace, csharp_builtin_receiver);
     }
     None
 }
@@ -1714,10 +1725,11 @@ const SELF_RECEIVERS: [&str; 5] = ["this", "self", "Self", "super", "cls"];
 /// struct's fields are typed before this point, so a Go call that still arrives here is on a local
 /// the resolver could not type, mostly a range variable over the type's own children (cobra's
 /// `sub.checkCommandGroups()`, etcd's `child.Repr(…)`), which is real recursion.
-fn is_foreign_receiver_self_loop(candidate: &Node, receiver: &str, r: &UnresolvedRef) -> bool {
+fn is_foreign_receiver_self_loop(candidate: &Node, receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     candidate.id == r.from_node_id
         && !SELF_RECEIVERS.contains(&receiver)
         && r.language != Language::Go
+        && !super::csharp::is_csharp_extension_element_call(candidate, receiver, r, ctx)
 }
 
 /// The last strategy: the method's name alone, narrowed by reach and by the receiver's words.
@@ -1728,6 +1740,7 @@ fn match_by_method_name(
     method_name: &str,
     colon: bool,
     through_cpp_namespace: &dyn Fn() -> bool,
+    csharp_builtin_receiver: bool,
 ) -> Option<ResolvedRef> {
     let method_candidates = ctx.get_nodes_by_name(method_name);
     if method_candidates.len() > ambiguous_name_ceiling() {
@@ -1748,6 +1761,9 @@ fn match_by_method_name(
     } else {
         methods
     };
+    if csharp_builtin_receiver {
+        target.retain(|m| super::csharp::is_csharp_extension_method(m, ctx));
+    }
     let mut narrowed = false;
     if is_js_family(r.language) && is_import_binding(object_or_class, r, ctx) {
         let kept: Vec<NodeRef> = target
@@ -1851,7 +1867,7 @@ fn match_by_method_name(
         {
             return None;
         }
-        if is_foreign_receiver_self_loop(&target[0], object_or_class, r) {
+        if is_foreign_receiver_self_loop(&target[0], object_or_class, r, ctx) {
             return None;
         }
         return Some(
