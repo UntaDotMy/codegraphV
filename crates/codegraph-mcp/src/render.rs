@@ -1264,6 +1264,11 @@ pub fn status(cg: &CodeGraph) -> Result<Value> {
     if rebuilding {
         data["rebuildInProgress"] = json!(true);
     }
+    // Files that yielded symbols beside files found (upstream 7889da66): a language can be listed
+    // with its full count and have nothing in the graph.
+    let coverage = cg.get_language_coverage()?;
+    data["parsedFilesByLanguage"] = json!(coverage.parsed_files_by_language);
+    data["unparsedLanguages"] = json!(coverage.unparsed_languages);
     data["index"] = json!({"builtWithVersion":build.version,"builtWithExtractionVersion":build.extraction_version,"currentExtractionVersion":codegraph_core::codegraph::EXTRACTION_VERSION,"reindexRecommended":!rebuilding && (cg.is_index_stale() || framework_changes.is_some()),"frameworksChangedSinceIndex":framework_changes.map(|c| json!({"added":c.added,"removed":c.removed})),"state":cg.get_index_state().map(|s|s.as_str()),"pendingRefs":cg.get_pending_reference_count()?,"filesNeedingReindex":health.needs_reindex,"filesWithParseErrors":health.parse_errors});
     Ok(data)
 }

@@ -100,6 +100,10 @@ enum Command {
         path: String,
         #[arg(short, long)]
         json: bool,
+        /// Exit 1 unless the index is finished, up to date, and every language that should yield
+        /// symbols did.
+        #[arg(long)]
+        strict: bool,
     },
     /// Search indexed symbols.
     Query {
@@ -369,6 +373,57 @@ fn tool(project: Project, name: &str, args: Value) -> Result<()> {
     println!("{}", result.message());
     Ok(())
 }
+/// `n` with thousands separators, as `status` prints counts.
+fn format_number(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Up to three of `paths`, and how many more there are.
+fn sample_paths(paths: &[String]) -> String {
+    let shown = paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    if paths.len() > 3 { format!("{shown} (+{} more)", format_number(paths.len() as u64 - 3)) } else { shown }
+}
+
+/// `status`'s files-by-language rows, each with how many files yielded symbols when that isn't all
+/// of them, and a warning for a language where none did (upstream 7889da66).
+fn print_language_coverage(cg: &CodeGraph, coverage: &codegraph_core::codegraph::LanguageCoverage) -> Result<()> {
+    let mut rows: Vec<(String, u64)> = cg
+        .get_stats()?
+        .files_by_language
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(l, n)| (l.as_str().to_string(), *n))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("\nFiles by Language:");
+    for (language, count) in &rows {
+        let with_symbols = match coverage.parsed_files_by_language.get(language) {
+            Some(parsed) if parsed != count => format!("  ({} with symbols)", format_number(*parsed)),
+            _ => String::new(),
+        };
+        println!("  {language:<15} {}{with_symbols}", format_number(*count));
+    }
+    // Worded for both causes: a lone config stub with nothing to extract reads exactly like a
+    // parser that isn't working, and the file names are what tell them apart.
+    if !coverage.unparsed_languages.is_empty() {
+        let files = cg.get_files()?;
+        println!();
+        for language in &coverage.unparsed_languages {
+            let paths: Vec<String> = files.iter().filter(|f| f.language.as_str() == language).map(|f| f.path.clone()).collect();
+            println!("Warning: No symbols came from any {language} file — fine if they hold no code, otherwise its parser isn't working: {}", sample_paths(&paths));
+        }
+    }
+    Ok(())
+}
+
 fn index_project(path: &str, force: bool, verbose: bool, quiet: bool) -> Result<()> {
     let root = nodepath::resolve(&[path]);
     if let Some(reason) = codegraph_core::utils::validate_project_path(&root) {
@@ -525,7 +580,10 @@ fn run() -> Result<()> {
         Command::Status {
             path,
             json: as_json,
+            strict,
         } => {
+            // `--strict` (upstream 7889da66): the output is a plain status; only the exit differs.
+            let mut strict_failed = false;
             let absolute = nodepath::resolve(&[&path]);
             if !directory::is_initialized(&absolute)
                 && directory::find_nearest_code_graph_root(&absolute).is_none()
@@ -539,13 +597,29 @@ fn run() -> Result<()> {
                         "Not initialized: {absolute}\nRun `codegraphV init` to index this project."
                     );
                 }
+                // A gate with no index to read has proved nothing.
+                strict_failed = true;
             } else {
                 let cg = open_read_only(&Project { path: Some(path) }, false)?;
                 let status = render::status(&cg)?;
+                let coverage = cg.get_language_coverage()?;
+                if strict {
+                    // A grammar that can't load leaves no row and no zero to count, only files the
+                    // index doesn't have yet, so "up to date" is part of the gate. Parse errors are
+                    // not: one bad fixture shouldn't fail a whole project.
+                    let changes = cg.get_changed_files()?;
+                    let pending = changes.added.len() + changes.modified.len() + changes.removed.len();
+                    strict_failed = status["rebuildInProgress"] == true
+                        || matches!(cg.get_index_state().map(|s| s.as_str()), Some("indexing" | "partial" | "failed"))
+                        || pending > 0
+                        || !cg.get_index_health()?.needs_reindex.is_empty()
+                        || !coverage.unparsed_languages.is_empty();
+                }
                 if as_json {
                     print_json(&status)?;
                 } else {
                     println!("Project: {}\nFiles: {}\nSymbols: {}\nEdges: {}\nBackend: {}\nIndex state: {}",cg.project_root(),status["fileCount"],status["nodeCount"],status["edgeCount"],status["backend"],status["index"]["state"]);
+                    print_language_coverage(&cg, &coverage)?;
                     if status["rebuildInProgress"] == true {
                         println!("\n{REBUILD_NOTE}");
                     } else if cg.is_index_stale() {
@@ -566,6 +640,9 @@ fn run() -> Result<()> {
                     }
                 }
                 cg.close();
+            }
+            if strict && strict_failed {
+                std::process::exit(1);
             }
         }
         Command::Query {

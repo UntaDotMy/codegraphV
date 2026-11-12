@@ -16,7 +16,7 @@ use crate::orchestrator::{ChangedFiles, ExtractionOrchestrator, IndexPhase, Inde
 use crate::utils::FileLock;
 use crate::directory::database_path;
 use codegraph_db::{remove_database_files, OpenOptions as DbOpenOptions, Store};
-use codegraph_extract::languages::{detect_language, is_file_level_only_language};
+use codegraph_extract::languages::{detect_language, is_file_level_only_language, yields_symbols};
 use codegraph_extract::scan::config::load_deprioritize_patterns;
 use codegraph_extract::scan::ignore::Ignore;
 use codegraph_graph::{GraphQueryManager, GraphTraverser};
@@ -110,6 +110,17 @@ impl IndexState {
             IndexState::Failed => "failed",
         }
     }
+}
+
+/// Files found against files that yielded symbols, by language, for `status` (upstream
+/// 7889da66): `GraphStats::files_by_language` reads the same for a language that parsed and one
+/// that yielded nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanguageCoverage {
+    /// Files that yielded a symbol, for the languages expected to yield any.
+    pub parsed_files_by_language: std::collections::BTreeMap<String, u64>,
+    /// Of those, the languages with files and no symbols at all.
+    pub unparsed_languages: Vec<String>,
 }
 
 /// Which engine built the current index.
@@ -1437,6 +1448,22 @@ impl CodeGraph {
     pub fn resolve_references(&self) -> Result<codegraph_resolve::types::ResolutionResult> {
         let refs = self.store.get_unresolved_references()?;
         Ok(self.resolver().resolve_and_persist(&refs)?)
+    }
+
+    /// Files found against files that yielded symbols, by language. Reported by `status`, whose
+    /// `--strict` fails on a language that yielded none.
+    pub fn get_language_coverage(&self) -> Result<LanguageCoverage> {
+        let mut coverage = LanguageCoverage::default();
+        for (language, _files, parsed) in self.store().get_parsed_file_counts()? {
+            if !Language::parse(&language).is_some_and(yields_symbols) {
+                continue;
+            }
+            if parsed == 0 {
+                coverage.unparsed_languages.push(language.clone());
+            }
+            coverage.parsed_files_by_language.insert(language, parsed);
+        }
+        Ok(coverage)
     }
 
     /// Indexed files whose symbols are missing although their content is current — rows a

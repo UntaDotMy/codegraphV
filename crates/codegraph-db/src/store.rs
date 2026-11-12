@@ -1829,6 +1829,26 @@ impl Store {
 
     /// Files stored with no nodes or with recorded extraction errors — the only
     /// rows that can be missing their symbols (`CodeGraph.getIndexHealth`).
+    /// For each language: `(language, files, parsed)`, where a parsed file yielded a node other
+    /// than its own file node (upstream 7889da66). More than one stored node settles a row, so
+    /// `nodes` is probed only for the few it can't. Kept out of `get_stats`, which every explore
+    /// runs.
+    pub fn get_parsed_file_counts(&self) -> Result<Vec<(String, u64, u64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.language, COUNT(*),
+               SUM(CASE
+                 WHEN f.node_count > 1 THEN 1
+                 WHEN EXISTS (SELECT 1 FROM nodes n WHERE n.file_path = f.path AND n.kind <> 'file') THEN 1
+                 ELSE 0
+               END)
+             FROM files f GROUP BY f.language ORDER BY f.language",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn get_files_without_nodes_or_with_errors(&self) -> Result<Vec<FileRecord>> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {FILE_COLS} FROM files WHERE node_count = 0 OR errors IS NOT NULL ORDER BY path"
