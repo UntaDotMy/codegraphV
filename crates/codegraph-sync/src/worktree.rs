@@ -135,9 +135,26 @@ pub fn nested_repository_below(start: &str, index: &str) -> Option<NestedReposit
     })
 }
 
-pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
-    format!("This CodeGraphV index belongs to a different git working tree.\n  Running in: {}\n  Index from: {}\nResults reflect that tree's code (often a different branch), not this worktree — symbols changed only here are missing. Run \"codegraphV init -i\" in this worktree for a worktree-local index.",m.worktree_root,m.index_root)
+/// Who reads a worktree-mismatch warning. A person at the CLI is told to build a worktree-local
+/// index; an agent is told the user can, because indexing is the user's decision (upstream
+/// cb7fb61e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeAudience {
+    User,
+    Agent,
 }
+
+fn worktree_index_advice(audience: WorktreeAudience) -> &'static str {
+    match audience {
+        WorktreeAudience::Agent => "The user can run \"codegraphV init\" in this worktree for a worktree-local index.",
+        WorktreeAudience::User => "Run \"codegraphV init\" in this worktree for a worktree-local index.",
+    }
+}
+
+pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch, audience: WorktreeAudience) -> String {
+    format!("This CodeGraphV index belongs to a different git working tree.\n  Running in: {}\n  Index from: {}\nResults reflect that tree's code (often a different branch), not this worktree — symbols changed only here are missing. {}",m.worktree_root,m.index_root,worktree_index_advice(audience))
+}
+/// The one-line form prepended to read-tool results; its reader is always an agent.
 pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
-    format!("⚠ CodeGraphV results below come from a different git worktree ({}), not where you're working ({}) — they may reflect another branch, and symbols changed only here are missing. Run \"codegraphV init -i\" here for a worktree-local index.",m.index_root,m.worktree_root)
+    format!("⚠ CodeGraphV results below come from a different git worktree ({}), not where you're working ({}) — they may reflect another branch, and symbols changed only here are missing. {}",m.index_root,m.worktree_root,worktree_index_advice(WorktreeAudience::Agent))
 }

@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     index_root: q["index"].as_str().unwrap().into(),
                 };
                 json!(if q["op"] == "warning" {
-                    worktree_mismatch_warning(&m)
+                    worktree_mismatch_warning(&m, if q["audience"] == "agent" { WorktreeAudience::Agent } else { WorktreeAudience::User })
                 } else {
                     worktree_mismatch_notice(&m)
                 })
