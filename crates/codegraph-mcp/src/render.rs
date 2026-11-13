@@ -80,32 +80,66 @@ pub fn relation_data(cg: &CodeGraph, args: &Value, callers: bool) -> Result<Valu
     let matches = lookup(cg, symbol)?;
     let grouped = group_definitions(&matches, args["file"].as_str());
     let limit = number(args, "limit", 20, 1, 100);
+    let direction = if callers { "callers" } else { "callees" };
     let mut union = IndexMap::<String, Node>::new();
     let mut edges = IndexMap::<String, Edge>::new();
+    // Caller/callee id → (every line it calls from, recursive); shared by all overloads.
+    let mut sites = IndexMap::<String, (Vec<u32>, bool)>::new();
     let mut definitions = vec![];
+    let mut truncated = false;
     for group in &grouped.groups {
-        let mut refs = IndexMap::<String, Ref>::new();
+        let mut per_definition = IndexMap::<String, (Node, Vec<Edge>, bool)>::new();
         for n in group {
-            for r in if callers {
-                cg.get_callers(&n.id, 1)?
-            } else {
-                cg.get_callees(&n.id, 1)?
-            } {
-                union.entry(r.node.id.clone()).or_insert(r.node.clone());
-                edges
-                    .entry(format!(
-                        "{}|{}|{}",
-                        r.edge.source, r.edge.target, r.edge.kind
-                    ))
-                    .or_insert(r.edge.clone());
-                refs.entry(r.node.id.clone()).or_insert(r);
+            let (found, cut) = cg.get_call_sites(&n.id, callers, 10_000)?;
+            truncated |= cut;
+            for row in found {
+                let id = row.node.id.clone();
+                if let Some(at) = sites.get_mut(&id) {
+                    at.1 |= row.recursive;
+                    at.0.extend(row.edges.iter().filter_map(|e| e.line));
+                } else {
+                    sites.insert(id.clone(), (row.edges.iter().filter_map(|e| e.line).collect(), row.recursive));
+                }
+                union.entry(id.clone()).or_insert_with(|| row.node.clone());
+                for edge in &row.edges {
+                    edges.entry(format!("{}|{}|{}", edge.source, edge.target, edge.kind)).or_insert_with(|| edge.clone());
+                }
+                let entry = per_definition.entry(id).or_insert_with(|| (row.node, Vec::new(), row.recursive));
+                entry.1.extend(row.edges);
+                entry.2 |= row.recursive;
             }
         }
-        definitions.push(json!({"definition":group[0],"overloads":group,"references":refs.values().take(limit).collect::<Vec<_>>(),"total":refs.len(),"truncated":refs.len()>limit}));
+        let mut references = Vec::new();
+        let mut rows = Vec::new();
+        for (node, row_edges, recursive) in per_definition.values() {
+            if let Some(edge) = row_edges.first() {
+                references.push(json!({"node":node,"edge":edge}));
+            }
+            let mut lines: Vec<u32> = row_edges.iter().filter_map(|e| e.line).collect();
+            lines.sort_unstable();
+            lines.dedup();
+            let mut value = serde_json::to_value(node)?;
+            value["lines"] = json!(lines);
+            value["recursive"] = json!(recursive);
+            rows.push(value);
+        }
+        let total = per_definition.len();
+        let mut definition = json!({"definition":group[0],"overloads":group,"references":references.into_iter().take(limit).collect::<Vec<_>>(),"total":total,"truncated":total>limit});
+        definition[direction] = json!(rows.into_iter().take(limit).collect::<Vec<_>>());
+        definitions.push(definition);
     }
-    let mut result = json!({"symbol":symbol,"targets":grouped.groups.iter().map(|g|&g[0]).collect::<Vec<_>>(),"ambiguous":grouped.groups.len()>1,"aggregation":if grouped.groups.len()>1{"union"}else{"definition"},"filteredOut":grouped.filtered_out,"definitions":definitions,"edges":edges.values().collect::<Vec<_>>(),"total":union.len(),"limit":limit,"truncated":union.len()>limit});
-    result[if callers { "callers" } else { "callees" }] =
-        json!(union.values().take(limit).collect::<Vec<_>>());
+    let mut out_rows = Vec::new();
+    for node in union.values().take(limit) {
+        let mut value = serde_json::to_value(node)?;
+        let (mut lines, recursive) = sites.get(&node.id).cloned().unwrap_or_default();
+        lines.sort_unstable();
+        lines.dedup();
+        value["lines"] = json!(lines);
+        value["recursive"] = json!(recursive);
+        out_rows.push(value);
+    }
+    let mut result = json!({"symbol":symbol,"targets":grouped.groups.iter().map(|g|&g[0]).collect::<Vec<_>>(),"ambiguous":grouped.groups.len()>1,"aggregation":if grouped.groups.len()>1{"union"}else{"definition"},"filteredOut":grouped.filtered_out,"definitions":definitions,"edges":edges.values().collect::<Vec<_>>(),"total":union.len(),"limit":limit,"truncated":union.len()>limit || truncated});
+    result[direction] = json!(out_rows);
     Ok(result)
 }
 pub fn relations(cg: &CodeGraph, args: &Value, callers: bool) -> Result<String> {
@@ -130,9 +164,25 @@ pub fn relations(cg: &CodeGraph, args: &Value, callers: bool) -> Result<String> 
     for definition in data["definitions"].as_array().unwrap() {
         let target: Node = serde_json::from_value(definition["definition"].clone())?;
         out.push_str(&format!("**{}**\n", location(&target)));
-        for r in definition["references"].as_array().unwrap() {
-            let r: Ref = serde_json::from_value(r.clone())?;
-            out.push_str(&format!("- {}{}\n", location(&r.node), hop(&r.edge)));
+        let rows_key = if callers { "callers" } else { "callees" };
+        for row in definition[rows_key].as_array().into_iter().flatten() {
+            let name = row["name"].as_str().unwrap_or_default();
+            let kind = row["kind"].as_str().unwrap_or_default();
+            let file = row["filePath"].as_str().unwrap_or_default();
+            // A caller is shown where it calls from; a callee where its declaration is, as the
+            // call leads there (upstream 2909).
+            let lines: Vec<u32> = if callers {
+                row["lines"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|n| n as u32).collect()
+            } else {
+                row["startLine"].as_u64().map(|n| n as u32).into_iter().collect()
+            };
+            let shown: Vec<String> = lines.iter().take(10).map(u32::to_string).collect();
+            let mut where_ = format!("{file}:{}", shown.join(", "));
+            if lines.len() > 10 {
+                where_.push_str(&format!(", +{} more", lines.len() - 10));
+            }
+            let recursive = if row["recursive"] == true { " — calls itself" } else { "" };
+            out.push_str(&format!("- {name} ({kind}) - {where_}{recursive}\n"));
         }
         if definition["total"] == 0 {
             out.push_str("No recorded relationships.\n");
@@ -152,11 +202,23 @@ pub fn impact_data(cg: &CodeGraph, args: &Value) -> Result<Value> {
     let mut all = IndexMap::new();
     let mut edges = IndexMap::new();
     let mut definitions = vec![];
+    let mut truncated = false;
+    let mut nodes_left = 10_000usize;
+    let mut edges_left = 50_000usize;
+    let mut roots_left = 64usize;
     for group in &grouped.groups {
         let mut affected = IndexMap::new();
         let mut es = IndexMap::new();
         for n in group {
-            let graph = cg.get_impact_radius(&n.id, depth)?;
+            if nodes_left == 0 || roots_left == 0 {
+                truncated = true;
+                break;
+            }
+            roots_left -= 1;
+            let graph = cg.traverser().get_impact_radius_bounded(&n.id, depth, nodes_left, edges_left, 100_000)?;
+            nodes_left = nodes_left.saturating_sub(graph.nodes.len());
+            edges_left = edges_left.saturating_sub(graph.edges.len());
+            truncated |= graph.truncated == Some(true);
             for (id, n) in graph.nodes {
                 all.insert(id.clone(), n.clone());
                 affected.insert(id, n);
@@ -168,9 +230,9 @@ pub fn impact_data(cg: &CodeGraph, args: &Value) -> Result<Value> {
         }
         definitions.push(json!({"definition":group[0],"roots":group.iter().map(|n|&n.id).collect::<Vec<_>>(),"affected":affected.values().collect::<Vec<_>>(),"edges":es.values().collect::<Vec<_>>()}));
     }
-    Ok(
-        json!({"symbol":symbol,"depth":depth,"targets":grouped.groups.iter().flatten().collect::<Vec<_>>(),"ambiguous":grouped.groups.len()>1,"filteredOut":grouped.filtered_out,"aggregation":if grouped.groups.len()>1{"union"}else{"definition"},"definitions":definitions,"affected":all.values().collect::<Vec<_>>(),"edges":edges.values().collect::<Vec<_>>(),"nodeCount":all.len(),"edgeCount":edges.len()}),
-    )
+    let mut result = json!({"symbol":symbol,"depth":depth,"targets":grouped.groups.iter().flatten().collect::<Vec<_>>(),"ambiguous":grouped.groups.len()>1,"filteredOut":grouped.filtered_out,"aggregation":if grouped.groups.len()>1{"union"}else{"definition"},"definitions":definitions,"affected":all.values().collect::<Vec<_>>(),"edges":edges.values().collect::<Vec<_>>(),"nodeCount":all.len(),"edgeCount":edges.len()});
+    if truncated { result["truncated"] = json!(true); }
+    Ok(result)
 }
 pub fn impact(cg: &CodeGraph, args: &Value) -> Result<String> {
     if let Err(e) = required(args, "symbol") {
@@ -184,12 +246,71 @@ pub fn impact(cg: &CodeGraph, args: &Value) -> Result<String> {
         "**Impact: {} affects {} symbols**\n\n",
         args["symbol"], data["nodeCount"]
     );
+    if data["truncated"] == true {
+        out.push_str("Impact truncated at a safety budget; use file to select a definition or reduce depth.\n\n");
+    }
     for n in data["affected"].as_array().unwrap() {
         let n: Node = serde_json::from_value(n.clone())?;
         out.push_str(&format!("- {}\n", location(&n)));
     }
     Ok(out)
 }
+const MAX_NODE_BODIES: usize = 16;
+const MAX_NODE_LIST: usize = 20;
+
+fn top_folder(path: &str) -> &str {
+    path.split_once('/').map(|(folder, _)| folder).unwrap_or("")
+}
+
+/// Every language, then every top-level folder within a language, then the rest in index order.
+/// Keeps a late folder or a second language visible inside a 20-line list (upstream 1657).
+fn definition_cap_order(nodes: &[Node]) -> Vec<usize> {
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    let mut languages = HashSet::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if languages.insert(node.language) && seen.insert(i) {
+            order.push(i);
+        }
+    }
+    let mut folders = HashSet::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if folders.insert((node.language, top_folder(&node.file_path))) && seen.insert(i) {
+            order.push(i);
+        }
+    }
+    order.extend((0..nodes.len()).filter(|i| seen.insert(*i)));
+    order
+}
+
+/// Names what the list leaves out: `365 typescript in aaa_client/`, at most six groups.
+fn describe_omitted(nodes: &[Node], omitted: &[usize]) -> String {
+    let mut groups: IndexMap<(Language, &str), usize> = IndexMap::new();
+    for &i in omitted {
+        let node = &nodes[i];
+        *groups.entry((node.language, top_folder(&node.file_path))).or_insert(0) += 1;
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let hidden: usize = groups.iter().skip(6).map(|group| group.1).sum();
+    let shown: Vec<String> = groups
+        .into_iter()
+        .take(6)
+        .map(|((language, folder), count)| {
+            if folder.is_empty() {
+                format!("{count} {} at the project root", language.as_str())
+            } else {
+                format!("{count} {} in {folder}/", language.as_str())
+            }
+        })
+        .collect();
+    let mut text = shown.join(", ");
+    if hidden > 0 {
+        text.push_str(&format!(", {hidden} elsewhere"));
+    }
+    text
+}
+
 pub fn node(cg: &CodeGraph, args: &Value) -> Result<ToolResult> {
     let Some(symbol) = args["symbol"].as_str().filter(|s| !s.trim().is_empty()) else {
         return if let Some(file) = args["file"].as_str() {
@@ -233,14 +354,36 @@ pub fn node(cg: &CodeGraph, args: &Value) -> Result<ToolResult> {
             "No symbol found: {symbol}. Try codegraphV_explore with nearby symbol names."
         )));
     }
-    let mut out = String::new();
-    if nodes.len() > 1 {
-        out.push_str(&format!(
-            "{} definitions match `{symbol}`; all are shown below.\n\n",
-            nodes.len()
-        ));
+    let total = nodes.len();
+    let order = definition_cap_order(&nodes);
+    // The first sixteen in index order keep their bodies, then the first definition of every
+    // language the cap left out — so a late language is never hidden by an early folder.
+    let mut chosen: Vec<usize> = (0..total.min(MAX_NODE_BODIES)).collect();
+    let mut languages: HashSet<Language> = chosen.iter().map(|&i| nodes[i].language).collect();
+    for (i, node) in nodes.iter().enumerate().skip(MAX_NODE_BODIES) {
+        if languages.insert(node.language) {
+            chosen.push(i);
+        }
     }
-    for n in nodes {
+    chosen.sort_unstable();
+    let shown: HashSet<usize> = chosen.iter().copied().collect();
+    let mut rest: Vec<usize> = order.into_iter().filter(|i| !shown.contains(i)).collect();
+    let listed: Vec<usize> = rest.drain(..rest.len().min(MAX_NODE_LIST)).collect();
+    let omitted = rest;
+    let mut out = String::new();
+    if total > 1 {
+        if chosen.len() == total {
+            out.push_str(&format!("Returning {total} in full — pick the one you need\n\n"));
+        } else {
+            out.push_str(&format!(
+                "**{total} definitions named \"{symbol}\"**\n\nReturning {} in full; {} more listed below\n\n",
+                chosen.len(),
+                total - chosen.len()
+            ));
+        }
+    }
+    for &i in &chosen {
+        let n = &nodes[i];
         out.push_str(&format!(
             "**{}** ({})\n\n**Location:** {}:{}\n",
             n.name, n.kind, n.file_path, n.start_line
@@ -271,18 +414,50 @@ pub fn node(cg: &CodeGraph, args: &Value) -> Result<ToolResult> {
                 out.push_str(&format!("- {}\n", location(&child)));
             }
         }
-        for (label, refs) in [
-            ("Callers", cg.get_callers(&n.id, 1)?),
-            ("Callees", cg.get_callees(&n.id, 1)?),
-        ] {
-            if !refs.is_empty() {
+        for (label, incoming) in [("Callers", true), ("Callees", false)] {
+            let (rows, _) = cg.get_call_sites(&n.id, incoming, 10_000)?;
+            if !rows.is_empty() {
                 out.push_str(&format!("\n**{label}:**\n"));
-                for r in refs {
-                    out.push_str(&format!("- {}{}\n", location(&r.node), hop(&r.edge)));
+                for row in rows {
+                    let mut lines: Vec<u32> = if incoming {
+                        row.edges.iter().filter_map(|e| e.line).collect()
+                    } else {
+                        vec![row.node.start_line]
+                    };
+                    lines.sort_unstable();
+                    lines.dedup();
+                    let shown: Vec<String> = lines.iter().take(3).map(u32::to_string).collect();
+                    let mut detail = format!("{}:{}", row.node.file_path, shown.join(", "));
+                    if lines.len() > 3 {
+                        detail.push_str(&format!(", +{} more", lines.len() - 3));
+                    }
+                    if row.recursive {
+                        detail.push_str(", calls itself");
+                    }
+                    out.push_str(&format!("- {} ({detail})\n", row.node.name));
                 }
             }
         }
         out.push('\n');
+    }
+    if !listed.is_empty() {
+        out.push_str("**Other definitions**\n");
+        for &i in &listed {
+            let n = &nodes[i];
+            out.push_str(&format!("- `{}` ({}) — {}:{}\n", n.name, n.kind, n.file_path, n.start_line));
+        }
+        if !omitted.is_empty() {
+            out.push_str(&format!(
+                "- … +{} more: {}\n",
+                omitted.len(),
+                describe_omitted(&nodes, &omitted)
+            ));
+        }
+    }
+    if total > 1 && out.chars().count() > 15_000 {
+        let byte = out.char_indices().nth(15_000).map(|(i, _)| i).unwrap_or(out.len());
+        out.truncate(out[..byte].rfind('\n').unwrap_or(byte));
+        out.push_str("\n… [output truncated at 15000 characters; pass file and line for one definition]\n");
     }
     Ok(ToolResult::text(out))
 }
@@ -371,8 +546,9 @@ pub fn file_view(cg: &CodeGraph, file: &str, args: &Value) -> Result<ToolResult>
     let nodes = cg.get_nodes_by_file(&f.path)?;
     let deps = cg.get_file_dependents(&f.path)?;
     let mut out = format!(
-        "**{}** — {} symbols, used by {} indexed files{}\n\n",
+        "**{}**{} — {} symbols, used by {} indexed files{}\n\n",
         f.path,
+        if codegraph_search::query_utils::is_test_path(&f.path) { " · test file" } else { "" },
         nodes.len(),
         deps.len(),
         if deps.is_empty() {
@@ -809,13 +985,36 @@ pub fn explore(
             && extracted.line_anchors.iter().any(|a| a.file == file);
         let deps = if source_only { Vec::new() } else { cg.get_file_dependents(&file)? };
         if !deps.is_empty() {
-            header.push_str(&format!("Used by {} files", deps.len()));
-            for (i, dep) in deps.iter().take(8).enumerate() {
-                let part = format!("{}{dep}", if i == 0 { ": " } else { ", " });
+            // A view depends on a helper across a layer, and is easily outnumbered by
+            // same-language dependents: "which views use this?" gets its own slot (upstream
+            // 97492056).
+            let template_view = codegraph_jsre::re!(r"\.(?:cshtml|razor|vue|svelte|astro)$", "i");
+            let (views, code): (Vec<&String>, Vec<&String>) = deps.iter().partition(|d| template_view.is_match(d));
+            let push_capped = |header: &mut String, part: String| {
                 if header.chars().count() + part.chars().count() > 1180 {
-                    break;
+                    return false;
                 }
                 header.push_str(&part);
+                true
+            };
+            header.push_str(&format!("Used by {} files", deps.len()));
+            for (i, dep) in code.iter().take(8).enumerate() {
+                if !push_capped(&mut header, format!("{}{dep}", if i == 0 { ": " } else { ", " })) {
+                    break;
+                }
+            }
+            if !views.is_empty() {
+                let lead = format!("{} {} view{}", if code.is_empty() { ":" } else { ";" }, views.len(), if views.len() == 1 { "" } else { "s" });
+                if push_capped(&mut header, lead) {
+                    for (i, view) in views.iter().take(4).enumerate() {
+                        if !push_capped(&mut header, format!("{}{view}", if i == 0 { ": " } else { ", " })) {
+                            break;
+                        }
+                    }
+                    if views.len() > 4 {
+                        push_capped(&mut header, format!(" +{}", views.len() - 4));
+                    }
+                }
             }
             header.push('\n');
         }
@@ -967,6 +1166,9 @@ pub fn explore(
 }
 pub fn files(cg: &CodeGraph, args: &Value) -> Result<String> {
     let mut files = cg.get_files()?;
+    if files.is_empty() {
+        return Ok("No files indexed. Run `codegraphV index` first.".into());
+    }
     let path = args["path"].as_str().unwrap_or("").replace('\\', "/");
     let path = path.trim_matches('/').trim_start_matches("./");
     let pattern = args["pattern"].as_str();
@@ -978,10 +1180,36 @@ pub fn files(cg: &CodeGraph, args: &Value) -> Result<String> {
                     .unwrap_or(false)
             })
     });
+    // `tests` is the CLI's `--tests` / `--no-tests` (upstream b6ea6179); not in the tool schema.
+    if let Some(only) = args["tests"].as_bool() {
+        files.retain(|f| codegraph_search::query_utils::is_test_path(&f.path) == only);
+    }
+    if files.is_empty() {
+        return Ok("No files found matching the criteria.".into());
+    }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let format = args["format"].as_str().unwrap_or("tree");
     let metadata = args["includeMetadata"].as_bool().unwrap_or(true);
     let max_depth = number(args, "maxDepth", usize::MAX, 1, usize::MAX);
+    if format == "package" {
+        use crate::owning_package::{group_files_by_package, package_group_title, package_listing_title};
+        let groups = group_files_by_package(cg.project_root(), &files, |f| f.path.as_str());
+        let mut out = format!("**{}**\n\n", package_listing_title(&groups));
+        for group in &groups {
+            out.push_str(&format!("**{}**\n", package_group_title(group)));
+            for f in &group.files {
+                if metadata {
+                    out.push_str(&format!("- {} ({}, {} symbols)\n", f.path, f.language, f.node_count));
+                } else {
+                    out.push_str(&format!("- {}\n", f.path));
+                }
+            }
+            out.push('\n');
+        }
+        // Sections are separated by one blank line, with none after the last (upstream's join).
+        out.pop();
+        return Ok(out);
+    }
     let mut out = format!("**Indexed Files ({} files)**\n\n", files.len());
     let mut last_group = String::new();
     for f in files {
@@ -1036,6 +1264,11 @@ pub fn status(cg: &CodeGraph) -> Result<Value> {
     if rebuilding {
         data["rebuildInProgress"] = json!(true);
     }
+    // Files that yielded symbols beside files found (upstream 7889da66): a language can be listed
+    // with its full count and have nothing in the graph.
+    let coverage = cg.get_language_coverage()?;
+    data["parsedFilesByLanguage"] = json!(coverage.parsed_files_by_language);
+    data["unparsedLanguages"] = json!(coverage.unparsed_languages);
     data["index"] = json!({"builtWithVersion":build.version,"builtWithExtractionVersion":build.extraction_version,"currentExtractionVersion":codegraph_core::codegraph::EXTRACTION_VERSION,"reindexRecommended":!rebuilding && (cg.is_index_stale() || framework_changes.is_some()),"frameworksChangedSinceIndex":framework_changes.map(|c| json!({"added":c.added,"removed":c.removed})),"state":cg.get_index_state().map(|s|s.as_str()),"pendingRefs":cg.get_pending_reference_count()?,"filesNeedingReindex":health.needs_reindex,"filesWithParseErrors":health.parse_errors});
     Ok(data)
 }

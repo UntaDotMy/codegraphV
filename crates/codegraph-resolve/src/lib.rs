@@ -2,6 +2,7 @@
 
 pub mod alias_binding;
 pub mod c_feature_variants;
+pub mod c_macro_renames;
 pub mod cpp_constructor;
 pub mod cpp_includers;
 pub mod cpp_macro_visibility;
@@ -24,6 +25,8 @@ pub mod js_builtins;
 pub mod js_class_expressions;
 pub mod js_super_calls;
 pub mod ruby_constant_paths;
+pub mod parameter_flow;
+pub mod ruby_parameter_flow;
 pub mod jsx_code;
 pub mod resurrect_ref;
 pub mod shopify_themes;

@@ -129,7 +129,7 @@ fn hook_commands(settings: &Value) -> Vec<String> {
 
 /// The prompt hook codegraphV writes: this binary's absolute path (BUG-95).
 fn our_hook() -> String {
-    format!("\"{}\" prompt-hook", env!("CARGO_BIN_EXE_codegraphV").replace('\\', "/"))
+    env!("CARGO_BIN_EXE_codegraphV").to_owned()
 }
 
 /// BUG-95: migrate sets up codegraphV's prompt hook for Claude even when the original had none.

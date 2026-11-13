@@ -13,6 +13,8 @@ use codegraph_types::{EdgeKind, Language, Node, NodeKind, ReferenceKind};
 pub struct BareReceiver {
     pub receiver: String,
     pub links: Vec<String>,
+    /// The written receiver was `this` (the instance), though [`receiver`] is normalized to `self`.
+    pub instance: bool,
 }
 
 /// The last `n` UTF-16 units of `s` (`s.slice(-n)`), rounded to a character.
@@ -64,14 +66,14 @@ pub fn bare_call_receiver(r: &UnresolvedRef, ctx: &Ctx) -> Option<BareReceiver> 
     }
     let head = trim_end_js(&re!(r"\??\.$").replace_first(before, |_| String::new())).to_string();
     if re!(r"(?:^|[^\w$.])(?:this|self|super|Self)$").is_match(&head) || re!(r"(?:^|[^\w$.])super\s*\([^()]*\)$").is_match(&head) {
-        return Some(BareReceiver { receiver: "self".into(), links: Vec::new() });
+        return Some(BareReceiver { receiver: "self".into(), links: Vec::new(), instance: re!(r"(?:^|[^\w$.])this$").is_match(&head) });
     }
     let chain = re!(r"(?:^|[^\w$.#])((?:this|super)(?:\s*\??\.\s*#?[\w$]+)+)$").captures(&head).and_then(|c| c.text(1).map(|s| s.to_string()));
     let links: Vec<String> = match chain {
         Some(chain) => chain.split('.').skip(1).map(|l| re!(r"[\s?]", "g").replace_all_str(l, "")).collect(),
         None => Vec::new(),
     };
-    Some(BareReceiver { receiver: last_units(&head, 40).to_string(), links })
+    Some(BareReceiver { receiver: last_units(&head, 40).to_string(), links, instance: false })
 }
 
 pub fn is_python_self_call(r: &UnresolvedRef, ctx: &Ctx) -> bool {

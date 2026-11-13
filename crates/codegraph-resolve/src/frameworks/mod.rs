@@ -4,6 +4,7 @@ pub mod angular_router;
 pub mod astro;
 pub mod cargo_workspace;
 pub mod cics;
+pub mod codeigniter;
 pub mod component_folder;
 pub mod csharp;
 pub mod drupal;
@@ -14,6 +15,7 @@ pub mod fabric;
 pub mod go;
 pub mod goframe;
 pub mod nextjs;
+pub mod next_proxy;
 pub mod java;
 pub mod laravel;
 pub mod name_heuristic;
@@ -52,6 +54,7 @@ pub fn all_framework_resolvers() -> Vec<FrameworkRef> {
     vec![
         Rc::new(laravel::LaravelResolver),
         Rc::new(drupal::DrupalResolver),
+        Rc::new(codeigniter::CodeigniterResolver),
         Rc::new(express::ExpressResolver),
         Rc::new(nestjs::NestjsResolver),
         Rc::new(react::ReactResolver),

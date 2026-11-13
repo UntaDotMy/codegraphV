@@ -1,0 +1,177 @@
+{
+  "version": "codegraphV 0.0.9",
+  "refresh_permissions": {
+    "before": null,
+    "after": {
+      "allow": [
+        "mcp__codegraphV__*"
+      ]
+    }
+  },
+  "unrelated_hook_removal": {
+    "before": "echo codegraphV prompt-hook",
+    "after": null
+  },
+  "shared_instructions": {
+    "before_has_block": true,
+    "after_exists": false,
+    "opencode_still_configured": true
+  },
+  "instructions_preservation": [
+    {
+      "target": "claude",
+      "variant": "lf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "claude",
+      "variant": "crlf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "claude",
+      "variant": "no-final-newline",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": true
+    },
+    {
+      "target": "claude",
+      "variant": "whitespace-only",
+      "install_keeps_original_prefix": false,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": false
+    },
+    {
+      "target": "codex",
+      "variant": "lf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "codex",
+      "variant": "crlf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "codex",
+      "variant": "no-final-newline",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": true
+    },
+    {
+      "target": "codex",
+      "variant": "whitespace-only",
+      "install_keeps_original_prefix": false,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": false
+    },
+    {
+      "target": "opencode",
+      "variant": "lf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "opencode",
+      "variant": "crlf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "opencode",
+      "variant": "no-final-newline",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": true
+    },
+    {
+      "target": "opencode",
+      "variant": "whitespace-only",
+      "install_keeps_original_prefix": false,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": false
+    },
+    {
+      "target": "gemini",
+      "variant": "lf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "gemini",
+      "variant": "crlf",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": true,
+      "after_exists": true
+    },
+    {
+      "target": "gemini",
+      "variant": "no-final-newline",
+      "install_keeps_original_prefix": true,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": true
+    },
+    {
+      "target": "gemini",
+      "variant": "whitespace-only",
+      "install_keeps_original_prefix": false,
+      "refresh_byte_identical": true,
+      "managed_blocks": 1,
+      "uninstall_exact_original": false,
+      "after_exists": false
+    }
+  ],
+  "fenced_marker_example": {
+    "example_preserved": false,
+    "managed_block_inside_fence": true
+  },
+  "ordinary_hook_siblings": {
+    "user_group_preserved": true,
+    "stop_preserved": true,
+    "prompt_groups_after_install": 2,
+    "refresh_unchanged": true,
+    "uninstall_restores_settings_values": true
+  }
+}

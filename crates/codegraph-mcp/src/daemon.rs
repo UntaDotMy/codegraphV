@@ -216,8 +216,12 @@ pub fn proxy(root: &str, executable: &Path) -> Result<bool> {
         let mut line = String::new();
         if from_daemon.read_line(&mut line).unwrap_or(0) > 0 {
             if link.lock().unwrap().relay.from_daemon(&line) {
-                stdout.write_all(line.as_bytes())?;
-                stdout.flush()?;
+                if let Err(error) = stdout.write_all(line.as_bytes()).and_then(|_| stdout.flush()) {
+                    if crate::session::client_gone(&error) {
+                        return Ok(true);
+                    }
+                    return Err(error.into());
+                }
             }
             continue;
         }
@@ -245,21 +249,73 @@ pub fn proxy(root: &str, executable: &Path) -> Result<bool> {
                 let _ = link.to_daemon.shutdown(Shutdown::Write);
             }
         }
-        writeln!(stdout, "{}", handoff::TOOLS_CHANGED)?;
-        stdout.flush()?;
+        if let Err(error) = writeln!(stdout, "{}", handoff::TOOLS_CHANGED).and_then(|_| stdout.flush()) {
+            if crate::session::client_gone(&error) {
+                return Ok(true);
+            }
+            return Err(error.into());
+        }
         from_daemon = BufReader::new(next);
     }
 }
 enum Event {
-    Connected(usize, TcpStream),
-    Line(usize, String),
+    Connected(usize, TcpStream, std::sync::Arc<std::sync::Mutex<()>>),
+    Line(usize, crate::requests::RequestFrame),
     Closed(usize),
 }
 struct Client {
     session: Session,
     stream: TcpStream,
+    write_lock: std::sync::Arc<std::sync::Mutex<()>>,
 }
 static NEXT_CLIENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+// A full query queue must not park a reader: it still needs to receive ping/stop.
+// Return an explicit retry response for requests; disconnect for notifications whose
+// state changes cannot safely be dropped. Never silently discard a request.
+fn overload_response(line: &str) -> Option<Value> {
+    let request: Value = serde_json::from_str(line).ok()?;
+    let id = request.get("id")?;
+    Some(if request["method"] == "tools/call" {
+        json!({"jsonrpc":"2.0","id":id,"result":{
+            "content":[{"type":"text","text":"CodeGraphV is busy: the bounded request queue is full. Retry this request shortly."}]}})
+    } else {
+        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"CodeGraphV request queue full; retry shortly"}})
+    })
+}
+
+/// Cheap protocol requests answered on the connection's own reader thread, so a long query in
+/// the shared event loop never delays a ping, status or shutdown (A20). Returns the response
+/// to write; `daemon/stop` also sets `quit`.
+fn control_response(
+    line: &str,
+    root: &str,
+    version: &str,
+    clients: &std::sync::atomic::AtomicUsize,
+    projects: &std::sync::atomic::AtomicUsize,
+) -> Option<(String, bool)> {
+    let request: Value = serde_json::from_str(line).ok()?;
+    let id = request.get("id")?.clone();
+    if request["jsonrpc"] != "2.0"
+        || !(id.is_string() || id.is_number() || id.is_null())
+        || request.get("params").is_some_and(|p| !p.is_object() && !p.is_null()) {
+        return None;
+    }
+    match request.get("method")?.as_str()? {
+        "ping" => Some((json!({"jsonrpc":"2.0","id":id,"result":{}}).to_string(), false)),
+        "daemon/status" => Some((json!({"jsonrpc":"2.0","id":id,"result":{
+            "pid": std::process::id(),
+            "projectPath": root,
+            "version": version,
+            "clients": clients.load(Ordering::Relaxed),
+            "projects": projects.load(Ordering::Relaxed),
+        }}).to_string(), false)),
+        // The reply is written before shutdown starts, so the caller always sees `stopped`.
+        "daemon/stop" => Some((json!({"jsonrpc":"2.0","id":id,"result":{"stopped":true}}).to_string(), true)),
+        _ => None,
+    }
+}
+
 pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> {
     let root = codegraph_types::paths::real_path(Path::new(root))?
         .to_string_lossy()
@@ -321,18 +377,39 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
         path,
         token: token.clone(),
     };
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(crate::session::MAX_QUEUED_FRAMES);
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let clients_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let projects_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let quit = Arc::new(AtomicBool::new(false));
+    struct CountGuard(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for CountGuard {
+        fn drop(&mut self) { self.0.fetch_sub(1, Ordering::Relaxed); }
+    }
     let mut clients = std::collections::HashMap::<usize, Client>::new();
     let mut pool = ToolHandler::new(Some(root.clone()), true);
     let mut idle = Instant::now();
-    let mut quitting = false;
     let mut binary = std::env::current_exe().ok().map(ExeWatch::new);
     let mut next_upgrade_poll = Instant::now() + UPGRADE_POLL;
-    while !stop.load(Ordering::Relaxed) && !quitting {
-        while let Ok((mut stream, _)) = listener.accept() {
+    while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
+        // A connection flood must not keep the event loop in accept forever.
+        for _ in 0..32 {
+            let Ok((mut stream, _)) = listener.accept() else { break; };
+            if connections.try_update(Ordering::Relaxed, Ordering::Relaxed,
+                |n| (n < 32).then_some(n + 1)).is_err() { continue; }
+            let connections = connections.clone();
+            let clients_count = clients_count.clone();
+            let projects_count = projects_count.clone();
+            let quit = quit.clone();
+            let root = root.clone();
             let sender = sender.clone();
             let token = token.clone();
             std::thread::spawn(move || {
+                struct ConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
+                impl Drop for ConnectionGuard {
+                    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::Relaxed); }
+                }
+                let _guard = ConnectionGuard(connections);
                 let _ = stream.set_nonblocking(false);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -358,65 +435,100 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
                 // this thread reads from too, or an idle client is dropped after 3 s (BUG-125).
                 let _ = stream.set_read_timeout(None);
                 let _ = reader.get_ref().set_read_timeout(None);
+                let Ok(mut write_stream) = stream.try_clone() else {
+                    return;
+                };
+                clients_count.fetch_add(1, Ordering::Relaxed);
+                let _client_guard = CountGuard(clients_count.clone());
+                let write_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+                let pending = crate::requests::PendingRequests::default();
                 let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
-                if sender.send(Event::Connected(id, stream)).is_err() {
+                if sender.try_send(Event::Connected(id, stream, write_lock.clone())).is_err() {
                     return;
                 }
                 loop {
-                    let mut line = String::new();
-                    let read = reader.by_ref().take(1_048_577).read_line(&mut line);
-                    match read {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) if line.len() > 1_048_576 => break,
-                        _ => {
-                            if sender.send(Event::Line(id, line)).is_err() {
-                                break;
+                    match crate::session::read_frame(&mut reader) {
+                        Ok(None) | Err(_) => break,
+                        Ok(Some(line)) => {
+                            if pending.cancel_notification(&line) { continue; }
+                            // Cheap requests are answered here, never queued behind a query.
+                            if let Some((reply, stop)) = control_response(
+                                &line,
+                                &root,
+                                env!("CARGO_PKG_VERSION"),
+                                &clients_count,
+                                &projects_count,
+                            ) {
+                                let wrote = {
+                                    let _writing = write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                                    writeln!(write_stream, "{reply}").is_ok()
+                                };
+                                if stop {
+                                    quit.store(true, Ordering::Relaxed);
+                                }
+                                if !wrote || stop {
+                                    break;
+                                }
+                                continue;
+                            }
+                            let frame = match pending.frame(line.clone()) {
+                                Ok(frame) => frame,
+                                Err(_) => {
+                                    let Some(reply) = overload_response(&line) else { break; };
+                                    let _writing = write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                                    if writeln!(write_stream, "{reply}").is_err() { break; }
+                                    continue;
+                                }
+                            };
+                            match sender.try_send(Event::Line(id, frame)) {
+                                Ok(()) => {},
+                                Err(mpsc::TrySendError::Disconnected(_)) => break,
+                                Err(mpsc::TrySendError::Full(Event::Line(_, frame))) => {
+                                    let Some(reply) = overload_response(&frame.line) else { break; };
+                                    let _writing = write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                                    if writeln!(write_stream, "{reply}").is_err() { break; }
+                                },
+                                Err(mpsc::TrySendError::Full(_)) => unreachable!(),
                             }
                         }
                     }
                 }
+                pending.cancel_all();
                 let _ = sender.send(Event::Closed(id));
             });
         }
         match receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(Event::Connected(id, stream)) => {
+            Ok(Event::Connected(id, stream, write_lock)) => {
                 clients.insert(
                     id,
                     Client {
                         session: Session::new(Some(root.clone()), true),
                         stream,
+                        write_lock,
                     },
                 );
+                projects_count.store(pool.open_project_count(), Ordering::Relaxed);
                 idle = Instant::now();
             }
             Ok(Event::Closed(id)) => {
                 clients.remove(&id);
+                projects_count.store(pool.open_project_count(), Ordering::Relaxed);
                 idle = Instant::now();
             }
-            Ok(Event::Line(id, line)) => {
-                let client_count = clients.len();
+            Ok(Event::Line(id, frame)) => {
                 let Some(client) = clients.get_mut(&id) else {
                     continue;
                 };
-                let control = serde_json::from_str::<Value>(&line).ok();
-                let method = control.as_ref().and_then(|v| v["method"].as_str());
-                let responses = if method == Some("daemon/status") {
-                    vec![
-                        json!({"jsonrpc":"2.0","id":control.as_ref().unwrap()["id"],"result":{"pid":endpoint.pid,"projectPath":root,"version":endpoint.version,"clients":client_count,"projects":pool.open_project_count()}}),
-                    ]
-                } else if method == Some("daemon/stop") {
-                    quitting = true;
-                    vec![
-                        json!({"jsonrpc":"2.0","id":control.as_ref().unwrap()["id"],"result":{"stopped":true}}),
-                    ]
-                } else {
+                let responses = {
                     pool.swap_projects(&mut client.session.handler);
-                    let responses = client.session.process(&line);
+                    let responses = client.session.process_frame(&frame);
                     pool.swap_projects(&mut client.session.handler);
                     responses
                 };
                 let mut failed = false;
+                let write_lock = client.write_lock.clone();
                 for response in responses {
+                    let _writing = write_lock.lock().unwrap_or_else(|e| e.into_inner());
                     if writeln!(client.stream, "{response}").is_err() {
                         failed = true;
                         break;
@@ -426,6 +538,7 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
                     let _ = client.stream.shutdown(Shutdown::Both);
                     clients.remove(&id);
                 }
+                projects_count.store(pool.open_project_count(), Ordering::Relaxed);
                 idle = Instant::now();
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -434,6 +547,7 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
         // A project opened for a `projectPath` goes on its own idle deadline (#2087).
         if pool.next_release_due().is_some_and(|due| due <= Instant::now()) {
             pool.release_idle(Instant::now());
+            projects_count.store(pool.open_project_count(), Ordering::Relaxed);
         }
         if clients.is_empty() && idle.elapsed() >= idle_timeout {
             break;
@@ -455,4 +569,37 @@ pub fn run(root: &str, stop: &AtomicBool, idle_timeout: Duration) -> Result<()> 
         let _ = client.stream.shutdown(Shutdown::Both);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    #[test]
+    fn overload_is_retryable_and_does_not_silently_drop_notifications() {
+        let reply = overload_response(r#"{"jsonrpc":"2.0","id":42,"method":"tools/call"}"#).unwrap();
+        assert_eq!(reply["id"], 42);
+        assert!(reply["result"]["isError"].is_null());
+        assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("Retry"));
+        assert!(overload_response(r#"{"jsonrpc":"2.0","method":"notifications/roots/list_changed"}"#).is_none());
+        let reply = overload_response(r#"{"jsonrpc":"2.0","id":"a","method":"initialize"}"#).unwrap();
+        assert_eq!(reply["error"]["code"], -32000);
+    }
+    #[test]
+    fn malformed_control_requests_cannot_stop_the_daemon() {
+        let count = std::sync::atomic::AtomicUsize::new(1);
+        for request in [
+            json!({"id":1,"method":"daemon/stop"}),
+            json!({"jsonrpc":"1.0","id":1,"method":"daemon/stop"}),
+            json!({"jsonrpc":"2.0","id":{},"method":"daemon/stop"}),
+            json!({"jsonrpc":"2.0","id":1,"method":"daemon/stop","params":[]}),
+            json!({"jsonrpc":"2.0","method":"daemon/stop"}),
+        ] {
+            assert!(control_response(&request.to_string(), ".", "test", &count, &count).is_none());
+        }
+        for method in ["ping", "daemon/status", "daemon/stop"] {
+            let (_, stopped) = control_response(&json!({"jsonrpc":"2.0","id":1,"method":method}).to_string(),
+                ".", "test", &count, &count).unwrap();
+            assert_eq!(stopped, method == "daemon/stop");
+        }
+    }
 }

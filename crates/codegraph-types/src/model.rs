@@ -249,6 +249,9 @@ pub struct ExtractionResult {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subgraph {
+    /// A resource budget stopped traversal; absence means no budget truncation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
     pub nodes: IndexMap<String, Node>,
     pub edges: Vec<Edge>,
     /// Root node IDs (entry points).

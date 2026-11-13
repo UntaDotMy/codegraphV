@@ -4,10 +4,12 @@
 //! lexical scopes outward, `using` declarations and directives, namespace aliases. Never a
 //! namesake of another namespace or language.
 
+use crate::c_macro_renames::c_macro_rename;
+use crate::cpp_includers::cpp_includers;
 use crate::cpp_namespaces::{cpp_macro_namespace_frames, cpp_namespace_aliases};
 use crate::cpp_type_aliases::{
-    cpp_class_named, cpp_parent_scope, cpp_scopes_within, cpp_template_parameters, cpp_type_segments,
-    strip_cpp_template_arguments, CppNamedClass, Visible,
+    cpp_class_named, cpp_parent_scope, cpp_scopes_within, cpp_template_parameters, cpp_type_named,
+    cpp_type_segments, strip_cpp_template_arguments, CppNamedClass, CppNamedType, Visible,
 };
 use crate::ctx::Ctx;
 use crate::types::{NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
@@ -23,12 +25,26 @@ fn is_class_kind(kind: NodeKind) -> bool {
     matches!(kind, NodeKind::Class | NodeKind::Struct | NodeKind::Union)
 }
 
+fn is_type_kind(kind: NodeKind) -> bool {
+    is_class_kind(kind) || matches!(kind, NodeKind::Enum | NodeKind::TypeAlias)
+}
+
 fn is_c_family(n: &Node) -> bool {
     matches!(n.language, Language::Cpp | Language::C)
 }
 
 pub fn is_cpp_supertype_ref(r: &UnresolvedRef) -> bool {
     matches!(r.language, Language::Cpp | Language::C) && (r.is_kind(EdgeKind::Extends) || r.is_kind(EdgeKind::Implements))
+}
+
+/// A `references` edge from a C or C++ class or alias: the type a member or the alias is
+/// declared with. Extraction writes no other `references` from either.
+pub fn is_cpp_declared_type_ref(r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    if !r.is_kind(EdgeKind::References) || !matches!(r.language, Language::Cpp | Language::C) {
+        return false;
+    }
+    ctx.node_by_id(&r.from_node_id)
+        .is_some_and(|holder| is_c_family(&holder) && (is_class_kind(holder.kind) || holder.kind == NodeKind::TypeAlias))
 }
 
 #[derive(Default)]
@@ -92,6 +108,7 @@ pub fn match_cpp_supertype(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         parameters: cpp_template_parameters(&derived, ctx),
         self_id: Some(derived.id.clone()),
         class_scope: None,
+        declared: false,
     };
     let found = match cpp_class_written(&written_base(r, ctx), &site, r, ctx) {
         Tri::Value(f) => f,
@@ -104,6 +121,68 @@ pub fn match_cpp_supertype(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
     })
 }
 
+/// The type a member of a C or C++ class, or an alias, is declared with. Only a type can be
+/// named there, so a function or macro of that name is never a candidate.
+pub fn match_cpp_declared_type(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    let holder = ctx.node_by_id(&r.from_node_id)?;
+    let site = CppNameSite {
+        scope: if holder.kind == NodeKind::TypeAlias {
+            cpp_parent_scope(&holder.qualified_name)
+        } else {
+            holder.qualified_name.clone()
+        },
+        file: holder.file_path.clone(),
+        line: r.line as usize,
+        parameters: cpp_template_parameters(&holder, ctx),
+        self_id: None,
+        class_scope: None,
+        declared: true,
+    };
+    // A macro the file sees can rename the type (`#define sds hisds`), and a type the new
+    // name doesn't reach is left as written.
+    let renamed = c_macro_rename(&r.reference_name, &site.file, r.line as usize, r.language, ctx);
+    let found = match renamed.as_deref().map(|name| cpp_class_written(name, &site, r, ctx)) {
+        Some(Tri::Value(found)) => Tri::Value(found),
+        _ => cpp_class_written(&r.reference_name, &site, r, ctx),
+    };
+    let (node, exact) = match found {
+        Tri::Value(found) => (Some(found.node), found.exact),
+        Tri::Null => return None,
+        Tri::Undefined => (defined_by_includer(&r.reference_name, &site, ctx), false),
+    };
+    let node = node?;
+    if node.id == holder.id {
+        return None;
+    }
+    Some(if exact {
+        ResolvedRef::new(r, node.id.clone(), 0.9, ResolvedBy::QualifiedName)
+    } else {
+        ResolvedRef::new(r, node.id.clone(), 0.7, ResolvedBy::ExactMatch)
+    })
+}
+
+/// The type a header names and only a source file including it defines.
+fn defined_by_includer(written: &str, site: &CppNameSite, ctx: &Ctx) -> Option<NodeRef> {
+    let segments = cpp_type_segments(written)?;
+    let path = segments.join("::");
+    let spelled: HashSet<String> = cpp_scopes_within(&site.scope)
+        .into_iter()
+        .map(|scope| if scope.is_empty() { path.clone() } else { format!("{scope}::{path}") })
+        .collect();
+    let candidates: Vec<NodeRef> = ctx
+        .get_nodes_by_name(&segments[segments.len() - 1])
+        .iter()
+        .filter(|n| is_c_family(n) && n.kind != NodeKind::TypeAlias && is_type_kind(n.kind) && spelled.contains(&n.qualified_name))
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let includers = cpp_includers(&site.file, ctx);
+    let defined: Vec<NodeRef> = candidates.into_iter().filter(|n| includers.contains(&n.file_path)).collect();
+    (defined.len() == 1).then(|| defined.into_iter().next().unwrap())
+}
+
 /// Where a type name is written: the scope, file, line, template parameters in reach.
 pub struct CppNameSite {
     pub scope: String,
@@ -112,6 +191,8 @@ pub struct CppNameSite {
     pub parameters: Rc<HashSet<String>>,
     pub self_id: Option<String>,
     pub class_scope: Option<String>,
+    /// Find what the name itself declares: an enum counts, and an alias is the answer.
+    pub declared: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,9 +217,20 @@ pub fn cpp_class_written(written: &str, site: &CppNameSite, r: &UnresolvedRef, c
         scopes.insert(1.min(scopes.len()), cs.clone());
     }
     let resolved = |node: NodeRef| CppWrittenClass { node, exact: true };
+    let named = |spelled: &str, from: &[String]| -> Tri<CppNamedType> {
+        if site.declared {
+            cpp_type_named(spelled, from, r, ctx, visible)
+        } else {
+            match cpp_class_named(spelled, from, r, ctx, visible) {
+                Tri::Value(found) => Tri::Value(CppNamedType::Class(found)),
+                Tri::Null => Tri::Null,
+                Tri::Undefined => Tri::Undefined,
+            }
+        }
+    };
 
     let lexical_scopes: Vec<String> = if global { vec![String::new()] } else { scopes[..scopes.len().saturating_sub(1)].to_vec() };
-    let lexical = class_node(cpp_class_named(written, &lexical_scopes, r, ctx, visible), site, ctx, visible);
+    let lexical = class_node(named(written, &lexical_scopes), site, ctx, visible);
     match lexical {
         Tri::Value(n) => return Tri::Value(resolved(n)),
         Tri::Null => return Tri::Null,
@@ -152,7 +244,7 @@ pub fn cpp_class_written(written: &str, site: &CppNameSite, r: &UnresolvedRef, c
     let look_up = |spelled: &str| -> Option<NodeRef> {
         let absolute = spelled.starts_with("::");
         let sc: Vec<String> = if absolute { vec![String::new()] } else { scopes.clone() };
-        class_node(cpp_class_named(spelled, &sc, r, ctx, visible), site, ctx, visible).value()
+        class_node(named(spelled, &sc), site, ctx, visible).value()
     };
     if segments.len() > 1 {
         let local = usings.iter().find(|u| u.kind == UsingKind::Alias && u.name == segments[0]);
@@ -174,6 +266,11 @@ pub fn cpp_class_written(written: &str, site: &CppNameSite, r: &UnresolvedRef, c
             if let Some(hit) = look_up(&format!("{}{after}", u.path)) {
                 return Tri::Value(resolved(hit));
             }
+            // `using std::string`: the file says where the name comes from, and it is
+            // nothing the project declares, whatever else shares its name.
+            if site.declared {
+                return Tri::Null;
+            }
         }
         for u in &usings {
             if u.kind != UsingKind::Directive {
@@ -183,7 +280,7 @@ pub fn cpp_class_written(written: &str, site: &CppNameSite, r: &UnresolvedRef, c
                 return Tri::Value(resolved(hit));
             }
         }
-        let outermost = class_node(cpp_class_named(written, &[String::new()], r, ctx, visible), site, ctx, visible);
+        let outermost = class_node(named(written, &[String::new()]), site, ctx, visible);
         match outermost {
             Tri::Value(n) => return Tri::Value(resolved(n)),
             Tri::Null => return Tri::Null,
@@ -199,7 +296,10 @@ pub fn cpp_class_written(written: &str, site: &CppNameSite, r: &UnresolvedRef, c
     }
     let tail: Vec<NodeRef> = named_classes(&segments, site, ctx, visible)
         .into_iter()
-        .filter(|n| n.qualified_name == path || n.qualified_name.ends_with(&format!("::{path}")))
+        .filter(|n| {
+            (!site.declared || n.language == Language::C)
+                && (n.qualified_name == path || n.qualified_name.ends_with(&format!("::{path}")))
+        })
         .collect();
     let own: Vec<&NodeRef> = tail.iter().filter(|n| n.file_path == site.file).collect();
     let sole: Vec<&NodeRef> = if !own.is_empty() { own } else { tail.iter().collect() };
@@ -254,15 +354,22 @@ fn written_base(r: &UnresolvedRef, ctx: &Ctx) -> String {
     }
 }
 
-fn class_node(named: Tri<CppNamedClass>, site: &CppNameSite, ctx: &Ctx, visible: Visible) -> Tri<NodeRef> {
+fn class_node(named: Tri<CppNamedType>, site: &CppNameSite, ctx: &Ctx, visible: Visible) -> Tri<NodeRef> {
     let named = match named {
         Tri::Undefined => return Tri::Undefined,
         Tri::Null => return Tri::Null,
         Tri::Value(v) => v,
     };
+    if site.declared {
+        return match declaration_node(named, site, ctx, visible) {
+            Some(n) => Tri::Value(n),
+            None => Tri::Undefined,
+        };
+    }
     let cls = match named {
-        CppNamedClass::Alias(a) => return Tri::Value(a),
-        CppNamedClass::Cls(c) => c,
+        CppNamedType::Class(CppNamedClass::Alias(a)) => return Tri::Value(a),
+        CppNamedType::Enums(_) => return Tri::Null,
+        CppNamedType::Class(CppNamedClass::Cls(c)) => c,
     };
     let classes: Vec<NodeRef> = ctx
         .get_nodes_by_qualified_name(&cls)
@@ -279,6 +386,50 @@ fn class_node(named: Tri<CppNamedClass>, site: &CppNameSite, ctx: &Ctx, visible:
         Some(n) => Tri::Value(n),
         None => Tri::Undefined,
     }
+}
+
+/// The declaration a type name stands for among every node of that qualified name.
+/// What the file itself declares or includes comes first. A class beats an alias, and the
+/// alias is the class's when a file that includes the alias defines it.
+fn declaration_node(named: CppNamedType, site: &CppNameSite, ctx: &Ctx, visible: Visible) -> Option<NodeRef> {
+    let name = match &named {
+        CppNamedType::Class(CppNamedClass::Cls(c)) => c.clone(),
+        CppNamedType::Class(CppNamedClass::Alias(alias)) => alias.qualified_name.clone(),
+        CppNamedType::Enums(nodes) => nodes.first().map(|n| n.qualified_name.clone()).unwrap_or_default(),
+    };
+    let all: Vec<NodeRef> = ctx
+        .get_nodes_by_qualified_name(&name)
+        .iter()
+        .filter(|n| is_c_family(n) && is_type_kind(n.kind))
+        .cloned()
+        .collect();
+    if all.len() <= 1 {
+        return all.into_iter().next();
+    }
+    let defined = |nodes: &[NodeRef]| -> Vec<NodeRef> {
+        nodes.iter().filter(|n| n.kind != NodeKind::TypeAlias).cloned().collect()
+    };
+    let seen: Vec<NodeRef> = all.iter().filter(|n| visible.is_none_or(|v| v(n))).cloned().collect();
+    let own: Vec<NodeRef> = seen.iter().filter(|n| n.file_path == site.file).cloned().collect();
+    let mut above: Vec<NodeRef> = own.iter().filter(|n| (n.start_line as usize) <= site.line).cloned().collect();
+    above.sort_by(|a, b| b.start_line.cmp(&a.start_line));
+    let included: Vec<NodeRef> = if !above.is_empty() {
+        vec![above.into_iter().next().unwrap()]
+    } else if !own.is_empty() {
+        own
+    } else {
+        seen.iter().filter(|n| cpp_includers(&n.file_path, ctx).contains(&site.file)).cloned().collect()
+    };
+    let near = if !included.is_empty() { included } else { seen };
+    let defined_near = defined(&near);
+    let found = pick(if !defined_near.is_empty() { &defined_near } else { &near }, &site.file);
+    let Some(found) = found else { return None };
+    if found.kind != NodeKind::TypeAlias {
+        return Some(found);
+    }
+    let includers = cpp_includers(&found.file_path, ctx);
+    let defined_includers: Vec<NodeRef> = defined(&all).into_iter().filter(|n| includers.contains(&n.file_path)).collect();
+    pick(&defined_includers, &found.file_path).or(Some(found))
 }
 
 fn pick(classes: &[NodeRef], file: &str) -> Option<NodeRef> {
@@ -313,7 +464,10 @@ fn pick(classes: &[NodeRef], file: &str) -> Option<NodeRef> {
 fn named_classes(segments: &[String], site: &CppNameSite, ctx: &Ctx, visible: Visible) -> Vec<NodeRef> {
     ctx.get_nodes_by_name(&segments[segments.len() - 1])
         .iter()
-        .filter(|n| is_c_family(n) && is_class_kind(n.kind) && Some(&n.id) != site.self_id.as_ref() && visible.is_none_or(|v| v(n)))
+        .filter(|n| {
+            let kinds = if site.declared { is_type_kind(n.kind) } else { is_class_kind(n.kind) };
+            is_c_family(n) && kinds && Some(&n.id) != site.self_id.as_ref() && visible.is_none_or(|v| v(n))
+        })
         .cloned()
         .collect()
 }

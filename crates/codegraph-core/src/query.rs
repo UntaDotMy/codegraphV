@@ -98,6 +98,11 @@ impl CodeGraph {
     pub fn get_callees(&self, id: &str, depth: u32) -> Result<Vec<Ref>> {
         Ok(self.traverser().get_callees(id, depth)?)
     }
+    /// Every caller/callee of `id`, one row per symbol with all of its call sites. A recursive
+    /// call is a row whose node is `id` itself; `get_callers`/`get_callees` keep their old shape.
+    pub fn get_call_sites(&self, id: &str, incoming: bool, max_sites: usize) -> Result<(Vec<codegraph_graph::CallSiteRow>, bool)> {
+        Ok(self.traverser().get_call_sites(id, incoming, max_sites)?)
+    }
     pub fn get_impact_radius(&self, id: &str, depth: u32) -> Result<Subgraph> {
         Ok(self.traverser().get_impact_radius(id, depth)?)
     }

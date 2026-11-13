@@ -5,7 +5,9 @@
 //! offset is its line start plus its UTF-16 column converted into that text.
 
 use crate::ctx::Ctx;
-use crate::frameworks::cargo_workspace::{get_cargo_workspace_crate_map, parse_package_name, parse_target_paths};
+use crate::frameworks::cargo_workspace::{
+    get_cargo_workspace_crate_map, parse_package_name, parse_target_paths,
+};
 use crate::name_matcher::util::{memo_map, memoized};
 use crate::rust_scopes::{blank_rust_code, rust_units};
 use crate::types::UnresolvedRef;
@@ -19,9 +21,39 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub const RUST_PRELUDE: [&str; 33] = [
-    "Ok", "Err", "Some", "None", "Result", "Option", "Box", "Vec", "String", "Default", "Drop", "Iterator",
-    "IntoIterator", "From", "Into", "Clone", "Copy", "Send", "Sync", "Sized", "ToString", "ToOwned", "PartialEq",
-    "Eq", "PartialOrd", "Ord", "AsRef", "AsMut", "Fn", "FnMut", "FnOnce", "Extend", "drop",
+    "Ok",
+    "Err",
+    "Some",
+    "None",
+    "Result",
+    "Option",
+    "Box",
+    "Vec",
+    "String",
+    "Default",
+    "Drop",
+    "Iterator",
+    "IntoIterator",
+    "From",
+    "Into",
+    "Clone",
+    "Copy",
+    "Send",
+    "Sync",
+    "Sized",
+    "ToString",
+    "ToOwned",
+    "PartialEq",
+    "Eq",
+    "PartialOrd",
+    "Ord",
+    "AsRef",
+    "AsMut",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "Extend",
+    "drop",
 ];
 
 pub fn in_rust_prelude(name: &str) -> bool {
@@ -78,6 +110,12 @@ pub struct RustUses {
     pub glob_paths: Vec<RustUsePath>,
     pub blocks: Vec<RustModBlock>,
     pub path_mods: HashSet<String>,
+    /// Modules it declares out of line with no `#[path]` (`mod name;`): the files the regular
+    /// rules name.
+    pub mods: HashSet<String>,
+    /// Whether it starts a binary of its own: a top-level `fn main` or `#![no_main]` (a trybuild
+    /// case, a fuzz target).
+    pub main: bool,
     pub balanced: bool,
     pub line_starts: Vec<usize>,
     /// The file with comments and strings blanked, one byte per UTF-16 unit (`rust_units`), so an
@@ -88,7 +126,11 @@ pub struct RustUses {
 impl RustUses {
     /// Offset of `line` (1-based) at UTF-16 `column` (`lineStarts[line - 1] + max(0, column)`).
     pub fn offset_of(&self, line: u32, column: u32) -> usize {
-        let start = (line as usize).checked_sub(1).and_then(|i| self.line_starts.get(i)).copied().unwrap_or(0);
+        let start = (line as usize)
+            .checked_sub(1)
+            .and_then(|i| self.line_starts.get(i))
+            .copied()
+            .unwrap_or(0);
         start + column as usize
     }
 }
@@ -113,12 +155,18 @@ pub struct RustManifestDependency {
 }
 
 fn read_dependency_fields(dep: &mut RustManifestDependency, fields: &str) {
-    if let Some(pkg) = re!(r#"\bpackage\s*=\s*"([^"]+)""#).captures(fields).and_then(|c| c.text(1).map(String::from)) {
+    if let Some(pkg) = re!(r#"\bpackage\s*=\s*"([^"]+)""#)
+        .captures(fields)
+        .and_then(|c| c.text(1).map(String::from))
+    {
         if !pkg.is_empty() {
             dep.pkg = pkg.replace('-', "_");
         }
     }
-    if let Some(at) = re!(r#"\bpath\s*=\s*"([^"]+)""#).captures(fields).and_then(|c| c.text(1).map(String::from)) {
+    if let Some(at) = re!(r#"\bpath\s*=\s*"([^"]+)""#)
+        .captures(fields)
+        .and_then(|c| c.text(1).map(String::from))
+    {
         if !at.is_empty() {
             dep.path = Some(at.replace('\\', "/"));
         }
@@ -134,7 +182,14 @@ pub fn rust_manifest_dependencies(text: &str) -> Vec<RustManifestDependency> {
     fn entry(deps: &mut Deps, kind: DepKind, name: &str) -> (DepKind, String) {
         let key = name.replace('-', "_");
         let k = (kind, key.clone());
-        deps.entry(k.clone()).or_insert_with(|| RustManifestDependency { key: key.clone(), pkg: key, path: None, workspace: false, kind });
+        deps.entry(k.clone())
+            .or_insert_with(|| RustManifestDependency {
+                key: key.clone(),
+                pkg: key,
+                path: None,
+                workspace: false,
+                kind,
+            });
         k
     }
     let mut deps: Deps = IndexMap::new();
@@ -142,7 +197,9 @@ pub fn rust_manifest_dependencies(text: &str) -> Vec<RustManifestDependency> {
     let mut table: Option<(DepKind, String)> = None;
     for raw in re!(r"\r?\n").split(text) {
         let line: String = js_trim(&re!(r"#.*$").replace_first(raw, |_| String::new())).to_string();
-        let header_inner = re!(r"^\[([^\]]+)\]$").captures(&line).map(|h| js_trim(h.text(1).unwrap_or("")).to_string());
+        let header_inner = re!(r"^\[([^\]]+)\]$")
+            .captures(&line)
+            .map(|h| js_trim(h.text(1).unwrap_or("")).to_string());
         if let Some(inner) = header_inner {
             let m = re!(r"^(?:(workspace)\.|target\..+\.)?(dev-|build-)?dependencies(?:\.([A-Za-z0-9_-]+))?$").captures(&inner);
             let of = m.as_ref().map(|m| {
@@ -156,7 +213,11 @@ pub fn rust_manifest_dependencies(text: &str) -> Vec<RustManifestDependency> {
                     DepKind::Normal
                 }
             });
-            let sub = m.as_ref().and_then(|m| m.text(3)).filter(|s| !s.is_empty()).map(String::from);
+            let sub = m
+                .as_ref()
+                .and_then(|m| m.text(3))
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             kind = match (of, &sub) {
                 (Some(of), None) => Some(of),
                 _ => None,
@@ -174,9 +235,16 @@ pub fn rust_manifest_dependencies(text: &str) -> Vec<RustManifestDependency> {
             continue;
         }
         let Some(k) = kind else { continue };
-        let parsed: Option<(String, Option<String>, String)> = re!(r#"^"?([A-Za-z0-9_-]+)"?\s*(?:\.\s*([A-Za-z_-]+)\s*)?=\s*(.*)$"#)
-            .captures(&line)
-            .map(|d| (d.text(1).unwrap_or("").to_string(), d.text(2).filter(|s| !s.is_empty()).map(String::from), d.text(3).unwrap_or("").to_string()));
+        let parsed: Option<(String, Option<String>, String)> =
+            re!(r#"^"?([A-Za-z0-9_-]+)"?\s*(?:\.\s*([A-Za-z_-]+)\s*)?=\s*(.*)$"#)
+                .captures(&line)
+                .map(|d| {
+                    (
+                        d.text(1).unwrap_or("").to_string(),
+                        d.text(2).filter(|s| !s.is_empty()).map(String::from),
+                        d.text(3).unwrap_or("").to_string(),
+                    )
+                });
         if let Some((name, sub, value)) = parsed {
             let fields = match sub {
                 Some(sub) => format!("{sub} = {value}"),
@@ -207,7 +275,11 @@ pub fn rust_dependency_crates(ctx: &Ctx) -> Rc<HashSet<String>> {
             if !seen.insert(manifest.clone()) {
                 continue;
             }
-            for d in rust_manifest_dependencies(&ctx.read_file(&manifest).map(|t| t.to_string()).unwrap_or_default()) {
+            for d in rust_manifest_dependencies(
+                &ctx.read_file(&manifest)
+                    .map(|t| t.to_string())
+                    .unwrap_or_default(),
+            ) {
                 deps.insert(d.key);
             }
         }
@@ -222,7 +294,10 @@ pub fn rust_dependency_crates(ctx: &Ctx) -> Rc<HashSet<String>> {
 pub fn rust_project_crates(ctx: &Ctx) -> Rc<HashSet<String>> {
     memoized::<RustCrateNamesMemo>(ctx, (), || {
         let mut crates: HashSet<String> = HashSet::new();
-        let root = ctx.read_file("Cargo.toml").map(|t| t.to_string()).unwrap_or_default();
+        let root = ctx
+            .read_file("Cargo.toml")
+            .map(|t| t.to_string())
+            .unwrap_or_default();
         if let Some(name) = parse_package_name(&root).filter(|n| !n.is_empty()) {
             crates.insert(name.replace('-', "_"));
         }
@@ -244,6 +319,9 @@ pub struct RustCrate {
     pub lib: Option<String>,
     /// The binaries' roots its manifest gives a `path` (ripgrep's `crates/core/main.rs`), as project files.
     pub bins: Vec<String>,
+    /// The examples', tests' and benches' roots its manifest gives a `path`, as project files:
+    /// each its own crate.
+    pub others: Vec<String>,
 }
 
 pub struct RustCrateGraph {
@@ -255,7 +333,11 @@ pub struct RustCrateGraph {
 memo_map!(RustCrateGraphMemo, (), Rc<RustCrateGraph>);
 
 fn join_crate_dir(dir: &str, rel: &str) -> Option<String> {
-    let joined = if dir.is_empty() { rel.to_string() } else { format!("{dir}/{rel}") };
+    let joined = if dir.is_empty() {
+        rel.to_string()
+    } else {
+        format!("{dir}/{rel}")
+    };
     let joined = posix::normalize(&joined);
     let joined = joined.trim_end_matches('/').to_string();
     if joined == "." {
@@ -278,20 +360,44 @@ impl CrateScan {
         if self.crates.contains_key(dir) {
             return true;
         }
-        let path = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
-        let Some(text) = ctx.read_file(&path).map(|t| t.to_string()).filter(|t| !t.is_empty()) else { return false };
+        let path = if dir.is_empty() {
+            "Cargo.toml".to_string()
+        } else {
+            format!("{dir}/Cargo.toml")
+        };
+        let Some(text) = ctx
+            .read_file(&path)
+            .map(|t| t.to_string())
+            .filter(|t| !t.is_empty())
+        else {
+            return false;
+        };
         // By its section: axum-core's manifest writes `categories = [ … ]` above its `name`.
-        let Some(name) = parse_package_name(&text).map(|n| n.replace('-', "_")).filter(|n| !n.is_empty()) else {
+        let Some(name) = parse_package_name(&text)
+            .map(|n| n.replace('-', "_"))
+            .filter(|n| !n.is_empty())
+        else {
             return false;
         };
         let targets = parse_target_paths(&text);
-        let file = |rel: &str| posix::normalize(&if dir.is_empty() { rel.to_string() } else { format!("{dir}/{rel}") });
         let krate = RustCrate {
             name: name.clone(),
             keys: HashMap::new(),
             deps: HashSet::new(),
-            lib: targets.lib.as_deref().map(file),
-            bins: targets.bins.iter().map(|b| file(b)).collect(),
+            lib: targets
+                .lib
+                .as_deref()
+                .and_then(|rel| join_crate_dir(dir, rel)),
+            bins: targets
+                .bins
+                .iter()
+                .filter_map(|b| join_crate_dir(dir, b))
+                .collect(),
+            others: targets
+                .others
+                .iter()
+                .filter_map(|b| join_crate_dir(dir, b))
+                .collect(),
         };
         self.crates.insert(dir.to_string(), krate);
         self.manifests.insert(dir.to_string(), text);
@@ -303,18 +409,28 @@ impl CrateScan {
 /// The workspace's crates, what each depends on, and what each can reach.
 pub fn rust_crate_graph(ctx: &Ctx) -> Rc<RustCrateGraph> {
     memoized::<RustCrateGraphMemo>(ctx, (), || {
-        let mut scan = CrateScan { crates: IndexMap::new(), manifests: HashMap::new(), by_name: HashMap::new() };
+        let mut scan = CrateScan {
+            crates: IndexMap::new(),
+            manifests: HashMap::new(),
+            by_name: HashMap::new(),
+        };
         scan.add("", ctx);
-        for dir in get_cargo_workspace_crate_map(ctx).values() {
-            let dir = re!(r"^\.(?:/|$)").replace_first(dir, |_| String::new());
+        for member in get_cargo_workspace_crate_map(ctx).values() {
+            let Some(dir) = join_crate_dir("", member) else {
+                continue;
+            };
             scan.add(&dir, ctx);
         }
-        let root_manifest = ctx.read_file("Cargo.toml").map(|t| t.to_string()).unwrap_or_default();
-        let inherited: HashMap<String, RustManifestDependency> = rust_manifest_dependencies(&root_manifest)
-            .into_iter()
-            .filter(|d| d.kind == DepKind::Workspace)
-            .map(|d| (d.key.clone(), d))
-            .collect();
+        let root_manifest = ctx
+            .read_file("Cargo.toml")
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let inherited: HashMap<String, RustManifestDependency> =
+            rust_manifest_dependencies(&root_manifest)
+                .into_iter()
+                .filter(|d| d.kind == DepKind::Workspace)
+                .map(|d| (d.key.clone(), d))
+                .collect();
         let mut queue: Vec<String> = scan.crates.keys().cloned().collect();
         let mut i = 0;
         while i < queue.len() {
@@ -325,7 +441,11 @@ pub fn rust_crate_graph(ctx: &Ctx) -> Rc<RustCrateGraph> {
                 if dep.kind == DepKind::Workspace {
                     continue;
                 }
-                let shared = if dep.workspace { inherited.get(&dep.key) } else { None };
+                let shared = if dep.workspace {
+                    inherited.get(&dep.key)
+                } else {
+                    None
+                };
                 let at = match shared {
                     Some(s) => s.path.as_ref().and_then(|p| join_crate_dir("", p)),
                     None => dep.path.as_ref().and_then(|p| join_crate_dir(&dir, p)),
@@ -337,7 +457,10 @@ pub fn rust_crate_graph(ctx: &Ctx) -> Rc<RustCrateGraph> {
                 }
                 let to = match &at {
                     Some(at) if scan.crates.contains_key(at) => Some(at.clone()),
-                    _ => scan.by_name.get(shared.map(|s| s.pkg.as_str()).unwrap_or(&dep.pkg)).cloned(),
+                    _ => scan
+                        .by_name
+                        .get(shared.map(|s| s.pkg.as_str()).unwrap_or(&dep.pkg))
+                        .cloned(),
                 };
                 let Some(to) = to else { continue };
                 if to == dir {
@@ -364,7 +487,11 @@ pub fn rust_crate_graph(ctx: &Ctx) -> Rc<RustCrateGraph> {
             }
             reach.insert(dir.clone(), seen);
         }
-        Rc::new(RustCrateGraph { crates, reach, file_crate: RefCell::new(HashMap::new()) })
+        Rc::new(RustCrateGraph {
+            crates,
+            reach,
+            file_crate: RefCell::new(HashMap::new()),
+        })
     })
 }
 
@@ -373,22 +500,39 @@ pub fn rust_crate_dir_of(file_path: &str, graph: &RustCrateGraph) -> Option<Stri
     if let Some(hit) = graph.file_crate.borrow().get(file_path) {
         return hit.clone();
     }
-    let mut best: Option<String> = if graph.crates.contains_key("") { Some(String::new()) } else { None };
+    let mut best: Option<String> = if graph.crates.contains_key("") {
+        Some(String::new())
+    } else {
+        None
+    };
     for dir in graph.crates.keys() {
-        if !dir.is_empty() && file_path.starts_with(&format!("{dir}/")) && best.as_ref().is_none_or(|b| dir.len() > b.len()) {
+        if !dir.is_empty()
+            && file_path.starts_with(&format!("{dir}/"))
+            && best.as_ref().is_none_or(|b| dir.len() > b.len())
+        {
             best = Some(dir.clone());
         }
     }
-    graph.file_crate.borrow_mut().insert(file_path.to_string(), best.clone());
+    graph
+        .file_crate
+        .borrow_mut()
+        .insert(file_path.to_string(), best.clone());
     best
 }
 
 /// Whether a `use` rooted at any of `roots` can reach the crate `candidate` lives in.
-pub fn rust_use_can_reach(roots: &HashSet<String>, candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+pub fn rust_use_can_reach(
+    roots: &HashSet<String>,
+    candidate: &Node,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> bool {
     let graph = rust_crate_graph(ctx);
     let at = rust_crate_dir_of(&candidate.file_path, &graph);
     let own = rust_crate_dir_of(&r.file_path, &graph);
-    let (Some(at), Some(own)) = (at, own) else { return true };
+    let (Some(at), Some(own)) = (at, own) else {
+        return true;
+    };
     let crate_ = &graph.crates[&own];
     for root in roots {
         let from = if root == "crate" || root == "self" || root == "super" || *root == crate_.name {
@@ -417,8 +561,10 @@ struct UseBinding {
 
 /// Every name a `use` tree binds with the path it names (`None` for a glob).
 fn rust_use_tree_bindings(tree: &str) -> Vec<UseBinding> {
-    let tokens: Vec<String> =
-        re!(r"(?:r#)?\$?[A-Za-z_]\w*|::|[{},*]", "g").captures_iter(tree).map(|c| c.text(0).unwrap_or("").to_string()).collect();
+    let tokens: Vec<String> = re!(r"(?:r#)?\$?[A-Za-z_]\w*|::|[{},*]", "g")
+        .captures_iter(tree)
+        .map(|c| c.text(0).unwrap_or("").to_string())
+        .collect();
     struct Reader<'a> {
         tokens: &'a [String],
         i: usize,
@@ -478,12 +624,19 @@ fn rust_use_tree_bindings(tree: &str) -> Vec<UseBinding> {
             }
             if let Some(local) = local {
                 if !segs.is_empty() && local != "_" && re!(r"^[A-Za-z_]\w*$").is_match(&local) {
-                    self.out.push(UseBinding { segs, local: Some(local) });
+                    self.out.push(UseBinding {
+                        segs,
+                        local: Some(local),
+                    });
                 }
             }
         }
     }
-    let mut reader = Reader { tokens: &tokens, i: 0, out: Vec::new() };
+    let mut reader = Reader {
+        tokens: &tokens,
+        i: 0,
+        out: Vec::new(),
+    };
     while reader.i < tokens.len() {
         let before = reader.i;
         reader.read(&[]);
@@ -557,7 +710,10 @@ struct LazyBraces<'a> {
 
 impl<'a> LazyBraces<'a> {
     fn new(text: &'a str) -> Self {
-        LazyBraces { text, cell: std::cell::OnceCell::new() }
+        LazyBraces {
+            text,
+            cell: std::cell::OnceCell::new(),
+        }
     }
 
     fn get(&self) -> &[usize] {
@@ -581,7 +737,12 @@ fn rust_mod_blocks(text: &str, braces: &LazyBraces) -> (Vec<RustModBlock>, bool)
     for &at in braces.get() {
         if text.as_bytes()[at] == b'{' {
             let block = heads.get(&at).map(|name| {
-                blocks.push(RustModBlock { name: name.clone(), open: at, close: text.len(), parent: inner });
+                blocks.push(RustModBlock {
+                    name: name.clone(),
+                    open: at,
+                    close: text.len(),
+                    parent: inner,
+                });
                 inner = Some(blocks.len() - 1);
                 blocks.len() - 1
             });
@@ -607,7 +768,12 @@ fn rust_mod_blocks(text: &str, braces: &LazyBraces) -> (Vec<RustModBlock>, bool)
 /// `macro_rules! m {`), with every brace in them, are the scope around them: tokio's
 /// `cfg_sync! { pub use … }` and a `cfg_if! { if #[cfg(unix)] { pub use … } }` are the module's own
 /// `use`s. `None` for a `use` of its module; `None` overall when the braces don't pair.
-fn rust_use_scopes(text: &str, kws: &[usize], braces: &[usize], mod_opens: &HashSet<usize>) -> Option<Vec<Option<RustUseScope>>> {
+fn rust_use_scopes(
+    text: &str,
+    kws: &[usize],
+    braces: &[usize],
+    mod_opens: &HashSet<usize>,
+) -> Option<Vec<Option<RustUseScope>>> {
     enum Open {
         Module,
         Macro,
@@ -639,7 +805,10 @@ fn rust_use_scopes(text: &str, kws: &[usize], braces: &[usize], mod_opens: &Hash
             } else if matches!(open.last(), Some(Open::Macro)) || is_rust_macro_brace(text, at) {
                 Open::Macro
             } else {
-                blocks.push(RustUseScope { open: at, close: text.len() });
+                blocks.push(RustUseScope {
+                    open: at,
+                    close: text.len(),
+                });
                 Open::Block(blocks.len() - 1)
             };
             open.push(entry);
@@ -679,7 +848,9 @@ fn is_rust_macro_brace(text: &str, at: usize) -> bool {
     while q >= 0 && space(bytes[q as usize]) {
         q -= 1;
     }
-    q >= 0 && bytes[q as usize] == b'!' && re!(r"\bmacro_rules\s*$").is_match(&text[(q as usize).saturating_sub(24)..q as usize])
+    q >= 0
+        && bytes[q as usize] == b'!'
+        && re!(r"\bmacro_rules\s*$").is_match(&text[(q as usize).saturating_sub(24)..q as usize])
 }
 
 /// The innermost block containing `offset`.
@@ -711,7 +882,12 @@ fn tail_units(s: &str, end: usize, units: usize) -> &str {
 
 fn use_leaves(tree: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for leaf in re!(r"([A-Za-z_]\w*)\s*(?=[,}]|$|\s+as\b)|\bas\s+([A-Za-z_]\w*)", "g").captures_iter(tree) {
+    for leaf in re!(
+        r"([A-Za-z_]\w*)\s*(?=[,}]|$|\s+as\b)|\bas\s+([A-Za-z_]\w*)",
+        "g"
+    )
+    .captures_iter(tree)
+    {
         let id = leaf.text(2).or(leaf.text(1)).unwrap_or("");
         if id != "self" && id != "as" {
             out.push(id.to_string());
@@ -728,7 +904,10 @@ memo_map!(RustUsesMemo, String, Rc<RustUses>);
 /// What `file_path` imports and how its inline modules nest.
 pub fn rust_uses_of(file_path: &str, ctx: &Ctx) -> Rc<RustUses> {
     memoized::<RustUsesMemo>(ctx, file_path.to_string(), || {
-        let source = ctx.read_file(file_path).map(|t| t.to_string()).unwrap_or_default();
+        let source = ctx
+            .read_file(file_path)
+            .map(|t| t.to_string())
+            .unwrap_or_default();
         // Comments and strings blanked first: a doc comment's prose ("…use the Option…"), a
         // string's `"use crate::x;"` is no `use`.
         let text = blank_rust_code(&rust_units(&source));
@@ -744,6 +923,8 @@ pub fn rust_uses_of(file_path: &str, ctx: &Ctx) -> Rc<RustUses> {
             glob_paths: Vec::new(),
             blocks: Vec::new(),
             path_mods: HashSet::new(),
+            mods: HashSet::new(),
+            main: false,
             balanced: true,
             line_starts: Vec::new(),
             text: String::new(),
@@ -753,7 +934,11 @@ pub fn rust_uses_of(file_path: &str, ctx: &Ctx) -> Rc<RustUses> {
             .captures_iter(&text)
             .map(|m| {
                 let whole = m.get(0).expect("group 0");
-                (whole.start(), whole.start() + whole.as_str().find("use").unwrap_or(0), m.text(1).unwrap_or("").to_string())
+                (
+                    whole.start(),
+                    whole.start() + whole.as_str().find("use").unwrap_or(0),
+                    m.text(1).unwrap_or("").to_string(),
+                )
             })
             .collect();
         // The braces are read for inline modules, and for the block a `use` is in when one may
@@ -775,10 +960,14 @@ pub fn rust_uses_of(file_path: &str, ctx: &Ctx) -> Rc<RustUses> {
             None
         };
         for (i, (at, kw, tree)) in matches.iter().enumerate() {
-            let root = re!(r"^\s*(?:::)?([A-Za-z_]\w*)").captures(tree).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
+            let root = re!(r"^\s*(?:::)?([A-Za-z_]\w*)")
+                .captures(tree)
+                .and_then(|c| c.text(1).map(String::from))
+                .unwrap_or_default();
             // Outside: the standard library or a crate the manifests depend on — not a
             // module of the project's own.
-            let outside = is_rust_std_root_use(&root) || (!root.is_empty() && dependencies.contains(&root));
+            let outside =
+                is_rust_std_root_use(&root) || (!root.is_empty() && dependencies.contains(&root));
             let pub_ = re!(r"\bpub(?:\s*\([^()]*\))?\s*$").is_match(tail_units(&text, *kw, 48));
             let scope = scopes.as_ref().and_then(|s| s[i]);
             // Every path, outside ones too: walked, a path dependency on a crate the workspace
@@ -789,7 +978,12 @@ pub fn rust_uses_of(file_path: &str, ctx: &Ctx) -> Rc<RustUses> {
                     continue;
                 }
                 let local = b.local;
-                let path = RustUsePath { segs: b.segs, at: *at, pub_, scope };
+                let path = RustUsePath {
+                    segs: b.segs,
+                    at: *at,
+                    pub_,
+                    scope,
+                };
                 // The standard library's: what its name means where the `use` reaches.
                 if is_rust_std_root(&path.segs[0]) {
                     if let Some(local) = local {
@@ -820,6 +1014,7 @@ pub fn rust_uses_of(file_path: &str, ctx: &Ctx) -> Rc<RustUses> {
                 uses.globs.insert(g.text(1).unwrap_or("").to_string());
             }
         }
+        let mut path_mod_at: HashSet<usize> = HashSet::new();
         for m in re!(
             r"#\[\s*(?:cfg_attr\s*\([^\]]*\bpath|path)\s*=[^\]]*\]\s*(?:#!?\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?:r#)?([A-Za-z_]\w*)",
             "g"
@@ -827,7 +1022,23 @@ pub fn rust_uses_of(file_path: &str, ctx: &Ctx) -> Rc<RustUses> {
         .captures_iter(&text)
         {
             uses.path_mods.insert(m.text(1).unwrap_or("").to_string());
+            let whole = m.get(0).expect("group 0");
+            if let Some(hit) = re!(r"\bmod\s+(?:r#)?[A-Za-z_]\w*$").captures(whole.as_str()).and_then(|c| c.get(0)) {
+                path_mod_at.insert(whole.start() + hit.start());
+            }
         }
+        // `mod name;` with no `#[path]` of its own.
+        for m in re!(r"\bmod\s+(?:r#)?([A-Za-z_]\w*)\s*;", "g").captures_iter(&text) {
+            let whole = m.get(0).expect("group 0");
+            if !path_mod_at.contains(&whole.start()) {
+                uses.mods.insert(m.text(1).unwrap_or("").to_string());
+            }
+        }
+        uses.main = re!(
+            r"^(?:pub\s+)?(?:async\s+)?fn\s+main\s*\(|^[ \t]*#!\[\s*no_main\s*\]",
+            "m"
+        )
+        .is_match(&text);
         uses.line_starts.push(0);
         for (i, b) in text.bytes().enumerate() {
             if b == b'\n' {
@@ -853,6 +1064,9 @@ pub struct RustModule {
     pub block: Option<usize>,
     pub root: bool,
     pub alt: Option<String>,
+    /// Each file a `#[path]` names for it, one per cfg: `file` is only the first
+    /// (`rust_cfg_choice_items` reads them all).
+    pub choices: Option<Vec<RustModule>>,
 }
 
 pub fn rust_join(dir: &str, name: &str) -> String {
@@ -875,27 +1089,345 @@ fn is_rust_target_root(file_path: &str, ctx: &Ctx) -> bool {
     let Some(dir) = rust_crate_dir_of(file_path, &graph) else {
         return re!(r"(?:^|/)(?:lib|main)\.rs$").is_match(file_path);
     };
-    if graph.crates.get(&dir).is_some_and(|c| c.lib.as_deref() == Some(file_path) || c.bins.iter().any(|b| b == file_path)) {
+    if graph.crates.get(&dir).is_some_and(|c| {
+        c.lib.as_deref() == Some(file_path)
+            || c.bins.iter().any(|b| b == file_path)
+            || c.others.iter().any(|b| b == file_path)
+    }) {
         return true;
     }
-    let rel = if dir.is_empty() { file_path } else { file_path.get(dir.len() + 1..).unwrap_or("") };
+    let rel = if dir.is_empty() {
+        file_path
+    } else {
+        file_path.get(dir.len() + 1..).unwrap_or("")
+    };
     re!(r"^(?:src/(?:lib|main)\.rs|src/bin/[^/]+(?:\.rs|/main\.rs)|(?:tests|examples|benches)/[^/]+(?:\.rs|/main\.rs)|build\.rs)$").is_match(rel)
 }
 
+/// A `#[path = "…"] mod name;` declaration.
+#[derive(Debug, Clone)]
+pub struct RustPathDecl {
+    /// The file it is written in.
+    file: String,
+    /// The offset of its `mod`: the module it is declared in.
+    at: usize,
+    name: String,
+    /// The file it loads, or `None` when a `cfg_attr` sets the path or the path leaves the project.
+    target: Option<String>,
+}
+
+memo_map!(RustPathDeclsMemo, String, Rc<Vec<RustPathDecl>>);
+memo_map!(
+    RustPathLoadsMemo,
+    (),
+    Rc<HashMap<String, Vec<RustPathDecl>>>
+);
+memo_map!(RustPathLoadersMemo, String, Rc<Vec<RustPathDecl>>);
+memo_map!(RustFilesByDirMemo, (), Rc<HashMap<String, Vec<String>>>);
+
+fn rust_attributes_before(code: &str, at: usize) -> Vec<(usize, usize)> {
+    let bytes = code.as_bytes();
+    let mut spans = Vec::new();
+    let mut p = at;
+    loop {
+        let mut q = p as isize - 1;
+        while q >= 0 && bytes[q as usize].is_ascii_whitespace() {
+            q -= 1;
+        }
+        if q < 0 || bytes[q as usize] != b']' {
+            break;
+        }
+        let mut depth = 0i32;
+        let mut open = -1isize;
+        let mut i = q;
+        while i >= 0 {
+            match bytes[i as usize] {
+                b']' => depth += 1,
+                b'[' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i -= 1;
+        }
+        let mut hash = open - 1;
+        while hash >= 0 && bytes[hash as usize].is_ascii_whitespace() {
+            hash -= 1;
+        }
+        if open < 0 || hash < 0 || bytes[hash as usize] != b'#' {
+            break;
+        }
+        spans.push((hash as usize, q as usize + 1));
+        p = hash as usize;
+    }
+    spans
+}
+
+fn rust_brace_depth(code: &str, at: usize) -> usize {
+    let mut depth = 0usize;
+    for b in code.as_bytes().iter().take(at) {
+        if *b == b'{' {
+            depth += 1;
+        } else if *b == b'}' && depth > 0 {
+            depth -= 1;
+        }
+    }
+    depth
+}
+
+/// A file's own `#[path = "…"] mod name;` declarations. The attribute's path is relative to the
+/// directory of the file it is written in — or, inside an inline `mod`, to that module's own
+/// directory (the Rust Reference, "The path attribute").
+fn rust_path_decls_in(file: &str, ctx: &Ctx) -> Rc<Vec<RustPathDecl>> {
+    memoized::<RustPathDeclsMemo>(ctx, file.to_string(), || {
+        Rc::new(rust_read_path_decls(file, ctx))
+    })
+}
+
+fn rust_read_path_decls(file: &str, ctx: &Ctx) -> Vec<RustPathDecl> {
+    if !file.ends_with(".rs") || !ctx.file_contains(file, "path") {
+        return Vec::new();
+    }
+    let Some(src) = ctx.read_file(file) else {
+        return Vec::new();
+    };
+    if !re!(r"\bpath\s*=").is_match(&src) {
+        return Vec::new();
+    }
+    let units = rust_units(&src);
+    let code = blank_rust_code(&units);
+    let mut decls = Vec::new();
+    let mut layout: Option<Rc<RustUses>> = None;
+    for m in re!(
+        r"(?:\bpub(?:\s*\([^()]*\))?\s+)?\bmod\s+(?:r#)?([A-Za-z_]\w*)\s*;",
+        "g"
+    )
+    .captures_iter(&code)
+    {
+        let whole = m.get(0).expect("group 0");
+        // `None` until an attribute decides: a plain path, or a `cfg_attr` that names one.
+        let mut decided: Option<Option<String>> = None;
+        for (from, to) in rust_attributes_before(&code, whole.start()) {
+            let raw = units.get(from..to).unwrap_or("");
+            if let Some(plain) = re!(r#"^#\s*\[\s*path\s*=\s*"([^"]*)"\s*\]$"#)
+                .captures(raw)
+                .and_then(|c| c.text(1))
+            {
+                decided = Some(Some(plain.replace('\\', "/")));
+            } else if decided.is_none()
+                && re!(r"^#\s*\[\s*cfg_attr\b[\s\S]*\bpath\s*=").is_match(raw)
+            {
+                decided = Some(None);
+            }
+        }
+        let Some(rel) = decided else { continue };
+        let mod_at = whole.start()
+            + re!(r"\bmod\s")
+                .captures(whole.as_str())
+                .and_then(|c| c.get(0))
+                .map(|g| g.start())
+                .unwrap_or(0);
+        let block = if rust_brace_depth(&code, mod_at) == 0 {
+            None
+        } else {
+            let uses = layout.get_or_insert_with(|| rust_uses_of(file, ctx));
+            rust_block_at(&uses.blocks, mod_at)
+        };
+        let mut base = rust_parent_dir(file);
+        if block.is_some() {
+            let rooted =
+                is_rust_target_root(file, ctx) || file == "mod.rs" || file.ends_with("/mod.rs");
+            if !rooted {
+                base = re!(r"\.rs$").replace_first(file, |_| String::new());
+            }
+            let uses = layout.get_or_insert_with(|| rust_uses_of(file, ctx));
+            let mut names = Vec::new();
+            let mut b = block;
+            while let Some(i) = b {
+                names.push(uses.blocks[i].name.clone());
+                b = uses.blocks[i].parent;
+            }
+            for name in names.iter().rev() {
+                base = rust_join(&base, name);
+            }
+        }
+        let loads = match rel {
+            Some(rel) if !re!(r"^(?:/|[A-Za-z]:)").is_match(&rel) => join_crate_dir(&base, &rel),
+            _ => None,
+        };
+        decls.push(RustPathDecl {
+            file: file.to_string(),
+            at: mod_at,
+            name: m.text(1).unwrap_or("").to_string(),
+            target: loads,
+        });
+    }
+    decls
+}
+
+/// Each file a `#[path]` of the project loads, and the declarations that load it.
+fn rust_path_loads(ctx: &Ctx) -> Rc<HashMap<String, Vec<RustPathDecl>>> {
+    memoized::<RustPathLoadsMemo>(ctx, (), || {
+        let mut out: HashMap<String, Vec<RustPathDecl>> = HashMap::new();
+        for file in ctx.get_all_files() {
+            for decl in rust_path_decls_in(&file, ctx).iter() {
+                let Some(target) = &decl.target else { continue };
+                out.entry(target.clone()).or_default().push(decl.clone());
+            }
+        }
+        Rc::new(out)
+    })
+}
+
+fn rust_files_by_dir(ctx: &Ctx) -> Rc<HashMap<String, Vec<String>>> {
+    memoized::<RustFilesByDirMemo>(ctx, (), || {
+        let mut index: HashMap<String, Vec<String>> = HashMap::new();
+        for file in ctx.get_all_files() {
+            if file.ends_with(".rs") {
+                index.entry(rust_parent_dir(&file)).or_default().push(file);
+            }
+        }
+        Rc::new(index)
+    })
+}
+
+/// Whether a file declares the inline modules `names` (outermost first) nested from its top level.
+fn rust_has_inline_modules(blocks: &[RustModBlock], names: &[String]) -> bool {
+    blocks.iter().enumerate().any(|(start, _)| {
+        let mut b = Some(start);
+        for name in names.iter().rev() {
+            let Some(i) = b else { return false };
+            if blocks[i].name != *name {
+                return false;
+            }
+            b = blocks[i].parent;
+        }
+        b.is_none()
+    })
+}
+
+/// Whether the regular rules place a Rust file: a crate root (one with a `fn main` of its own
+/// too), or `name.rs` / `name/mod.rs` that a plain `mod name;` declares in the module owning its
+/// directory, or in an inline module of a directory above it. Such a file is that module,
+/// whatever else loads it.
+fn rust_placed_by_name(file: &str, ctx: &Ctx) -> bool {
+    if is_rust_target_root(file, ctx) || rust_uses_of(file, ctx).main {
+        return true;
+    }
+    let dir = rust_parent_dir(file);
+    let is_mod = file == "mod.rs" || file.ends_with("/mod.rs");
+    if is_mod && dir.is_empty() {
+        return false;
+    }
+    let name = posix::basename_ext(if is_mod { dir.as_str() } else { file }, ".rs");
+    let mut parent = if is_mod { rust_parent_dir(&dir) } else { dir };
+    let mut inline: Vec<String> = Vec::new();
+    for _depth in 0..4 {
+        let mut owners = vec![rust_join(&parent, "mod.rs")];
+        if !parent.is_empty() {
+            owners.push(format!("{parent}.rs"));
+        }
+        for owner_file in rust_files_by_dir(ctx).get(&parent).into_iter().flatten() {
+            if is_rust_target_root(owner_file, ctx) {
+                owners.push(owner_file.clone());
+            }
+        }
+        for owner in owners {
+            if owner == file || !ctx.file_exists(&owner) {
+                continue;
+            }
+            let uses = rust_uses_of(&owner, ctx);
+            if uses.mods.contains(&name)
+                && (inline.is_empty() || rust_has_inline_modules(&uses.blocks, &inline))
+            {
+                return true;
+            }
+        }
+        if parent.is_empty() {
+            break;
+        }
+        inline.insert(0, posix::basename(&parent));
+        parent = rust_parent_dir(&parent);
+    }
+    false
+}
+
+/// The `#[path]` declarations that load `file`, when the regular rules do not place it.
+fn rust_path_loaders(file: &str, ctx: &Ctx) -> Rc<Vec<RustPathDecl>> {
+    memoized::<RustPathLoadersMemo>(ctx, file.to_string(), || {
+        if !file.ends_with(".rs") || rust_placed_by_name(file, ctx) {
+            Rc::new(Vec::new())
+        } else {
+            Rc::new(rust_path_loads(ctx).get(file).cloned().unwrap_or_default())
+        }
+    })
+}
+
+/// The one `#[path]` declaration that loads `file` as a module. `None` when the regular rules
+/// place it, none loads it, or several do (a helper each test loads).
+fn rust_path_claim(file: &str, ctx: &Ctx) -> Option<RustPathDecl> {
+    let loaders = rust_path_loaders(file, ctx);
+    if loaders.len() == 1 {
+        Some(loaders[0].clone())
+    } else {
+        None
+    }
+}
+
+/// Whether `file` is inside the module whose file is `owner_file` and whose submodules live under
+/// `owner_dir`: below that directory, or loaded by a `#[path]` written inside it.
+pub fn rust_file_under(file: &str, owner_dir: &str, owner_file: &str, ctx: &Ctx) -> bool {
+    let mut f = file.to_string();
+    for i in 0..8 {
+        if f.starts_with(&format!("{owner_dir}/")) || (i > 0 && f == owner_file) {
+            return true;
+        }
+        let Some(claim) = rust_path_claim(&f, ctx) else {
+            return false;
+        };
+        f = claim.file;
+    }
+    false
+}
+
 pub fn rust_file_module(file_path: &str, ctx: &Ctx) -> RustModule {
+    // A file a `#[path]` loads owns its directory, as a `mod.rs` does: rustc reads every such file so.
+    if rust_path_claim(file_path, ctx).is_some() {
+        return RustModule {
+            file: file_path.to_string(),
+            dir: rust_parent_dir(file_path),
+            block: None,
+            root: false,
+            alt: None,
+            choices: None,
+        };
+    }
     let root = is_rust_target_root(file_path, ctx);
     let dir = if root || file_path.ends_with("/mod.rs") || file_path == "mod.rs" {
         rust_parent_dir(file_path)
     } else {
         re!(r"\.rs$").replace_first(file_path, |_| String::new())
     };
-    RustModule { file: file_path.to_string(), dir, block: None, root, alt: None }
+    RustModule {
+        file: file_path.to_string(),
+        dir,
+        block: None,
+        root,
+        alt: None,
+        choices: None,
+    }
 }
 
 pub fn rust_module_at(file_path: &str, offset: usize, ctx: &Ctx) -> RustModule {
     let own = rust_file_module(file_path, ctx);
     let uses = rust_uses_of(file_path, ctx);
-    let Some(block) = rust_block_at(&uses.blocks, offset) else { return own };
+    let Some(block) = rust_block_at(&uses.blocks, offset) else {
+        return own;
+    };
     let mut names: Vec<&str> = Vec::new();
     let mut b = Some(block);
     while let Some(i) = b {
@@ -906,7 +1438,14 @@ pub fn rust_module_at(file_path: &str, offset: usize, ctx: &Ctx) -> RustModule {
     for name in names.iter().rev() {
         dir = rust_join(&dir, name);
     }
-    RustModule { file: file_path.to_string(), dir, block: Some(block), root: false, alt: None }
+    RustModule {
+        file: file_path.to_string(),
+        dir,
+        block: Some(block),
+        root: false,
+        alt: None,
+        choices: None,
+    }
 }
 
 /// The root of the crate `file_path` is in — what its `crate::` names: a test, example, bench or
@@ -914,18 +1453,60 @@ pub fn rust_module_at(file_path: &str, offset: usize, ctx: &Ctx) -> RustModule {
 /// manifests name, the nearest `lib.rs` or `main.rs` above it. `None` when no single root is the
 /// file's: a `tests/support/` module serves every test that declares it.
 pub fn rust_crate_root_module(file_path: &str, ctx: &Ctx) -> Option<RustModule> {
+    rust_crate_root_at(file_path, ctx, 0)
+}
+
+fn rust_crate_root_at(file_path: &str, ctx: &Ctx, depth: u32) -> Option<RustModule> {
+    // A file a `#[path]` loads is in the crate of the file that declares it.
+    if depth < 8 {
+        if let Some(claim) = rust_path_claim(file_path, ctx) {
+            return rust_crate_root_at(&claim.file, ctx, depth + 1);
+        }
+    }
     let graph = rust_crate_graph(ctx);
-    let Some(dir) = rust_crate_dir_of(file_path, &graph) else { return rust_nearest_root_module(file_path, ctx) };
-    let base = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let Some(dir) = rust_crate_dir_of(file_path, &graph) else {
+        return rust_nearest_root_module(file_path, ctx);
+    };
+    // An example, test or bench the manifest places with a path of its own is its own crate's root.
+    if graph
+        .crates
+        .get(&dir)
+        .is_some_and(|c| c.others.iter().any(|o| o == file_path))
+    {
+        return Some(RustModule {
+            file: file_path.to_string(),
+            dir: rust_parent_dir(file_path),
+            block: None,
+            root: true,
+            alt: None,
+            choices: None,
+        });
+    }
+    let base = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
     let rel = file_path.get(base.len()..).unwrap_or("");
     if let Some(t) = re!(r"^(src/bin|tests|examples|benches)/([^/]+?)(\.rs$|/)").captures(rel) {
         let file = if t.text(3) == Some(".rs") {
             file_path.to_string()
         } else {
-            format!("{base}{}/{}/main.rs", t.text(1).unwrap_or(""), t.text(2).unwrap_or(""))
+            format!(
+                "{base}{}/{}/main.rs",
+                t.text(1).unwrap_or(""),
+                t.text(2).unwrap_or("")
+            )
         };
         return if ctx.file_exists(&file) {
-            Some(RustModule { dir: rust_parent_dir(&file), file, block: None, root: true, alt: None })
+            Some(RustModule {
+                dir: rust_parent_dir(&file),
+                file,
+                block: None,
+                root: true,
+                alt: None,
+                choices: None,
+            })
         } else {
             None
         };
@@ -936,11 +1517,23 @@ pub fn rust_crate_root_module(file_path: &str, ctx: &Ctx) -> Option<RustModule> 
         let krate = graph.crates.get(&dir);
         let holds = |r: &&String| {
             let parent = rust_parent_dir(r);
-            (parent.is_empty() || file_path.starts_with(&format!("{parent}/"))) && ctx.file_exists(r)
+            (parent.is_empty() || file_path.starts_with(&format!("{parent}/")))
+                && ctx.file_exists(r)
         };
-        let mut own: Vec<&String> = krate.into_iter().flat_map(|c| c.lib.iter().chain(c.bins.iter())).filter(holds).collect();
+        let mut own: Vec<&String> = krate
+            .into_iter()
+            .flat_map(|c| c.lib.iter().chain(c.bins.iter()))
+            .filter(holds)
+            .collect();
         own.sort_by_key(|r| std::cmp::Reverse(r.len()));
-        return own.first().map(|r| RustModule { file: r.to_string(), dir: rust_parent_dir(r), block: None, root: true, alt: None });
+        return own.first().map(|r| RustModule {
+            file: r.to_string(),
+            dir: rust_parent_dir(r),
+            block: None,
+            root: true,
+            alt: None,
+            choices: None,
+        });
     }
     let lib = format!("{base}src/lib.rs");
     let main = format!("{base}src/main.rs");
@@ -949,9 +1542,24 @@ pub fn rust_crate_root_module(file_path: &str, ctx: &Ctx) -> Option<RustModule> 
     if !has_lib && !has_main {
         return None;
     }
-    let file = if has_main && (file_path == main || !has_lib) { main.clone() } else { lib.clone() };
-    let alt = if has_lib && has_main { Some(if file == lib { main } else { lib }) } else { None };
-    Some(RustModule { file, dir: format!("{base}src"), block: None, root: true, alt })
+    let file = if has_main && (file_path == main || !has_lib) {
+        main.clone()
+    } else {
+        lib.clone()
+    };
+    let alt = if has_lib && has_main {
+        Some(if file == lib { main } else { lib })
+    } else {
+        None
+    };
+    Some(RustModule {
+        file,
+        dir: format!("{base}src"),
+        block: None,
+        root: true,
+        alt,
+        choices: None,
+    })
 }
 
 /// For a file no manifest the project holds covers (sources indexed without their `Cargo.toml`),
@@ -962,7 +1570,14 @@ fn rust_nearest_root_module(file_path: &str, ctx: &Ctx) -> Option<RustModule> {
         for name in ["lib.rs", "main.rs"] {
             let file = rust_join(&dir, name);
             if ctx.file_exists(&file) {
-                return Some(RustModule { file, dir, block: None, root: true, alt: None });
+                return Some(RustModule {
+                    file,
+                    dir,
+                    block: None,
+                    root: true,
+                    alt: None,
+                    choices: None,
+                });
             }
         }
         if dir.is_empty() {
@@ -980,9 +1595,22 @@ fn rust_lib_module(crate_dir: &str, ctx: &Ctx) -> Option<RustModule> {
         .crates
         .get(crate_dir)
         .and_then(|c| c.lib.clone())
-        .unwrap_or_else(|| if crate_dir.is_empty() { "src/lib.rs".to_string() } else { format!("{crate_dir}/src/lib.rs") });
+        .unwrap_or_else(|| {
+            if crate_dir.is_empty() {
+                "src/lib.rs".to_string()
+            } else {
+                format!("{crate_dir}/src/lib.rs")
+            }
+        });
     if ctx.file_exists(&file) {
-        Some(RustModule { dir: rust_parent_dir(&file), file, block: None, root: true, alt: None })
+        Some(RustModule {
+            dir: rust_parent_dir(&file),
+            file,
+            block: None,
+            root: true,
+            alt: None,
+            choices: None,
+        })
     } else {
         None
     }
@@ -997,17 +1625,69 @@ pub enum Walked {
 }
 
 pub fn rust_submodule(m: &RustModule, name: &str, ctx: &Ctx, depth: u32) -> Option<RustModule> {
+    if let Some(choices) = &m.choices {
+        let modules: Vec<RustModule> =
+            choices.iter().filter_map(|c| rust_submodule(c, name, ctx, depth)).collect();
+        return rust_cfg_choice(modules);
+    }
     let dir = rust_join(&m.dir, name);
     let layout = rust_uses_of(&m.file, ctx);
     if layout.path_mods.contains(name) {
-        return None;
+        // One `#[path]` names the file, whatever else loads it too. Cfg alternatives name a
+        // file each — all of them, one per choice. A `cfg_attr`, or a path out of the project,
+        // names no file: a 2015 fallback must not walk past it.
+        let decls: Vec<RustPathDecl> = rust_path_decls_in(&m.file, ctx)
+            .iter()
+            .filter(|d| d.name == name && rust_block_at(&layout.blocks, d.at) == m.block)
+            .cloned()
+            .collect();
+        let mut files: Vec<String> = Vec::new();
+        for decl in &decls {
+            let Some(target) = decl.target.as_deref().filter(|target| ctx.file_exists(target)) else {
+                return None;
+            };
+            if !files.iter().any(|f| f == target) {
+                files.push(target.to_string());
+            }
+        }
+        return rust_cfg_choice(
+            files
+                .into_iter()
+                .map(|file| RustModule {
+                    dir: rust_parent_dir(&file),
+                    file,
+                    block: None,
+                    root: false,
+                    alt: None,
+                    choices: None,
+                })
+                .collect(),
+        );
     }
-    if let Some(block) = layout.blocks.iter().position(|b| b.name == name && b.parent == m.block) {
-        return Some(RustModule { file: m.file.clone(), dir, block: Some(block), root: false, alt: None });
+    if let Some(block) = layout
+        .blocks
+        .iter()
+        .position(|b| b.name == name && b.parent == m.block)
+    {
+        return Some(RustModule {
+            file: m.file.clone(),
+            dir,
+            block: Some(block),
+            root: false,
+            alt: None,
+            choices: None,
+        });
     }
     for file in [format!("{dir}.rs"), format!("{dir}/mod.rs")] {
         if ctx.file_exists(&file) {
-            return Some(RustModule { file, dir, block: None, root: false, alt: None });
+            return Some(RustModule {
+                file,
+                dir,
+                block: None,
+                root: false,
+                alt: None,
+                choices: None,
+            });
         }
     }
     if depth >= 8 {
@@ -1024,6 +1704,18 @@ pub fn rust_submodule(m: &RustModule, name: &str, ctx: &Ctx, depth: u32) -> Opti
     None
 }
 
+/// One module for the cfg alternatives `mods`; none for none.
+fn rust_cfg_choice(mut mods: Vec<RustModule>) -> Option<RustModule> {
+    if mods.len() > 1 {
+        let choices = mods.clone();
+        let mut first = mods.remove(0);
+        first.choices = Some(choices);
+        Some(first)
+    } else {
+        mods.pop()
+    }
+}
+
 fn rust_super_module(m: &RustModule, ctx: &Ctx) -> Option<RustModule> {
     if let Some(block) = m.block {
         let layout = rust_uses_of(&m.file, ctx);
@@ -1034,9 +1726,14 @@ fn rust_super_module(m: &RustModule, ctx: &Ctx) -> Option<RustModule> {
                 block: Some(parent),
                 root: false,
                 alt: None,
+                choices: None,
             }),
             None => Some(rust_file_module(&m.file, ctx)),
         };
+    }
+    // A file a `#[path]` loads is declared where that attribute is, wherever the file lies.
+    if let Some(claim) = rust_path_claim(&m.file, ctx) {
+        return Some(rust_module_at(&claim.file, claim.at, ctx));
     }
     if m.root {
         return None;
@@ -1058,7 +1755,9 @@ fn rust_super_module(m: &RustModule, ctx: &Ctx) -> Option<RustModule> {
 
 /// Follow `segs` (`crate`, `self`, `super`, a child module, a dependency crate…) from `from`.
 pub fn rust_walk_modules(segs: &[String], from: &RustModule, ctx: &Ctx, depth: u32) -> Walked {
-    let Some(first) = segs.first() else { return Walked::Module(from.clone()) };
+    let Some(first) = segs.first() else {
+        return Walked::Module(from.clone());
+    };
     let mut at: Option<RustModule>;
     if first == "crate" {
         at = rust_crate_root_module(&from.file, ctx);
@@ -1089,7 +1788,9 @@ pub fn rust_walk_modules(segs: &[String], from: &RustModule, ctx: &Ctx, depth: u
         }
     }
     for seg in &segs[1..] {
-        let Some(cur) = at else { return Walked::Unknown };
+        let Some(cur) = at else {
+            return Walked::Unknown;
+        };
         at = if seg == "self" {
             Some(cur)
         } else if seg == "super" {
@@ -1128,7 +1829,10 @@ fn rust_declared_items(m: &RustModule, name: &str, ctx: &Ctx, public_only: bool)
         let layout = rust_uses_of(file, ctx);
         let block = if *file == m.file { m.block } else { None };
         for n in ctx.get_nodes_in_file_named(file, name) {
-            if n.language.as_str() != "rust" || n.qualified_name != name || !is_rust_module_item_kind(n.kind) {
+            if n.language.as_str() != "rust"
+                || n.qualified_name != name
+                || !is_rust_module_item_kind(n.kind)
+            {
                 continue;
             }
             if public_only && n.visibility == Some(Visibility::Private) {
@@ -1143,10 +1847,25 @@ fn rust_declared_items(m: &RustModule, name: &str, ctx: &Ctx, public_only: bool)
     out
 }
 
-fn rust_module_items(m: &RustModule, name: &str, ctx: &Ctx, seen: &mut HashSet<String>, public_only: bool) -> Option<Vec<Rc<Node>>> {
+fn rust_module_items(
+    m: &RustModule,
+    name: &str,
+    ctx: &Ctx,
+    seen: &mut HashSet<String>,
+    public_only: bool,
+) -> Option<Vec<Rc<Node>>> {
+    if let Some(choices) = &m.choices {
+        return rust_cfg_choice_items(choices, name, ctx, seen, public_only);
+    }
     let uses = rust_uses_of(&m.file, ctx);
     let open = m.block.map(|b| uses.blocks[b].open as i64).unwrap_or(-1);
-    let key = format!("{}\0{}\0{}\0{}", m.file, open, name, if public_only { 1 } else { 0 });
+    let key = format!(
+        "{}\0{}\0{}\0{}",
+        m.file,
+        open,
+        name,
+        if public_only { 1 } else { 0 }
+    );
     if seen.contains(&key) {
         return Some(Vec::new());
     }
@@ -1163,8 +1882,16 @@ fn rust_module_items(m: &RustModule, name: &str, ctx: &Ctx, seen: &mut HashSet<S
             return Some(declared);
         }
         // (A `use` in a function's body binds its name there alone.)
-        let here = |p: &&RustUsePath| (p.pub_ || !public_only) && p.scope.is_none() && rust_block_at(&uses.blocks, p.at) == m.block;
-        let named: Vec<&RustUsePath> = uses.paths.get(name).map(|v| v.iter().filter(here).collect()).unwrap_or_default();
+        let here = |p: &&RustUsePath| {
+            (p.pub_ || !public_only)
+                && p.scope.is_none()
+                && rust_block_at(&uses.blocks, p.at) == m.block
+        };
+        let named: Vec<&RustUsePath> = uses
+            .paths
+            .get(name)
+            .map(|v| v.iter().filter(here).collect())
+            .unwrap_or_default();
         let mut found: Vec<Rc<Node>> = Vec::new();
         for p in named {
             found.extend(rust_use_path_items(&p.segs, m, ctx, seen)?);
@@ -1181,6 +1908,39 @@ fn rust_module_items(m: &RustModule, name: &str, ctx: &Ctx, seen: &mut HashSet<S
     result
 }
 
+/// The items named `name` in a module whose cfg alternatives name a file each. What only one
+/// of them holds is that one's, whichever the build takes: tokio's
+/// `crate::process::unix::GlobalOrphanQueue` reaches `unix/mod.rs` through
+/// `mod unix { pub(crate) use super::imp::*; }`, as `windows.rs` has none. A name two of them
+/// hold is the build's choice: none, as for any module that can't be followed.
+fn rust_cfg_choice_items(
+    choices: &[RustModule],
+    name: &str,
+    ctx: &Ctx,
+    seen: &mut HashSet<String>,
+    public_only: bool,
+) -> Option<Vec<Rc<Node>>> {
+    let mut found: Vec<Rc<Node>> = Vec::new();
+    let mut unknown = false;
+    for choice in choices {
+        match rust_module_items(choice, name, ctx, seen, public_only) {
+            None => unknown = true,
+            Some(items) if !items.is_empty() => {
+                if !found.is_empty() {
+                    return None;
+                }
+                found = items;
+            }
+            Some(_) => {}
+        }
+    }
+    if !found.is_empty() || !unknown {
+        Some(found)
+    } else {
+        None
+    }
+}
+
 fn rust_globbed_items(
     globs: &[&RustUsePath],
     from_of: &dyn Fn(&RustUsePath) -> RustModule,
@@ -1195,7 +1955,13 @@ fn rust_globbed_items(
         let items = match rust_walk_modules(&g.segs, &from, ctx, 0) {
             Walked::Outside => continue,
             Walked::Unknown => None,
-            Walked::Module(module) => rust_module_items(&module, name, ctx, seen, !rust_module_within(&from, &module, ctx)),
+            Walked::Module(module) => rust_module_items(
+                &module,
+                name,
+                ctx,
+                seen,
+                !rust_module_within(&from, &module, ctx),
+            ),
         };
         match items {
             None => unknown = true,
@@ -1210,6 +1976,10 @@ fn rust_globbed_items(
 }
 
 fn rust_module_within(inner: &RustModule, outer: &RustModule, ctx: &Ctx) -> bool {
+    rust_module_within_at(inner, outer, ctx, 0)
+}
+
+fn rust_module_within_at(inner: &RustModule, outer: &RustModule, ctx: &Ctx, depth: u32) -> bool {
     if inner.file == outer.file {
         let layout = rust_uses_of(&inner.file, ctx);
         let mut b = inner.block;
@@ -1223,14 +1993,33 @@ fn rust_module_within(inner: &RustModule, outer: &RustModule, ctx: &Ctx) -> bool
             }
         }
     }
-    let prefix = if outer.dir.is_empty() { String::new() } else { format!("{}/", outer.dir) };
-    inner.file.starts_with(&prefix) && !(outer.dir.is_empty() && outer.block.is_some())
+    let prefix = if outer.dir.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", outer.dir)
+    };
+    if inner.file.starts_with(&prefix) && !(outer.dir.is_empty() && outer.block.is_some()) {
+        return true;
+    }
+    // A file a `#[path]` loads is inside the module that declares it.
+    if depth < 8 && inner.block.is_none() {
+        if let Some(claim) = rust_path_claim(&inner.file, ctx) {
+            let declared = rust_module_at(&claim.file, claim.at, ctx);
+            return rust_module_within_at(&declared, outer, ctx, depth + 1);
+        }
+    }
+    false
 }
 
 /// The items a `use` path names from `from`: its last segment's, in the module the rest walks to —
 /// or, when that segment's parent is an enum the module holds, the enum's variant:
 /// `use crate::models::Mode::Fast` names `Fast` of that `Mode`, never a namesake's.
-pub fn rust_use_path_items(segs: &[String], from: &RustModule, ctx: &Ctx, seen: &mut HashSet<String>) -> Option<Vec<Rc<Node>>> {
+pub fn rust_use_path_items(
+    segs: &[String],
+    from: &RustModule,
+    ctx: &Ctx,
+    seen: &mut HashSet<String>,
+) -> Option<Vec<Rc<Node>>> {
     if segs.len() < 2 {
         return None;
     }
@@ -1240,27 +2029,44 @@ pub fn rust_use_path_items(segs: &[String], from: &RustModule, ctx: &Ctx, seen: 
         Walked::Module(m) => return rust_module_items(&m, last, ctx, seen, false),
         Walked::Unknown => {}
     }
-    let owner = if segs.len() > 2 { rust_walk_modules(&segs[..segs.len() - 2], from, ctx, 0) } else { Walked::Module(from.clone()) };
+    let owner = if segs.len() > 2 {
+        rust_walk_modules(&segs[..segs.len() - 2], from, ctx, 0)
+    } else {
+        Walked::Module(from.clone())
+    };
     let owner = match owner {
         Walked::Outside => return Some(Vec::new()),
         Walked::Unknown => return None,
         Walked::Module(m) => m,
     };
-    let enums: Vec<Rc<Node>> =
-        rust_module_items(&owner, &segs[segs.len() - 2], ctx, seen, false).unwrap_or_default().into_iter().filter(|n| n.kind == NodeKind::Enum).collect();
+    let enums: Vec<Rc<Node>> = rust_module_items(&owner, &segs[segs.len() - 2], ctx, seen, false)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n.kind == NodeKind::Enum)
+        .collect();
     if enums.is_empty() {
         return None;
     }
-    Some(enums.iter().flat_map(|e| rust_enum_variants(e, last, ctx)).collect())
+    Some(
+        enums
+            .iter()
+            .flat_map(|e| rust_enum_variants(e, last, ctx))
+            .collect(),
+    )
 }
 
 /// The variant `name` of a Rust enum: the member written inside its braces, not a namesake's in
 /// the same file.
-fn rust_enum_variants(e: &Node, name: &str, ctx: &Ctx) -> Vec<Rc<Node>> {
+pub(crate) fn rust_enum_variants(e: &Node, name: &str, ctx: &Ctx) -> Vec<Rc<Node>> {
     let qualified = format!("{}::{name}", e.qualified_name);
     ctx.get_nodes_in_file_named(&e.file_path, name)
         .into_iter()
-        .filter(|n| n.kind == NodeKind::EnumMember && n.qualified_name == qualified && n.start_line >= e.start_line && n.start_line <= e.end_line)
+        .filter(|n| {
+            n.kind == NodeKind::EnumMember
+                && n.qualified_name == qualified
+                && n.start_line >= e.start_line
+                && n.start_line <= e.end_line
+        })
         .collect()
 }
 
@@ -1272,18 +2078,31 @@ memo_map!(RustGlobItemsMemo, String, Option<Rc<HashSet<String>>>);
 pub fn rust_use_items(name: &str, file_path: &str, ctx: &Ctx) -> Option<Rc<HashSet<String>>> {
     memoized::<RustUseItemsMemo>(ctx, format!("{file_path}\0{name}"), || {
         let uses = rust_uses_of(file_path, ctx);
-        let paths = if uses.balanced { uses.paths.get(name) } else { None };
+        let paths = if uses.balanced {
+            uses.paths.get(name)
+        } else {
+            None
+        };
         rust_paths_items(paths?, file_path, ctx).map(Rc::new)
     })
 }
 
 /// What `use` paths of `file_path` name, each walked from the module it is written in, in the
 /// order they are found; `None` if one can't be followed.
-pub fn rust_paths_nodes(paths: &[RustUsePath], file_path: &str, ctx: &Ctx) -> Option<Vec<Rc<Node>>> {
+pub fn rust_paths_nodes(
+    paths: &[RustUsePath],
+    file_path: &str,
+    ctx: &Ctx,
+) -> Option<Vec<Rc<Node>>> {
     let mut found: Vec<Rc<Node>> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for p in paths {
-        let items = rust_use_path_items(&p.segs, &rust_module_at(file_path, p.at, ctx), ctx, &mut HashSet::new())?;
+        let items = rust_use_path_items(
+            &p.segs,
+            &rust_module_at(file_path, p.at, ctx),
+            ctx,
+            &mut HashSet::new(),
+        )?;
         found.extend(items.into_iter().filter(|n| seen.insert(n.id.clone())));
     }
     Some(found)
@@ -1291,7 +2110,8 @@ pub fn rust_paths_nodes(paths: &[RustUsePath], file_path: &str, ctx: &Ctx) -> Op
 
 /// The ids of what `use` paths of `file_path` name ([`rust_paths_nodes`]).
 fn rust_paths_items(paths: &[RustUsePath], file_path: &str, ctx: &Ctx) -> Option<HashSet<String>> {
-    rust_paths_nodes(paths, file_path, ctx).map(|nodes| nodes.iter().map(|n| n.id.clone()).collect())
+    rust_paths_nodes(paths, file_path, ctx)
+        .map(|nodes| nodes.iter().map(|n| n.id.clone()).collect())
 }
 
 /// The `use`s that bind a name where a reference is ([`rust_visible_use`]).
@@ -1309,7 +2129,12 @@ pub struct RustVisibleUse {
 /// written in, at the file's top level or in an inline `mod`, whose `use`s neither the modules
 /// around it nor those inside it see. `None` when none binds it there, or the file's braces don't
 /// close.
-pub fn rust_visible_use(name: &str, file_path: &str, offset: usize, ctx: &Ctx) -> Option<RustVisibleUse> {
+pub fn rust_visible_use(
+    name: &str,
+    file_path: &str,
+    offset: usize,
+    ctx: &Ctx,
+) -> Option<RustVisibleUse> {
     let uses = rust_uses_of(file_path, ctx);
     let project = uses.paths.get(name);
     let std = uses.std_paths.get(name);
@@ -1319,17 +2144,30 @@ pub fn rust_visible_use(name: &str, file_path: &str, offset: usize, ctx: &Ctx) -
     let module = rust_block_at(&uses.blocks, offset);
     let mut best: Option<RustVisibleUse> = None;
     let mut take = |p: &RustUsePath, is_std: bool| {
-        if p.scope.is_some_and(|s| offset <= s.open || offset >= s.close) || rust_block_at(&uses.blocks, p.at) != module {
+        if p.scope
+            .is_some_and(|s| offset <= s.open || offset >= s.close)
+            || rust_block_at(&uses.blocks, p.at) != module
+        {
             return;
         }
         let block = p.scope.map_or(-1, |s| s.open as isize);
         match &best {
             Some(b) if block < b.block => return,
             Some(b) if block == b.block => {}
-            _ => best = Some(RustVisibleUse { paths: Vec::new(), std: Vec::new(), block }),
+            _ => {
+                best = Some(RustVisibleUse {
+                    paths: Vec::new(),
+                    std: Vec::new(),
+                    block,
+                })
+            }
         }
         let b = best.as_mut().expect("set above");
-        if is_std { b.std.push(p.clone()) } else { b.paths.push(p.clone()) }
+        if is_std {
+            b.std.push(p.clone())
+        } else {
+            b.paths.push(p.clone())
+        }
     };
     for p in project.into_iter().flatten() {
         take(p, false);
@@ -1346,14 +2184,20 @@ pub fn rust_visible_use(name: &str, file_path: &str, offset: usize, ctx: &Ctx) -
 /// Where no `use` binds it, those of the whole file ([`rust_use_items`]), as a reference no scope
 /// reads.
 pub fn rust_use_items_at(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<Rc<HashSet<String>>> {
-    let Some(visible) = rust_visible_use(name, &r.file_path, rust_use_ref_offset(r, ctx), ctx) else {
+    let Some(visible) = rust_visible_use(name, &r.file_path, rust_use_ref_offset(r, ctx), ctx)
+    else {
         return rust_use_items(name, &r.file_path, ctx);
     };
     if visible.paths.is_empty() {
         return Some(Rc::new(HashSet::new()));
     }
-    let key = format!("{}\0{name}\0{}\0{}", r.file_path, visible.block, visible.paths[0].at);
-    memoized::<RustVisibleItemsMemo>(ctx, key, || rust_paths_items(&visible.paths, &r.file_path, ctx).map(Rc::new))
+    let key = format!(
+        "{}\0{name}\0{}\0{}",
+        r.file_path, visible.block, visible.paths[0].at
+    );
+    memoized::<RustVisibleItemsMemo>(ctx, key, || {
+        rust_paths_items(&visible.paths, &r.file_path, ctx).map(Rc::new)
+    })
 }
 
 /// The offset of a reference in its file's text (its line's start, plus its column).
@@ -1369,14 +2213,30 @@ pub fn rust_glob_items(name: &str, file_path: &str, ctx: &Ctx) -> Option<Rc<Hash
             return None;
         }
         let globs: Vec<&RustUsePath> = uses.glob_paths.iter().collect();
-        let items = rust_globbed_items(&globs, &|g| rust_module_at(file_path, g.at, ctx), name, ctx, &mut HashSet::new())?;
+        let items = rust_globbed_items(
+            &globs,
+            &|g| rust_module_at(file_path, g.at, ctx),
+            name,
+            ctx,
+            &mut HashSet::new(),
+        )?;
         Some(Rc::new(items.iter().map(|n| n.id.clone()).collect()))
     })
 }
 
 /// Whether a glob import brings `candidate` in under `name`.
-pub fn rust_glob_scope(name: &str, candidate: &Node, uses: &RustUses, r: &UnresolvedRef, ctx: &Ctx) -> bool {
-    let ids = if is_rust_module_item_kind(candidate.kind) { rust_glob_items(name, &r.file_path, ctx) } else { None };
+pub fn rust_glob_scope(
+    name: &str,
+    candidate: &Node,
+    uses: &RustUses,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> bool {
+    let ids = if is_rust_module_item_kind(candidate.kind) {
+        rust_glob_items(name, &r.file_path, ctx)
+    } else {
+        None
+    };
     match ids {
         None => rust_glob_covers(uses, candidate, r),
         Some(ids) => ids.contains(&candidate.id),
@@ -1411,19 +2271,28 @@ pub fn rust_module_dir(file_path: &str) -> String {
 }
 
 /// Whether `candidate` is visible from `r`'s file (a private item is visible from its module and below).
-pub fn is_rust_item_visible_from(candidate: &Node, r: &UnresolvedRef) -> bool {
+pub fn is_rust_item_visible_from(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     if candidate.language.as_str() != "rust"
         || candidate.visibility != Some(Visibility::Private)
         || !is_rust_module_item_kind(candidate.kind)
     {
         return true;
     }
-    candidate.file_path == r.file_path || r.file_path.starts_with(&format!("{}/", rust_module_dir(&candidate.file_path)))
+    candidate.file_path == r.file_path
+        || rust_file_under(
+            &r.file_path,
+            &rust_module_dir(&candidate.file_path),
+            &candidate.file_path,
+            ctx,
+        )
 }
 
 pub fn is_rust_associated_item(n: &Node) -> bool {
     n.language.as_str() == "rust"
-        && matches!(n.kind, NodeKind::TypeAlias | NodeKind::Variable | NodeKind::Constant)
+        && matches!(
+            n.kind,
+            NodeKind::TypeAlias | NodeKind::Variable | NodeKind::Constant
+        )
         && n.qualified_name.contains("::")
 }
 
@@ -1463,14 +2332,29 @@ mod tests {
     use super::*;
 
     fn bindings(tree: &str) -> Vec<(Vec<String>, Option<String>)> {
-        rust_use_tree_bindings(tree).into_iter().map(|b| (b.segs, b.local)).collect()
+        rust_use_tree_bindings(tree)
+            .into_iter()
+            .map(|b| (b.segs, b.local))
+            .collect()
     }
 
     #[test]
     fn a_use_tree_binds_each_leaf_with_its_path() {
         let got = bindings("crate::a::{b, c as d, e::{self, f}, *}");
-        let paths: Vec<String> = got.iter().map(|(s, l)| format!("{}={}", s.join("::"), l.clone().unwrap_or("*".into()))).collect();
-        assert_eq!(paths, ["crate::a::b=b", "crate::a::c=d", "crate::a::e=e", "crate::a::e::f=f", "crate::a=*"]);
+        let paths: Vec<String> = got
+            .iter()
+            .map(|(s, l)| format!("{}={}", s.join("::"), l.clone().unwrap_or("*".into())))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "crate::a::b=b",
+                "crate::a::c=d",
+                "crate::a::e=e",
+                "crate::a::e::f=f",
+                "crate::a=*"
+            ]
+        );
     }
 
     #[test]
@@ -1497,7 +2381,11 @@ mod tests {
         let keys: Vec<(String, DepKind)> = deps.iter().map(|d| (d.key.clone(), d.kind)).collect();
         assert_eq!(
             keys,
-            [("serde".to_string(), DepKind::Normal), ("foo_bar".to_string(), DepKind::Normal), ("tempfile".to_string(), DepKind::Dev)]
+            [
+                ("serde".to_string(), DepKind::Normal),
+                ("foo_bar".to_string(), DepKind::Normal),
+                ("tempfile".to_string(), DepKind::Dev)
+            ]
         );
         assert_eq!(deps[1].path.as_deref(), Some("../foo"));
         assert_eq!(deps[1].pkg, "foo_pkg");

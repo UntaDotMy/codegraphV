@@ -600,6 +600,59 @@ fn ensure_gitignore(gitignore_path: &Path) -> bool {
     std::fs::write(gitignore_path, GITIGNORE_CONTENT).is_ok()
 }
 
+/// The local-only `.codegraphV/.gitignore` (upstream fb71a9f4, #910): the wildcard alone, which
+/// ignores this file too, so nothing of CodeGraphV's shows in `git status`. It carries no header,
+/// so [`ensure_gitignore`] treats it as the user's own and leaves it alone from then on.
+const LOCAL_ONLY_GITIGNORE_CONTENT: &str = "*\n";
+
+/// What [`make_gitignore_local_only`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalOnlyGitignore {
+    /// The file is local-only now.
+    Written,
+    /// It already was.
+    Unchanged,
+    /// It holds rules CodeGraphV didn't write, so it was left alone.
+    Customized,
+    /// It is committed, so rewriting it would show up as a change. Left alone.
+    Tracked,
+}
+
+/// Whether git tracks `file`. False outside a repository, or without git.
+fn is_tracked_by_git(file: &Path) -> bool {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else { return false };
+    std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(name)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Make `.codegraphV/.gitignore` local-only, for `codegraphV init --local-only`. Only a file
+/// CodeGraphV generated is replaced: anything else, or one a project has committed to share the
+/// rule, stays as it is and the caller says why.
+pub fn make_gitignore_local_only(project_root: &str) -> std::io::Result<LocalOnlyGitignore> {
+    let path = Path::new(&get_code_graph_dir(project_root)).join(".gitignore");
+    let existing = std::fs::read_to_string(&path).ok().map(|s| s.replace("\r\n", "\n"));
+    if let Some(existing) = &existing {
+        if existing == LOCAL_ONLY_GITIGNORE_CONTENT {
+            return Ok(LocalOnlyGitignore::Unchanged);
+        }
+        if existing != GITIGNORE_CONTENT && !is_stale_default_gitignore(existing) {
+            return Ok(LocalOnlyGitignore::Customized);
+        }
+        if is_tracked_by_git(&path) {
+            return Ok(LocalOnlyGitignore::Tracked);
+        }
+    }
+    std::fs::write(&path, LOCAL_ONLY_GITIGNORE_CONTENT)?;
+    Ok(LocalOnlyGitignore::Written)
+}
+
 /// Create the `.codegraph` directory structure. Errs only if `codegraph.db` already carries the
 /// schema, not just because `.codegraph/` exists.
 pub fn create_directory(project_root: &str) -> Result<(), String> {

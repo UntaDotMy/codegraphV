@@ -27,28 +27,60 @@ fn on_own_line(text: &str, at: usize, len: usize) -> bool {
 
 /// Well-formed `start … end` blocks, each marker alone on its line; a stray marker is left alone.
 fn sections(text: &str, start: &str, end: &str) -> Vec<(usize, usize)> {
+    checked_sections(text, start, end).unwrap_or_default()
+}
+
+pub fn validate(text: &str, start: &str, end: &str) -> Result<(), &'static str> {
+    let blocks = checked_sections(text, start, end)?;
+    if blocks.len() > 1 { return Err("Multiple instruction blocks: resolve ambiguous ownership before installing or removing"); }
+    Ok(())
+}
+
+fn checked_sections(text: &str, start: &str, end: &str) -> Result<Vec<(usize, usize)>, &'static str> {
     let mut marks = Vec::new();
-    for (marker, is_start) in [(start, true), (end, false)] {
-        let mut from = 0;
-        while let Some(i) = text[from..].find(marker) {
-            let at = from + i;
-            if on_own_line(text, at, marker.len()) {
-                marks.push((at, is_start));
-            }
-            from = at + marker.len();
+    let mut fence: Option<(u8, usize)> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let indentation = line.chars().take_while(|c| *c == ' ').count();
+        if indentation >= 4 || line.starts_with('\t') {
+            offset += line.len();
+            continue;
         }
+        let trimmed = line.trim_start_matches([' ', '\t', '\u{feff}']);
+        let bytes = trimmed.as_bytes();
+        let run = bytes.first().map_or(0, |first| bytes.iter().take_while(|b| *b == first).count());
+        if let Some((ch, len)) = fence {
+            if bytes.first() == Some(&ch) && run >= len && trimmed[run..].trim().is_empty() {
+                fence = None;
+            }
+        } else if run >= 3 && matches!(bytes.first(), Some(b'`' | b'~')) {
+            fence = Some((bytes[0], run));
+        } else {
+            for (marker, is_start) in [(start, true), (end, false)] {
+                if let Some(i) = line.find(marker) {
+                    let at = offset + i;
+                    if on_own_line(text, at, marker.len()) { marks.push((at, is_start)); }
+                }
+            }
+        }
+        offset += line.len();
     }
+    if fence.is_some() { return Err("Unclosed Markdown fence: refusing to edit instructions"); }
     marks.sort();
     let mut out = Vec::new();
     let mut open = None;
     for (at, is_start) in marks {
         if is_start {
+            if open.is_some() { return Err("Nested instruction markers: refusing to edit instructions"); }
             open = Some(at);
         } else if let Some(s) = open.take() {
             out.push((s, at + end.len()));
+        } else {
+            return Err("Unmatched instruction end marker: refusing to edit instructions");
         }
     }
-    out
+    if open.is_some() { return Err("Unclosed instruction marker: refusing to edit instructions"); }
+    Ok(out)
 }
 
 fn drop_sections(text: &str, sections: &[(usize, usize)], eol: &str) -> String {
@@ -108,6 +140,64 @@ pub fn strip(text: &str, start: &str, end: &str) -> Option<String> {
     (!found.is_empty()).then(|| drop_sections(text, &found, line_break_of(text)))
 }
 
+// Metadata describes only bytes added by this installer, never a backup of user content.
+// Keeping it inside the managed block lets reinstall retain exact append boundaries.
+const FILE_META: &str = "<!-- codegraphV-file-v1 ";
+
+fn file_meta(block: &str) -> Option<(bool, usize)> {
+    let line = block.lines().nth(1)?;
+    let payload = line.strip_prefix(FILE_META)?.strip_suffix(" -->")?;
+    let (exists, separator) = payload.split_once(':')?;
+    let separator: usize = separator.parse().ok()?;
+    if separator > 4 { return None; }
+    Some((match exists { "existing" => true, "created" => false, _ => return None }, separator))
+}
+
+fn with_meta(body: &str, eol: &str, existing: bool, separator: usize) -> String {
+    let body = with_line_breaks(body, eol);
+    let (first, rest) = body.split_once(eol).unwrap_or((&body, ""));
+    let kind = if existing { "existing" } else { "created" };
+    format!("{first}{eol}{FILE_META}{kind}:{separator} -->{eol}{rest}")
+}
+
+pub fn upsert_preserving(text: Option<&str>, body: &str, start: &str, end: &str) -> String {
+    if let Some(text) = text {
+        if let Some(&(s, e)) = sections(text, start, end).first() {
+            if let Some((existing, separator)) = file_meta(&text[s..e]) {
+                let body = with_meta(body, line_break_of(&text[s..e]), existing, separator);
+                return format!("{}{body}{}", &text[..s], &text[e..]);
+            }
+            // Older installations have no append-boundary metadata.
+            return upsert(Some(text), body, start, end);
+        }
+    }
+    let before = text.unwrap_or("");
+    let eol = line_break_of(before);
+    let separator = if before.is_empty() { String::new() }
+        else if before.ends_with(&eol.repeat(2)) { String::new() }
+        else if before.ends_with(eol) { eol.to_owned() }
+        else { eol.repeat(2) };
+    let body = with_meta(body, eol, text.is_some(), separator.len());
+    format!("{before}{separator}{body}{eol}")
+}
+
+/// Outer None means no block; inner None means a newly created file is now empty.
+pub fn strip_preserving(text: &str, start: &str, end: &str) -> Option<Option<String>> {
+    let found = sections(text, start, end);
+    let &(s, e) = found.first()?;
+    if let Some((existing, separator)) = file_meta(&text[s..e]) {
+        let eol = line_break_of(&text[s..e]);
+        let prefix = &text[..s];
+        let owned_separator = eol.repeat(separator / eol.len());
+        let prefix = prefix.strip_suffix(&owned_separator).unwrap_or(prefix);
+        let suffix = text[e..].strip_prefix(eol).unwrap_or(&text[e..]);
+        let rest = format!("{prefix}{suffix}");
+        return Some((existing || !rest.is_empty()).then_some(rest));
+    }
+    // Legacy blocks cannot reconstruct a missing final newline or original file existence.
+    strip(text, start, end).map(|rest| (!is_blank(&rest)).then_some(rest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +225,17 @@ mod tests {
         assert!(is_blank(&strip(&upsert(None, BODY, S, E), S, E).unwrap()));
         assert_eq!(strip("no block\n", S, E), None);
         assert_eq!(strip("x <!-- S -->\n<!-- E -->\n", S, E), None, "marker not on its own line");
+    }
+
+    #[test]
+    fn fenced_examples_are_preserved() {
+        for fence in ["```", "~~~~"] {
+            let original = format!("# Example\n{fence}markdown\n{BODY}\n{fence}\n");
+            let installed = upsert(Some(&original), BODY, S, E);
+            assert!(installed.starts_with(&original));
+            assert_eq!(installed.matches(S).count(), 2);
+            assert_eq!(upsert(Some(&installed), BODY, S, E), installed);
+            assert_eq!(strip(&installed, S, E).unwrap(), original);
+        }
     }
 }

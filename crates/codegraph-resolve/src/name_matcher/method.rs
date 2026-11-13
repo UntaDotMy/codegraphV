@@ -1,31 +1,44 @@
 //! Method calls: `receiver.method()`, `Class::method()`, `obj:method()`, `obj$method` — find the
 //! receiver's type, then the method on it (own, inherited, or by receiver-word similarity).
 
-use super::exact::prefer_call_site_file;
-use super::infer::{array_element_type, infer_esm_awaited_call_type, infer_java_field_receiver_type, infer_local_receiver_type, normalize_inferred_type_name, ts_imported_type_file, GoReceiverDecl};
-use super::js_imports::{is_import_binding, is_imported_module_receiver, is_vue_component_method};
-use super::java_receiver::{java_receiver_declared_type, java_type_ref, resolve_on_java_type, JavaDeclared};
-use super::js_scope::is_locally_bound_js_name;
-use super::lang_shape::is_method_owner_kind;
-use super::members::{class_strategy_method, infer_member_receiver_type, inherited_class_method, is_member_typed_language, type_parameter_bound};
-use super::object_literal::{es_class_supertypes, es_inherited_method, resolve_object_path_member};
-use super::go::*;
-use super::php::*;
-use super::kotlin::is_kotlin_number_bitwise;
-use super::objc::{objc_member_receiver_type, objc_receiver_reaches};
 use super::csharp::{csharp_using_alias, is_csharp_type_visible};
-use super::python_attr::match_python_attr_call;
+use super::exact::prefer_call_site_file;
+use super::go::*;
+use super::infer::{
+    array_element_type, infer_esm_awaited_call_type, infer_java_field_receiver_type,
+    infer_local_receiver_type, normalize_inferred_type_name, ts_imported_type_file, GoReceiverDecl,
+};
+use super::java_receiver::{
+    java_receiver_declared_type, java_type_ref, match_java_static_field_call, resolve_on_java_type,
+    JavaDeclared,
+};
+use super::js_imports::{is_import_binding, is_imported_module_receiver, is_vue_component_method};
+use super::js_scope::is_locally_bound_js_name;
+use super::kotlin::is_kotlin_number_bitwise;
+use super::lang_shape::is_method_owner_kind;
+use super::members::{
+    class_strategy_method, infer_member_receiver_type, inherited_class_method,
+    is_member_typed_language, type_parameter_bound,
+};
+use super::objc::{objc_member_receiver_type, objc_receiver_reaches};
+use super::object_literal::{es_class_supertypes, es_inherited_method, resolve_object_path_member};
 use super::pending::*;
+use super::php::*;
+use super::python_attr::match_python_attr_call;
 use super::python_scope::{is_python_outside_module_receiver, python_fixture_return_type};
-use super::reach::is_lexically_reachable;
-use super::std_methods::is_std_method_name;
+use super::reach::{is_anonymous_member, is_lexically_reachable};
+use super::ruby::{ruby_constant_qn, ruby_instance_method_of, ruby_methods_of_kind_first, ruby_scope_at, RubyMethodKind};
 use super::rust::{
-    is_rust_declared_type_kind, is_rust_project_named, is_rust_trait_impl_method, match_rust_generic_path, match_rust_pinned_call,
-    match_rust_self_call, match_rust_self_field_call, match_rust_self_path, match_rust_typed_receiver_call,
+    is_rust_declared_type_kind, is_rust_project_named, is_rust_trait_impl_method,
+    match_rust_generic_path, match_rust_pinned_call, match_rust_self_call,
+    match_rust_self_field_call, match_rust_self_path, match_rust_typed_receiver_call,
     match_rust_typed_self_field_call,
 };
-use super::ts_fields::{match_ts_this_field_call, ts_indexed_property_type, ts_known_type_call, ts_outside_type_declaration};
-use super::ruby::{ruby_methods_of_kind_first, RubyMethodKind};
+use super::std_methods::is_std_method_name;
+use super::ts_fields::{
+    match_ts_this_field_call, ts_indexed_property_type, ts_known_type_call,
+    ts_outside_type_declaration,
+};
 use super::util::*;
 use super::{ambiguous_name_ceiling, same_language_family};
 use crate::ctx::Ctx;
@@ -34,12 +47,28 @@ use crate::types::{NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
 use codegraph_jsre::re;
 use codegraph_search::query_utils::is_test_path;
 use codegraph_types::jscompat::utf16_len;
-use codegraph_types::{Language, Node, NodeKind};
+use codegraph_types::{EdgeKind, Language, Node, NodeKind};
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 const DISPATCHED_ACTIONS: [&str; 17] = [
-    "get", "post", "put", "patch", "delete", "head", "options", "index", "show", "store", "update", "destroy", "create", "edit", "list", "retrieve",
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+    "head",
+    "options",
+    "index",
+    "show",
+    "store",
+    "update",
+    "destroy",
+    "create",
+    "edit",
+    "list",
+    "retrieve",
     "partial_update",
 ];
 
@@ -54,7 +83,10 @@ fn is_test_double_owner(s: &str) -> bool {
 /// The owner class name in a method's qualified name (`a::B::m` → `B`).
 fn owner_of(qualified_name: &str) -> Option<&str> {
     let cut = qualified_name.rfind("::")?;
-    re!(r"::|\.").split(&qualified_name[..cut]).into_iter().last()
+    re!(r"::|\.")
+        .split(&qualified_name[..cut])
+        .into_iter()
+        .last()
 }
 
 /// The last link of a receiver chain, skipping a trailing SCREAMING_CASE constant.
@@ -69,19 +101,47 @@ pub fn receiver_link(receiver: &str) -> &str {
 }
 
 pub fn split_camel_case(s: &str) -> Vec<String> {
-    let a = re!(r"([a-z])([A-Z])", "g").replace_all(s, |m| Some(format!("{} {}", m.text(1).unwrap_or(""), m.text(2).unwrap_or(""))));
-    let b = re!(r"([A-Z]+)([A-Z][a-z])", "g").replace_all(&a, |m| Some(format!("{} {}", m.text(1).unwrap_or(""), m.text(2).unwrap_or(""))));
-    re!(r"[\s._:/\\]+").split(&b).into_iter().filter(|w| utf16_len(w) > 1).map(|w| w.to_string()).collect()
+    let a = re!(r"([a-z])([A-Z])", "g").replace_all(s, |m| {
+        Some(format!(
+            "{} {}",
+            m.text(1).unwrap_or(""),
+            m.text(2).unwrap_or("")
+        ))
+    });
+    let b = re!(r"([A-Z]+)([A-Z][a-z])", "g").replace_all(&a, |m| {
+        Some(format!(
+            "{} {}",
+            m.text(1).unwrap_or(""),
+            m.text(2).unwrap_or("")
+        ))
+    });
+    re!(r"[\s._:/\\]+")
+        .split(&b)
+        .into_iter()
+        .filter(|w| utf16_len(w) > 1)
+        .map(|w| w.to_string())
+        .collect()
 }
 
 fn flat_word(w: &str) -> String {
     let stripped = re!(r"[^A-Za-z0-9]", "g").replace_all_str(w, "");
-    re!(r"\d+$").replace_first(&stripped, |_| String::new()).to_lowercase()
+    re!(r"\d+$")
+        .replace_first(&stripped, |_| String::new())
+        .to_lowercase()
 }
 
 fn names_owner_type(receiver: &str, qualified_name: &str) -> bool {
-    let Some(cut) = qualified_name.rfind("::") else { return false };
-    flat_word(receiver.rsplit('.').next().unwrap_or("")) == flat_word(re!(r"::|\.").split(&qualified_name[..cut]).into_iter().last().unwrap_or(""))
+    let Some(cut) = qualified_name.rfind("::") else {
+        return false;
+    };
+    flat_word(receiver.rsplit('.').next().unwrap_or(""))
+        == flat_word(
+            re!(r"::|\.")
+                .split(&qualified_name[..cut])
+                .into_iter()
+                .last()
+                .unwrap_or(""),
+        )
 }
 
 /// Does the receiver's name share a word with the class that owns the method?
@@ -89,9 +149,17 @@ pub fn shares_receiver_word(receiver: &str, qualified_name: &str) -> bool {
     if names_owner_type(receiver, qualified_name) {
         return true;
     }
-    let Some(cut) = qualified_name.rfind("::") else { return false };
-    let owner: HashSet<String> = split_camel_case(&qualified_name[..cut]).iter().map(|w| flat_word(w)).filter(|w| utf16_len(w) > 2).collect();
-    split_camel_case(receiver).iter().any(|w| owner.contains(&flat_word(w)))
+    let Some(cut) = qualified_name.rfind("::") else {
+        return false;
+    };
+    let owner: HashSet<String> = split_camel_case(&qualified_name[..cut])
+        .iter()
+        .map(|w| flat_word(w))
+        .filter(|w| utf16_len(w) > 2)
+        .collect();
+    split_camel_case(receiver)
+        .iter()
+        .any(|w| owner.contains(&flat_word(w)))
 }
 
 /// Does the (Go/Dart-aware) receiver name its method's owner?
@@ -99,11 +167,36 @@ fn receiver_names_owner(receiver: &str, method: &Node, ctx: &Ctx) -> bool {
     if method.language == Language::Go {
         return names_owner_type(receiver, &method.qualified_name);
     }
+    // A Ruby receiver names the class that owns the method, not a module around it.
+    if method.language == Language::Ruby {
+        let Some(cut) = method.qualified_name.rfind("::").filter(|c| *c > 0) else {
+            return false;
+        };
+        let owner = method.qualified_name[..cut].rsplit("::").next().unwrap_or("");
+        return shares_receiver_word(receiver, &format!("{owner}::{}", method.name));
+    }
     if method.language == Language::Dart {
-        let owner = method.qualified_name.rfind("::").filter(|c| *c > 0).and_then(|c| method.qualified_name[..c].rsplit("::").next()).unwrap_or("");
-        let decl = if owner.is_empty() { None } else { ctx.get_nodes_by_name(owner).iter().find(|n| n.language == Language::Dart && n.file_path == method.file_path).cloned() };
-        let line = decl.and_then(|d| line_at(ctx, &d.file_path, d.start_line)).unwrap_or_default();
-        if let Some(on) = re!(r"\bextension\s+\w*\s*(?:<[^>]*>)?\s*on\s+([\w<>, ?]+?)\s*\{").captures(&line).and_then(|c| c.text(1).map(|s| s.to_string())) {
+        let owner = method
+            .qualified_name
+            .rfind("::")
+            .filter(|c| *c > 0)
+            .and_then(|c| method.qualified_name[..c].rsplit("::").next())
+            .unwrap_or("");
+        let decl = if owner.is_empty() {
+            None
+        } else {
+            ctx.get_nodes_by_name(owner)
+                .iter()
+                .find(|n| n.language == Language::Dart && n.file_path == method.file_path)
+                .cloned()
+        };
+        let line = decl
+            .and_then(|d| line_at(ctx, &d.file_path, d.start_line))
+            .unwrap_or_default();
+        if let Some(on) = re!(r"\bextension\s+\w*\s*(?:<[^>]*>)?\s*on\s+([\w<>, ?]+?)\s*\{")
+            .captures(&line)
+            .and_then(|c| c.text(1).map(|s| s.to_string()))
+        {
             let on = re!(r"[<>, ?]+", "g").replace_all_str(&on, "");
             return shares_receiver_word(receiver, &format!("{on}::{}", method.name));
         }
@@ -112,25 +205,65 @@ fn receiver_names_owner(receiver: &str, method: &Node, ctx: &Ctx) -> bool {
 }
 
 fn is_unnamed_test_double(method: &Node, receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
-    let Some(cut) = method.qualified_name.rfind("::").filter(|c| *c > 0) else { return false };
-    let owner = re!(r"::|\.").split(&method.qualified_name[..cut]).into_iter().last().unwrap_or("");
+    let Some(cut) = method.qualified_name.rfind("::").filter(|c| *c > 0) else {
+        return false;
+    };
+    let owner = re!(r"::|\.")
+        .split(&method.qualified_name[..cut])
+        .into_iter()
+        .last()
+        .unwrap_or("");
     if !is_test_double_owner(&split_camel_case(owner).join(" ")) {
         return false;
     }
-    if split_camel_case(receiver_link(receiver)).iter().any(|w| is_test_double_owner(w)) {
+    if split_camel_case(receiver_link(receiver))
+        .iter()
+        .any(|w| is_test_double_owner(w))
+    {
         return false;
     }
-    !ctx.read_file(&r.file_path).map(|s| s.contains(owner)).unwrap_or(false)
+    !ctx.read_file(&r.file_path)
+        .map(|s| s.contains(owner))
+        .unwrap_or(false)
 }
 
 fn is_lua_library_call(receiver: &str, method: &str, r: &UnresolvedRef, candidate: &Node) -> bool {
     const TABLES: [&str; 19] = [
-        "string", "table", "math", "io", "os", "coroutine", "debug", "utf8", "package", "bit", "bit32", "jit", "ffi", "vim", "ngx", "assert", "spy", "stub", "mock",
+        "string",
+        "table",
+        "math",
+        "io",
+        "os",
+        "coroutine",
+        "debug",
+        "utf8",
+        "package",
+        "bit",
+        "bit32",
+        "jit",
+        "ffi",
+        "vim",
+        "ngx",
+        "assert",
+        "spy",
+        "stub",
+        "mock",
     ];
-    const STRING_METHODS: [&str; 12] = ["find", "match", "gmatch", "gsub", "sub", "format", "upper", "lower", "len", "rep", "byte", "reverse"];
-    let root = re!(r"[.:]").split(receiver).into_iter().next().unwrap_or("");
+    const STRING_METHODS: [&str; 12] = [
+        "find", "match", "gmatch", "gsub", "sub", "format", "upper", "lower", "len", "rep", "byte",
+        "reverse",
+    ];
+    let root = re!(r"[.:]")
+        .split(receiver)
+        .into_iter()
+        .next()
+        .unwrap_or("");
     if TABLES.contains(&root) || root == "love" {
-        return re!(r"::|\.").split(&candidate.qualified_name).into_iter().next() != Some(root);
+        return re!(r"::|\.")
+            .split(&candidate.qualified_name)
+            .into_iter()
+            .next()
+            != Some(root);
     }
     STRING_METHODS.contains(&method) && r.reference_name.ends_with(&format!(":{method}"))
 }
@@ -149,18 +282,73 @@ fn names_external_type(receiver: &str, language: Language) -> bool {
 }
 
 fn is_untyped_receiver_language(l: Language) -> bool {
-    matches!(l, Language::Ruby | Language::Cfml | Language::CfScript | Language::ObjC | Language::Php)
+    matches!(
+        l,
+        Language::Ruby | Language::Cfml | Language::CfScript | Language::ObjC | Language::Php
+    )
 }
 
 pub(crate) fn is_undeclared_type_name(type_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
-    re!(r"^[A-Z]").is_match(type_name) && !ctx.get_nodes_by_name(type_name).iter().any(|n| is_method_owner_kind(n) && same_language_family(n.language, r.language))
+    re!(r"^[A-Z]").is_match(type_name)
+        && !ctx
+            .get_nodes_by_name(type_name)
+            .iter()
+            .any(|n| is_method_owner_kind(n) && same_language_family(n.language, r.language))
 }
 
 pub(crate) fn imported_fqn_of(type_name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
-    ctx.get_import_mappings(&r.file_path, r.language).iter().find(|i| i.local_name == type_name).map(|i| i.source.clone())
+    ctx.get_import_mappings(&r.file_path, r.language)
+        .iter()
+        .find(|i| i.local_name == type_name)
+        .map(|i| i.source.clone())
 }
 
 // -- Method on a type --------------------------------------------------------------------------
+
+fn is_jvm_chain_type_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Struct | NodeKind::Trait
+    )
+}
+
+/// Supertypes of the Java / Kotlin types named `type_name`, each with the chain
+/// of types that names it and its package dropped (`Message::Builder` before
+/// every `Builder`).
+fn jvm_supertype_chains(type_name: &str, language: Language, ctx: &Ctx) -> Vec<(String, String)> {
+    let simple = type_name.rsplit("::").next().unwrap_or(type_name);
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for n in ctx.get_nodes_by_name(simple).iter() {
+        if n.language != language || !is_jvm_chain_type_kind(n.kind) {
+            continue;
+        }
+        if type_name != simple
+            && n.qualified_name != type_name
+            && !n.qualified_name.ends_with(&format!("::{type_name}"))
+        {
+            continue;
+        }
+        for s in ctx.get_supertype_nodes(&n.id).iter() {
+            if s.name.is_empty() || s.name == simple {
+                continue;
+            }
+            let segments: Vec<&str> = s.qualified_name.split("::").collect();
+            let mut first = 0;
+            while first + 1 < segments.len()
+                && !segments[first].starts_with(|c: char| c.is_ascii_uppercase())
+            {
+                first += 1;
+            }
+            let chain = segments[first..].join("::");
+            if !seen.insert(chain.clone()) {
+                continue;
+            }
+            out.push((chain, s.name.clone()));
+        }
+    }
+    out
+}
 
 /// The method `method_name` on `type_name` (own, inherited through supertypes, or an extension).
 pub fn resolve_method_on_type(
@@ -173,27 +361,109 @@ pub fn resolve_method_on_type(
     preferred_fqn: Option<&str>,
     depth: u32,
 ) -> Option<ResolvedRef> {
-    let mut matches: Vec<NodeRef> = ctx.get_method_matches(type_name, method_name, r.language).iter().cloned().collect();
+    let mut matches: Vec<NodeRef> = ctx
+        .get_method_matches(type_name, method_name, r.language)
+        .iter()
+        .cloned()
+        .collect();
     if r.language == Language::Go {
         if let Some(fqn) = preferred_fqn {
-            let scoped = resolve_go_method_in_package(type_name, method_name, fqn, &matches, r, ctx, confidence, resolved_by, depth);
+            let scoped = resolve_go_method_in_package(
+                type_name,
+                method_name,
+                fqn,
+                &matches,
+                r,
+                ctx,
+                confidence,
+                resolved_by,
+                depth,
+            );
             if !scoped.is_undefined() {
                 return scoped.value();
             }
         }
     }
     if matches.is_empty() {
-        if depth < 4 {
-            let es = is_es_import_language(r.language);
-            if depth == 0 && es {
-                if let Some(inherited) = es_inherited_method(type_name, method_name, preferred_fqn.unwrap_or(&r.file_path), r, ctx) {
+        // A Ruby value's supertypes are its class's real ones, or none the project has.
+        if r.language == Language::Ruby {
+            if depth == 0 {
+                if let Some(inherited) = ruby_instance_method_of(type_name, method_name, r, ctx) {
                     return Some(ResolvedRef::new(r, inherited.id.clone(), confidence, resolved_by));
                 }
             }
-            let supertypes: Vec<String> =
-                if es { es_class_supertypes(type_name, r.language, ctx) } else { ctx.get_supertypes(type_name, r.language).iter().cloned().collect() };
+            return None;
+        }
+        if depth < 4 {
+            let es = is_es_import_language(r.language);
+            if depth == 0 && es {
+                if let Some(inherited) = es_inherited_method(
+                    type_name,
+                    method_name,
+                    preferred_fqn.unwrap_or(&r.file_path),
+                    r,
+                    ctx,
+                ) {
+                    return Some(ResolvedRef::new(
+                        r,
+                        inherited.id.clone(),
+                        confidence,
+                        resolved_by,
+                    ));
+                }
+            }
+            // A Java / Kotlin supertype is asked by the chain that names it
+            // (`Message::Builder`, not every `Builder`), then — when the edge
+            // reached a namesake — by its simple name. An empty chain still
+            // stops: the simple-name list is not a second guess.
+            if !es && matches!(r.language, Language::Java | Language::Kotlin) {
+                let mut tried: HashSet<String> = HashSet::new();
+                for (chain, name) in jvm_supertype_chains(type_name, r.language, ctx) {
+                    let attempts: [&str; 2] = if chain == name {
+                        [chain.as_str(), ""]
+                    } else {
+                        [chain.as_str(), name.as_str()]
+                    };
+                    let stop = if chain == name { 1 } else { 2 };
+                    for attempt in attempts[..stop].iter().copied() {
+                        if !tried.insert(attempt.to_string()) {
+                            continue;
+                        }
+                        if let Some(via) = resolve_method_on_type(
+                            attempt,
+                            method_name,
+                            r,
+                            ctx,
+                            confidence,
+                            resolved_by,
+                            preferred_fqn,
+                            depth + 1,
+                        ) {
+                            return Some(via);
+                        }
+                    }
+                }
+                return None;
+            }
+            let supertypes: Vec<String> = if es {
+                es_class_supertypes(type_name, r.language, ctx)
+            } else {
+                ctx.get_supertypes(type_name, r.language)
+                    .iter()
+                    .cloned()
+                    .collect()
+            };
             for supertype in supertypes {
-                if let Some(via) = resolve_method_on_type(&supertype, method_name, r, ctx, confidence, resolved_by, preferred_fqn, depth + 1) {
+                if let Some(via) = resolve_method_on_type(
+                    &supertype,
+                    method_name,
+                    r,
+                    ctx,
+                    confidence,
+                    resolved_by,
+                    preferred_fqn,
+                    depth + 1,
+                ) {
                     return Some(via);
                 }
             }
@@ -206,10 +476,19 @@ pub fn resolve_method_on_type(
         return None;
     }
     if r.language == Language::Rust && matches.len() > 1 {
-        let inherent: Vec<NodeRef> = matches.iter().filter(|m| !is_rust_trait_impl_method(m, ctx)).cloned().collect();
+        let inherent: Vec<NodeRef> = matches
+            .iter()
+            .filter(|m| !is_rust_trait_impl_method(m, ctx))
+            .cloned()
+            .collect();
         if !inherent.is_empty()
             && inherent.len() < matches.len()
-            && ctx.get_nodes_by_name(type_name).iter().filter(|n| n.language == Language::Rust && is_rust_declared_type_kind(n.kind)).count() <= 1
+            && ctx
+                .get_nodes_by_name(type_name)
+                .iter()
+                .filter(|n| n.language == Language::Rust && is_rust_declared_type_kind(n.kind))
+                .count()
+                <= 1
         {
             matches = inherent;
         }
@@ -218,7 +497,12 @@ pub fn resolve_method_on_type(
         if let Some(fqn) = preferred_fqn {
             if is_es_import_language(r.language) {
                 if let Some(chosen) = matches.iter().find(|m| m.file_path == fqn) {
-                    return Some(ResolvedRef::new(r, chosen.id.clone(), confidence, resolved_by));
+                    return Some(ResolvedRef::new(
+                        r,
+                        chosen.id.clone(),
+                        confidence,
+                        resolved_by,
+                    ));
                 }
             } else if r.language != Language::Go {
                 // Prefer the candidate whose package-qualified name matches the imported FQN: JVM
@@ -227,20 +511,38 @@ pub fn resolve_method_on_type(
                 // `FooConverter` can live in `Converters.kt`) that the file-path suffix below
                 // cannot. `com.example.b.FooConverter` → `com.example.b::FooConverter::convert`.
                 if let Some(last_dot) = fqn.rfind('.').filter(|d| *d > 0) {
-                    let expected = format!("{}::{}::{method_name}", &fqn[..last_dot], &fqn[last_dot + 1..]);
+                    let expected = format!(
+                        "{}::{}::{method_name}",
+                        &fqn[..last_dot],
+                        &fqn[last_dot + 1..]
+                    );
                     if let Some(by_name) = matches.iter().find(|m| m.qualified_name == expected) {
-                        return Some(ResolvedRef::new(r, by_name.id.clone(), confidence, resolved_by));
+                        return Some(ResolvedRef::new(
+                            r,
+                            by_name.id.clone(),
+                            confidence,
+                            resolved_by,
+                        ));
                     }
                 }
                 // Fall back to the file-path suffix for Java's class-name = file-name layout.
-                let ext = if r.language == Language::Kotlin { ".kt" } else { ".java" };
+                let ext = if r.language == Language::Kotlin {
+                    ".kt"
+                } else {
+                    ".java"
+                };
                 let fqn_path = format!("{}{ext}", fqn.replace('.', "/"));
                 let chosen = matches.iter().find(|m| {
                     let fp = m.file_path.replace('\\', "/");
                     fp.ends_with(&fqn_path) || fp.ends_with(&format!("/{fqn_path}"))
                 });
                 if let Some(chosen) = chosen {
-                    return Some(ResolvedRef::new(r, chosen.id.clone(), confidence, resolved_by));
+                    return Some(ResolvedRef::new(
+                        r,
+                        chosen.id.clone(),
+                        confidence,
+                        resolved_by,
+                    ));
                 }
             }
         }
@@ -251,15 +553,39 @@ pub fn resolve_method_on_type(
     // Java: a same-named type in another JVM language (Scala's `play.api.data.Form` beside Java's
     // `play.data.Form`) is the weaker candidate when no import pins one — a wildcard `import
     // play.data.*` or the same package names none.
-    let same_language: Vec<NodeRef> = if r.language == Language::Java { matches.iter().filter(|m| m.language == Language::Java).cloned().collect() } else { Vec::new() };
-    let visible = cpp_visible_first(if same_language.is_empty() { matches } else { same_language }, r, ctx);
+    let same_language: Vec<NodeRef> = if r.language == Language::Java {
+        matches
+            .iter()
+            .filter(|m| m.language == Language::Java)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let visible = cpp_visible_first(
+        if same_language.is_empty() {
+            matches
+        } else {
+            same_language
+        },
+        r,
+        ctx,
+    );
     // A Ruby receiver is typed only by `x = Widget.new`, so it is an instance: `x.build` reaches
     // `def build`, not `def self.build`, wherever each is.
     let ordered = ruby_methods_of_kind_first(
-        prefer_call_site_file(within_cpp_translation_unit(visible, r, ctx, false), &r.file_path),
+        prefer_call_site_file(
+            within_cpp_translation_unit(visible, r, ctx, false),
+            &r.file_path,
+        ),
         ruby_kind(r, RubyMethodKind::Instance),
     );
-    Some(ResolvedRef::new(r, ordered[0].id.clone(), confidence, resolved_by))
+    Some(ResolvedRef::new(
+        r,
+        ordered[0].id.clone(),
+        confidence,
+        resolved_by,
+    ))
 }
 
 /// `kind` for a Ruby reference, none for any other.
@@ -282,33 +608,141 @@ thread_local! {
 }
 
 fn chain_key(r: &UnresolvedRef) -> String {
-    format!("{}\0{}\0{}\0{}\0{}", r.from_node_id, r.reference_name, r.line, r.column, r.file_path)
+    format!(
+        "{}\0{}\0{}\0{}\0{}",
+        r.from_node_id, r.reference_name, r.line, r.column, r.file_path
+    )
+}
+
+/// A Python call on an element of a collection, like `stats[i].write_timeline()`. The
+/// collection's name says nothing of the element's class (netbox's `context['object']` is no
+/// `ConfigContext`), so only the project's one method of the name will do, in a module the
+/// file has in hand: its own, or one it imports. Nor a name a list or a dict has, or a dunder
+/// a container answers itself.
+fn match_python_element_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    let name = &r.reference_name[r.reference_name.rfind('.').map_or(0, |i| i + 1)..];
+    if !re!(r"^\w+$").is_match(name) || re!(r"^__\w+__$").is_match(name) || is_std_method_name("python", name) {
+        return None;
+    }
+    let methods: Vec<NodeRef> = ctx
+        .get_nodes_by_name(name)
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method && n.language == Language::Python)
+        .cloned()
+        .collect();
+    let method = match methods.as_slice() {
+        [only] => only,
+        _ => return None,
+    };
+    if is_unnamed_test_double(method, "", r, ctx) {
+        return None;
+    }
+    let in_hand = method.file_path == r.file_path
+        || ctx
+            .get_import_mappings(&r.file_path, Language::Python)
+            .iter()
+            .any(|m| ctx.resolve_module_file(&m.source, &r.file_path, Language::Python).as_deref() == Some(method.file_path.as_str()));
+    in_hand.then(|| ResolvedRef::new(r, method.id.clone(), 0.7, ResolvedBy::InstanceMethod))
+}
+
+memo_map!(JsAssignedMembersMemo, String, Rc<HashSet<String>>);
+
+/// Whether a JS file gives an object a function member of that name itself,
+/// `Sha256.prototype.update = function…`, inside the bundle's closure where the index holds no
+/// node for it. The one method of the name elsewhere is no likelier then.
+fn js_file_assigns_member(file: &str, name: &str, ctx: &Ctx) -> bool {
+    let members = memoized::<JsAssignedMembersMemo>(ctx, file.to_string(), || {
+        let source = ctx.read_file(file).unwrap_or_default();
+        Rc::new(
+            re!(r"\.prototype\.([\w$]+)\s*=\s*(?:async\s+)?function\b")
+                .captures_iter(&source)
+                .filter_map(|m| m.text(1).map(String::from))
+                .collect::<HashSet<String>>(),
+        )
+    });
+    members.contains(name)
 }
 
 pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    if r.language == Language::Python && r.is_kind(EdgeKind::Calls) && re!(r"\]\.\w+$").is_match(&r.reference_name) {
+        return match_python_element_call(r, ctx);
+    }
     let name = r.reference_name.as_str();
-    let dot_match = (if is_js_family(r.language) { re!(r"^([\w.]+)\.([\w$]+)$").captures(name) } else { None })
-        .or_else(|| re!(r"^([\w.]+)\.(\w+:?(?:\w+:)*)$").captures(name))
-        .or_else(|| if r.language == Language::Cpp { re!(r"^([\w.]+)\.(operator[^\w\s.]+)$").captures(name) } else { None });
+    let dot_match = (if is_js_family(r.language) {
+        re!(r"^([\w.]+)\.([\w$]+)$").captures(name)
+    } else {
+        None
+    })
+    .or_else(|| {
+        if r.language == Language::Ruby {
+            re!(r"^([\w.]+)\.(\w+[!?])$").captures(name)
+        } else {
+            None
+        }
+    })
+    .or_else(|| re!(r"^([\w.]+)\.(\w+:?(?:\w+:)*)$").captures(name))
+    .or_else(|| {
+        if r.language == Language::Cpp {
+            re!(r"^([\w.]+)\.(operator[^\w\s.]+)$").captures(name)
+        } else {
+            None
+        }
+    });
     let colon_match = re!(r"^(\w+)::(\w+)$").captures(name);
-    let lua_colon_match = if is_lua(r.language) { re!(r"^([\w.]+):(\w+)$").captures(name) } else { None };
-    let r_dollar_match = if r.language == Language::R { re!(r"^([\w.]+)\$(\w+)$").captures(name) } else { None };
+    let lua_colon_match = if is_lua(r.language) {
+        re!(r"^([\w.]+):(\w+)$").captures(name)
+    } else {
+        None
+    };
+    let r_dollar_match = if r.language == Language::R {
+        re!(r"^([\w.]+)\$(\w+)$").captures(name)
+    } else {
+        None
+    };
     if r.language == Language::Php {
         if let Some(m) = re!(r"^(this->\w+)\.(\w+)$").captures(name) {
             let receiver = m.text(1).unwrap_or("");
             let inferred = infer_local_receiver_type(receiver, r, ctx, None)?;
+            let method_name = m.text(2).unwrap_or("");
+            if let PhpDeclaredCall::Found(method) = php_declared_call(&inferred, method_name, &r.file_path, ctx) {
+                return Some(ResolvedRef::new(r, method.id.clone(), 0.9, ResolvedBy::InstanceMethod));
+            }
             let fqn = imported_fqn_of(&inferred, r, ctx);
-            return resolve_method_on_type(&inferred, m.text(2).unwrap_or(""), r, ctx, 0.9, ResolvedBy::InstanceMethod, fqn.as_deref(), 0);
+            return resolve_method_on_type(
+                &inferred,
+                m.text(2).unwrap_or(""),
+                r,
+                ctx,
+                0.9,
+                ResolvedBy::InstanceMethod,
+                fqn.as_deref(),
+                0,
+            );
         }
     }
-    if matches!(r.language, Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx) {
+    if matches!(
+        r.language,
+        Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx
+    ) {
         if let Some(m) = re!(r"^this\.(#[\w$]+)\.(\w+)$").captures(name) {
-            return match_ts_this_field_call(m.text(1).unwrap_or(""), m.text(2).unwrap_or(""), r, ctx, false);
+            return match_ts_this_field_call(
+                m.text(1).unwrap_or(""),
+                m.text(2).unwrap_or(""),
+                r,
+                ctx,
+                false,
+            );
         }
         // An element of a field — `this.listeners[type].push()`, emitted as
         // `this.listeners[].push`: the element type the field's declaration writes, or nothing.
         if let Some(m) = re!(r"^this\.(#?[\w$]+)\[\]\.([\w$]+)$").captures(name) {
-            return match_ts_this_field_call(m.text(1).unwrap_or(""), m.text(2).unwrap_or(""), r, ctx, true);
+            return match_ts_this_field_call(
+                m.text(1).unwrap_or(""),
+                m.text(2).unwrap_or(""),
+                r,
+                ctx,
+                true,
+            );
         }
     }
     let (kind, caps) = if let Some(m) = dot_match {
@@ -328,20 +762,46 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let object_or_class = caps.text(1).unwrap_or("").to_string();
     let method_name = caps.text(2).unwrap_or("").to_string();
     let dot = kind == MatchKind::Dot;
+    // A Java call on a value a type holds in a static field, `Consts.HELPER.go()`:
+    // typed by the field's declaration, or no edge for a library type's field.
+    if r.language == Language::Java && dot {
+        match match_java_static_field_call(&object_or_class, &method_name, r, ctx) {
+            Tri::Undefined => {}
+            Tri::Null => return None,
+            Tri::Value(found) => return Some(found),
+        }
+    }
     // A JS/TS call of a member no node in the index is named (`list.push()`, `fs.writeFileSync()`)
     // is one only the object-literal reader can link (#2829): `const api = { alias: renamed }`
     // makes `api.alias()` a call of `renamed`. Every other strategy looks the member up by its own
     // name and finds nothing, so typing the receiver is wasted work. When the reader answers, the
     // whole path below runs and decides, as before.
-    if is_calls(r) && is_js_family(r.language) && ctx.known_names().is_some_and(|names| !names.contains(&method_name)) {
-        let literal = dot && !object_or_class.contains('.') && matches!(resolve_object_path_member(&object_or_class, &method_name, r, ctx, None), Tri::Value(_));
+    if is_calls(r)
+        && is_js_family(r.language)
+        && ctx
+            .known_names()
+            .is_some_and(|names| !names.contains(&method_name))
+    {
+        let literal = dot
+            && !object_or_class.contains('.')
+            && matches!(
+                resolve_object_path_member(&object_or_class, &method_name, r, ctx, None),
+                Tri::Value(_)
+            );
         if !literal {
             return None;
         }
     }
-    let python_attr_receiver = r.language == Language::Python && dot && object_or_class.contains('.');
-    let inferable_receiver = matches!(kind, MatchKind::Dot | MatchKind::LuaColon | MatchKind::RDollar) && !python_attr_receiver;
-    let go_std = r.language == Language::Go && dot && !object_or_class.contains('.') && is_std_method_name("go", &method_name);
+    let python_attr_receiver =
+        r.language == Language::Python && dot && object_or_class.contains('.');
+    let inferable_receiver = matches!(
+        kind,
+        MatchKind::Dot | MatchKind::LuaColon | MatchKind::RDollar
+    ) && !python_attr_receiver;
+    let go_std = r.language == Language::Go
+        && dot
+        && !object_or_class.contains('.')
+        && is_std_method_name("go", &method_name);
 
     if r.language == Language::Go && dot && GO_STDLIB_PACKAGES.contains(object_or_class.as_str()) {
         let v = match_go_stdlib_local_call(&object_or_class, &method_name, r, ctx);
@@ -365,7 +825,11 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         return match_rust_self_call(&method_name, r, ctx);
     }
     let mut rust_binding_line: Option<u32> = None;
-    if r.language == Language::Rust && dot && re!(r"^[a-z_]\w*$").is_match(&object_or_class) && object_or_class != "self" {
+    if r.language == Language::Rust
+        && dot
+        && re!(r"^[a-z_]\w*$").is_match(&object_or_class)
+        && object_or_class != "self"
+    {
         match match_rust_typed_receiver_call(&object_or_class, &method_name, r, ctx) {
             RustTyped::Undefined => {}
             RustTyped::Resolved(v) => return v,
@@ -373,6 +837,10 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         }
     }
     let mut local_inferred = false;
+    // A PHP declaration read for the receiver, so its name names no class (strategy 2).
+    let mut php_declared_receiver = false;
+    // A C# keyword type: an extension method is the only project method it has (upstream 092e6cf8).
+    let mut csharp_builtin_receiver = false;
     // Java: what `java_receiver_declared_type` read for the receiver, once it ran.
     let mut java_declared: Option<Option<JavaDeclared>> = None;
     if inferable_receiver {
@@ -398,16 +866,25 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             }
         }
         if r.language == Language::Cpp {
-            let declared = match_cpp_declared_type_call(&object_or_class, &method_name, &cpp_decl, r, ctx);
+            let declared =
+                match_cpp_declared_type_call(&object_or_class, &method_name, &cpp_decl, r, ctx);
             if !declared.is_undefined() {
                 return declared.value();
             }
-            if inferred_type.is_some() && is_cpp_arrow_through_outside_type(&object_or_class, &cpp_decl, r, ctx) {
+            if inferred_type.is_some()
+                && is_cpp_arrow_through_outside_type(&object_or_class, &cpp_decl, r, ctx)
+            {
                 inferred_type = None;
             }
             if let (Some(t), Some(raw)) = (inferred_type.as_ref(), cpp_decl.raw.as_ref()) {
-                if !cpp_decl.aliased && cpp_finds_only_namesakes(raw, ctx, Some(&method_name)) && !is_cpp_template_member(raw, r, ctx) {
-                    if re!(r"^[A-Z]").is_match(t) && (cpp_decl.pointer || cpp_member_operator(&object_or_class, r, ctx) != "->") {
+                if !cpp_decl.aliased
+                    && cpp_finds_only_namesakes(raw, ctx, Some(&method_name))
+                    && !is_cpp_template_member(raw, r, ctx)
+                {
+                    if re!(r"^[A-Z]").is_match(t)
+                        && (cpp_decl.pointer
+                            || cpp_member_operator(&object_or_class, r, ctx) != "->")
+                    {
                         return None;
                     }
                     inferred_type = None;
@@ -422,15 +899,39 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         }
         // A Kotlin local set from an unqualified call holds what that function declares it returns:
         // `val repo = repository()` (#2805), where the receiver's name led to the interface `Repo`.
-        if inferred_type.is_none() && r.language == Language::Kotlin && dot && re!(r"^[a-z_]\w*$").is_match(&object_or_class) {
-            inferred_type = super::kotlin_call_result::kotlin_local_call_result_type(&object_or_class, r, ctx);
+        if inferred_type.is_none()
+            && r.language == Language::Kotlin
+            && dot
+            && re!(r"^[a-z_]\w*$").is_match(&object_or_class)
+        {
+            inferred_type =
+                super::kotlin_call_result::kotlin_local_call_result_type(&object_or_class, r, ctx);
         }
-        if inferred_type.is_none() && r.language == Language::Python && dot && is_python_outside_module_receiver(&object_or_class, r, ctx) {
+        if inferred_type.is_none()
+            && r.language == Language::Python
+            && dot
+            && is_python_outside_module_receiver(&object_or_class, r, ctx)
+        {
             return None;
         }
-        if inferred_type.is_none() && r.language == Language::Python && dot && re!(r"^\w+$").is_match(&object_or_class) {
-            if let Tri::Value(via) = super::python::python_global_receiver_target(&object_or_class, &method_name, r, ctx, true) {
-                return Some(ResolvedRef::new(r, via.id.clone(), 0.9, ResolvedBy::InstanceMethod));
+        if inferred_type.is_none()
+            && r.language == Language::Python
+            && dot
+            && re!(r"^\w+$").is_match(&object_or_class)
+        {
+            if let Tri::Value(via) = super::python::python_global_receiver_target(
+                &object_or_class,
+                &method_name,
+                r,
+                ctx,
+                true,
+            ) {
+                return Some(ResolvedRef::new(
+                    r,
+                    via.id.clone(),
+                    0.9,
+                    ResolvedBy::InstanceMethod,
+                ));
             }
         }
         if matches!(decl.declared, Tri::Null) {
@@ -463,12 +964,20 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             })
         {
             inferred_type = infer_member_receiver_type(&object_or_class, r, ctx);
-            if inferred_type.as_ref().is_some_and(|t| re!(r"^[a-z]").is_match(t)) {
+            if inferred_type
+                .as_ref()
+                .is_some_and(|t| re!(r"^[a-z]").is_match(t))
+            {
                 return None;
             }
         }
         if let Some(t) = inferred_type.clone() {
-            if is_member_typed_language(r.language) && !ctx.get_nodes_by_name(&t).iter().any(|n| is_method_owner_kind(n)) {
+            if is_member_typed_language(r.language)
+                && !ctx
+                    .get_nodes_by_name(&t)
+                    .iter()
+                    .any(|n| is_method_owner_kind(n))
+            {
                 match type_parameter_bound(&t, r, ctx) {
                     Tri::Null => return None,
                     Tri::Value(b) => inferred_type = Some(b),
@@ -476,10 +985,16 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 }
             }
         }
-        let awaited = if inferred_type.is_none() && is_esm_family(r.language) { infer_esm_awaited_call_type(&object_or_class, r, ctx) } else { None };
+        let awaited = if inferred_type.is_none() && is_esm_family(r.language) {
+            infer_esm_awaited_call_type(&object_or_class, r, ctx)
+        } else {
+            None
+        };
         if let Some(a) = &awaited {
             match &a.name {
-                Some(n) if !n.is_empty() && !TS_PRIMITIVE_TYPES.contains(n.as_str()) => inferred_type = Some(n.clone()),
+                Some(n) if !n.is_empty() && !TS_PRIMITIVE_TYPES.contains(n.as_str()) => {
+                    inferred_type = Some(n.clone())
+                }
                 _ => return None,
             }
         }
@@ -490,13 +1005,18 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             && awaited.is_none()
             && dot
             && re!(r"^[A-Za-z_$][\w$]*$").is_match(&object_or_class)
-            && matches!(r.language, Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx)
+            && matches!(
+                r.language,
+                Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx
+            )
             && object_or_class != "this"
             && object_or_class != "super"
             && !is_import_binding(&object_or_class, r, ctx)
             && is_locally_bound_js_name(&object_or_class, &r.file_path, ctx)
         {
-            if let Some(reading) = super::js_binding::js_receiver_binding_reading(&object_or_class, r, ctx) {
+            if let Some(reading) =
+                super::js_binding::js_receiver_binding_reading(&object_or_class, r, ctx)
+            {
                 inferred_type = Some(reading.ty);
                 decl.raw = Some(reading.raw);
                 decl.line = Some(reading.line);
@@ -507,24 +1027,44 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 let element = array_element_type(&t);
                 let declared = match &element {
                     Some(e) => Some((e.clone(), true, None)),
-                    None => ts_indexed_property_type(&t, r, ctx).map(|d| (d.ty, d.array, Some(d.file))),
+                    None => {
+                        ts_indexed_property_type(&t, r, ctx).map(|d| (d.ty, d.array, Some(d.file)))
+                    }
                 };
                 match declared {
-                    None => inferred_type = Some(re!(r"\s*\[[^\]]*\]$").replace_first(&t, |_| String::new())),
+                    None => {
+                        inferred_type =
+                            Some(re!(r"\s*\[[^\]]*\]$").replace_first(&t, |_| String::new()))
+                    }
                     Some((ty, array, file)) => {
                         if array && JS_ARRAY_METHODS.contains(method_name.as_str()) {
                             return None;
                         }
                         inferred_type = Some(normalize_inferred_type_name(&ty)?);
                         if element.is_none() {
-                            return resolve_method_on_type(inferred_type.as_deref().unwrap(), &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, file.as_deref(), 0);
+                            return resolve_method_on_type(
+                                inferred_type.as_deref().unwrap(),
+                                &method_name,
+                                r,
+                                ctx,
+                                0.9,
+                                ResolvedBy::InstanceMethod,
+                                file.as_deref(),
+                                0,
+                            );
                         }
                     }
                 }
             }
         }
-        if r.language == Language::Rust && inferred_type.as_deref() == Some("Pin") && !is_rust_project_named("Pin", ctx) {
+        if r.language == Language::Rust
+            && inferred_type.as_deref() == Some("Pin")
+            && !is_rust_project_named("Pin", ctx)
+        {
             return match_rust_pinned_call(&object_or_class, &method_name, r, ctx);
+        }
+        if inferred_type.is_none() && r.language == Language::Php && dot {
+            inferred_type = php_model_factory_local_type(&object_or_class, r, ctx);
         }
         if r.language == Language::Java && inferred_type.is_some() {
             local_inferred = true;
@@ -540,13 +1080,28 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             // As for every other language below: a type no project class or interface is named — a
             // library `URI` the short-name rule took for a type parameter, an enum whose `name()` /
             // `equals()` are Java's — is past guessing (kestra's `URI file; file.toString()`).
-            if is_undeclared_type_name(re!(r"[.:]+").split(&t).into_iter().last().unwrap_or(""), r, ctx) {
+            if is_undeclared_type_name(
+                re!(r"[.:]+").split(&t).into_iter().last().unwrap_or(""),
+                r,
+                ctx,
+            ) {
                 return None;
             }
         } else if let Some(t) = inferred_type.clone() {
             local_inferred = true;
             match &decl.asserted {
-                Tri::Value(a) => return resolve_method_on_type(&a.name, &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, Some(&a.dir), 0),
+                Tri::Value(a) => {
+                    return resolve_method_on_type(
+                        &a.name,
+                        &method_name,
+                        r,
+                        ctx,
+                        0.9,
+                        ResolvedBy::InstanceMethod,
+                        Some(&a.dir),
+                        0,
+                    )
+                }
                 Tri::Null => return None,
                 Tri::Undefined => {}
             }
@@ -562,15 +1117,20 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                     return None;
                 }
             }
-            let mut imported_fqn: Option<String> = if matches!(r.language, Language::Java | Language::Kotlin) {
-                imported_fqn_of(&t, r, ctx)
-            } else if r.language == Language::Go {
-                go_declared_type_package(decl.raw.as_deref(), decl.file.as_deref().unwrap_or(&r.file_path), ctx)
-            } else if is_esm_family(r.language) && awaited.is_none() {
-                ts_imported_type_file(decl.raw.as_deref().unwrap_or(&t), r, ctx)
-            } else {
-                None
-            };
+            let mut imported_fqn: Option<String> =
+                if matches!(r.language, Language::Java | Language::Kotlin) {
+                    imported_fqn_of(&t, r, ctx)
+                } else if r.language == Language::Go {
+                    go_declared_type_package(
+                        decl.raw.as_deref(),
+                        decl.file.as_deref().unwrap_or(&r.file_path),
+                        ctx,
+                    )
+                } else if is_esm_family(r.language) && awaited.is_none() {
+                    ts_imported_type_file(decl.raw.as_deref().unwrap_or(&t), r, ctx)
+                } else {
+                    None
+                };
             if is_esm_family(r.language) && awaited.is_none() && imported_fqn.is_none() {
                 match ts_outside_type_declaration(decl.raw.as_deref().unwrap_or(&t), &t, r, ctx) {
                     Tri::Null => return None,
@@ -579,7 +1139,15 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 }
             }
             if is_esm_family(r.language) && awaited.is_none() {
-                let known = ts_known_type_call(&t, imported_fqn.as_deref().unwrap_or(&r.file_path), &method_name, r, r, ctx, 0.9);
+                let known = ts_known_type_call(
+                    &t,
+                    imported_fqn.as_deref().unwrap_or(&r.file_path),
+                    &method_name,
+                    r,
+                    r,
+                    ctx,
+                    0.9,
+                );
                 if let Tri::Value(k) = known {
                     return Some(k);
                 }
@@ -588,7 +1156,40 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             if let Some(a) = &awaited {
                 at.file_path = a.file_path.clone();
             }
-            let typed_match = resolve_method_on_type(&t, &method_name, &at, ctx, 0.9, ResolvedBy::InstanceMethod, imported_fqn.as_deref(), 0);
+            // A PHP type is the class its name means in the file, and its supertypes are read
+            // from source: the first pass has no `extends` edges yet.
+            let mut php_whole = false;
+            if r.language == Language::Php {
+                match php_declared_call(&t, &method_name, &r.file_path, ctx) {
+                    PhpDeclaredCall::Found(method) => {
+                        return Some(ResolvedRef::new(r, method.id.clone(), 0.9, ResolvedBy::InstanceMethod));
+                    }
+                    PhpDeclaredCall::Whole => {
+                        php_declared_receiver = true;
+                        php_whole = true;
+                    }
+                    PhpDeclaredCall::Open => php_declared_receiver = true,
+                    PhpDeclaredCall::Unknown => {}
+                }
+            }
+            if r.language == Language::CSharp && t.starts_with(|c: char| c.is_ascii_lowercase()) {
+                php_declared_receiver = true;
+                csharp_builtin_receiver = true;
+            }
+            let typed_match = if php_whole {
+                None
+            } else {
+                resolve_method_on_type(
+                    &t,
+                    &method_name,
+                    &at,
+                    ctx,
+                    0.9,
+                    ResolvedBy::InstanceMethod,
+                    imported_fqn.as_deref(),
+                    0,
+                )
+            };
             if let Some(tm) = &typed_match {
                 if r.language == Language::Kotlin {
                     if let Some(target) = ctx.node_by_id(&tm.target_node_id) {
@@ -601,7 +1202,9 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             if let Some(mut tm) = typed_match {
                 if let Some(a) = &awaited {
                     let target = ctx.node_by_id(&tm.target_node_id)?;
-                    if target.qualified_name.starts_with(&format!("{t}::")) && target.file_path != a.file_path {
+                    if target.qualified_name.starts_with(&format!("{t}::"))
+                        && target.file_path != a.file_path
+                    {
                         return None;
                     }
                     tm.original = r.clone();
@@ -611,7 +1214,9 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 // `def f(): T = T.Inner(...)` return annotation reads as `T`'s type and hands
                 // `Inner::Inner` over. Fall through to the Scala type lookup.
                 let foreign_constructor = r.language == Language::Scala
-                    && ctx.node_by_id(&tm.target_node_id).is_some_and(|target| is_other_language_constructor(&target, r.language));
+                    && ctx
+                        .node_by_id(&tm.target_node_id)
+                        .is_some_and(|target| is_other_language_constructor(&target, r.language));
                 if !foreign_constructor {
                     return Some(tm);
                 }
@@ -619,7 +1224,9 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             if awaited.is_some() {
                 return None;
             }
-            if is_esm_family(r.language) && (JS_BUILT_INS.contains(t.as_str()) || TS_PRIMITIVE_TYPES.contains(t.as_str())) {
+            if is_esm_family(r.language)
+                && (JS_BUILT_INS.contains(t.as_str()) || TS_PRIMITIVE_TYPES.contains(t.as_str()))
+            {
                 return None;
             }
             if go_std && (!go_declared.is_undefined() || matches!(decl.valued, Tri::Value(_))) {
@@ -637,15 +1244,28 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             }
         }
         if cpp_decl.aliased {
-            if !cpp_decl.class_template && (cpp_decl.pointer || is_cpp_dot_call(&object_or_class, r, ctx)) {
+            if !cpp_decl.class_template
+                && (cpp_decl.pointer || is_cpp_dot_call(&object_or_class, r, ctx))
+            {
                 return None;
             }
             if is_undeclared_type_name(cpp_decl.written.as_deref().unwrap_or(""), r, ctx) {
                 return None;
             }
         }
-        if r.language == Language::Cpp && cpp_decl.callers && !cpp_decl.shadowed && !cpp_decl.pointer && cpp_member_operator(&object_or_class, r, ctx) == "->" {
-            let held = match_cpp_held_type_call(cpp_decl.raw.as_deref().unwrap_or(""), &method_name, r, ctx, cpp_decl.declared.as_ref());
+        if r.language == Language::Cpp
+            && cpp_decl.callers
+            && !cpp_decl.shadowed
+            && !cpp_decl.pointer
+            && cpp_member_operator(&object_or_class, r, ctx) == "->"
+        {
+            let held = match_cpp_held_type_call(
+                cpp_decl.raw.as_deref().unwrap_or(""),
+                &method_name,
+                r,
+                ctx,
+                cpp_decl.declared.as_ref(),
+            );
             if !held.is_undefined() {
                 return held.value();
             }
@@ -662,8 +1282,19 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         }
         return match_rust_self_field_call(field, &method_name, r, ctx);
     }
-    if matches!(r.language, Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx) && dot && object_or_class.starts_with("this.") {
-        return match_ts_this_field_call(&object_or_class["this.".len()..], &method_name, r, ctx, false);
+    if matches!(
+        r.language,
+        Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx
+    ) && dot
+        && object_or_class.starts_with("this.")
+    {
+        return match_ts_this_field_call(
+            &object_or_class["this.".len()..],
+            &method_name,
+            r,
+            ctx,
+            false,
+        );
     }
     if python_attr_receiver && !PY_CHAIN_GUESSING.with(|g| g.borrow().contains(&chain_key(r))) {
         let mut read: std::collections::BTreeSet<String> = Default::default();
@@ -678,8 +1309,11 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         read.remove(&r.file_path);
         return match guess {
             Some(mut g) if !read.is_empty() => {
-                let type_from: Vec<serde_json::Value> = read.into_iter().map(serde_json::Value::String).collect();
-                g.metadata.get_or_insert_with(Default::default).insert("typeFrom".to_string(), serde_json::Value::Array(type_from));
+                let type_from: Vec<serde_json::Value> =
+                    read.into_iter().map(serde_json::Value::String).collect();
+                g.metadata
+                    .get_or_insert_with(Default::default)
+                    .insert("typeFrom".to_string(), serde_json::Value::Array(type_from));
                 Some(g)
             }
             other => other,
@@ -703,7 +1337,11 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                     return None;
                 }
             }
-            None => {}
+            None => {
+                if let Some(typed_match) = super::java_overload::match_java_lambda_parameter_call(&object_or_class, &method_name, r, ctx) {
+                    return Some(typed_match);
+                }
+            }
         }
     }
     // Kotlin (Java's fields are read in the branch above): receiver may be a field whose name
@@ -714,7 +1352,16 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     if r.language == Language::Kotlin && dot {
         if let Some(t) = infer_java_field_receiver_type(&object_or_class, r, ctx) {
             let fqn = imported_fqn_of(&t, r, ctx);
-            if let Some(m) = resolve_method_on_type(&t, &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, fqn.as_deref(), 0) {
+            if let Some(m) = resolve_method_on_type(
+                &t,
+                &method_name,
+                r,
+                ctx,
+                0.9,
+                ResolvedBy::InstanceMethod,
+                fqn.as_deref(),
+                0,
+            ) {
                 return Some(m);
             }
         }
@@ -726,12 +1373,22 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     // edge instead of the name-only guesses below, which bind it to whatever project class declares
     // a method of the same name.
     if r.language == Language::Kotlin && dot && !object_or_class.contains('.') {
-        let declared = super::kotlin_receiver::kotlin_receiver_declared_type(&object_or_class, r, ctx, 0);
+        let declared =
+            super::kotlin_receiver::kotlin_receiver_declared_type(&object_or_class, r, ctx, 0);
         if declared.as_deref() == Some(super::kotlin_receiver::KOTLIN_EXTERNAL_TYPE) {
             return None;
         }
         if let Some(declared) = declared {
-            if let Some(typed_match) = resolve_method_on_type(&declared, &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, None, 0) {
+            if let Some(typed_match) = resolve_method_on_type(
+                &declared,
+                &method_name,
+                r,
+                ctx,
+                0.9,
+                ResolvedBy::InstanceMethod,
+                None,
+                0,
+            ) {
                 return Some(typed_match);
             }
             if !super::kotlin_receiver::is_project_type(&declared, r, ctx) {
@@ -740,7 +1397,9 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         }
     }
     if dot && !object_or_class.contains('.') && is_object_literal_language(r.language) {
-        if let Tri::Value(m) = resolve_object_path_member(&object_or_class, &method_name, r, ctx, None) {
+        if let Tri::Value(m) =
+            resolve_object_path_member(&object_or_class, &method_name, r, ctx, None)
+        {
             return Some(m);
         }
     }
@@ -750,7 +1409,11 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             return own.value();
         }
     }
-    if r.language == Language::Rust && kind == MatchKind::Colon && re!(r"^[A-Z]\w*$").is_match(&object_or_class) && object_or_class != "Self" {
+    if r.language == Language::Rust
+        && kind == MatchKind::Colon
+        && re!(r"^[A-Z]\w*$").is_match(&object_or_class)
+        && object_or_class != "Self"
+    {
         let bounded = match_rust_generic_path(&object_or_class, &method_name, r, ctx);
         if !bounded.is_undefined() {
             return bounded.value();
@@ -758,17 +1421,32 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     }
     // Strategy 1: a class named exactly like the receiver.
     {
-        let named: Vec<NodeRef> = ctx.get_nodes_by_name(&object_or_class).iter().filter(|n| is_method_owner_kind(n)).cloned().collect();
-        let mut class_candidates = prefer_call_site_file(within_cpp_translation_unit(named, r, ctx, false), &r.file_path);
+        let named: Vec<NodeRef> = ctx
+            .get_nodes_by_name(&object_or_class)
+            .iter()
+            .filter(|n| is_method_owner_kind(n))
+            .cloned()
+            .collect();
+        let mut class_candidates = prefer_call_site_file(
+            within_cpp_translation_unit(named, r, ctx, false),
+            &r.file_path,
+        );
         if r.language == Language::CSharp && class_candidates.len() > 1 {
             let mut type_ref = r.clone();
             type_ref.reference_name = object_or_class.clone();
             let (visible, rest): (Vec<NodeRef>, Vec<NodeRef>) =
-                class_candidates.iter().cloned().partition(|c| c.language != Language::CSharp || is_csharp_type_visible(c, &type_ref, ctx));
+                class_candidates.iter().cloned().partition(|c| {
+                    c.language != Language::CSharp || is_csharp_type_visible(c, &type_ref, ctx)
+                });
             class_candidates = visible.into_iter().chain(rest).collect();
         }
         if r.language == Language::VbNet {
             class_candidates = prefer_vb_project(class_candidates, r, ctx);
+        }
+        if r.language == Language::Php && class_candidates.len() > 1 {
+            let named: Vec<NodeRef> = class_candidates.iter().filter(|c| php_file_names_class(c, &r.file_path, ctx)).cloned().collect();
+            let rest: Vec<NodeRef> = class_candidates.iter().filter(|c| !named.iter().any(|n| n.id == c.id)).cloned().collect();
+            class_candidates = named.into_iter().chain(rest).collect();
         }
         let production_caller = !is_test_path(&r.file_path);
         for class_node in &class_candidates {
@@ -782,57 +1460,132 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                 continue;
             }
             if class_node.language == Language::Cpp {
-                let Some(method) = cpp_method_of(class_node, &method_name, r, ctx) else { continue };
-                let own = method.qualified_name == format!("{}::{}", class_node.qualified_name, method_name);
-                return Some(ResolvedRef::new(r, method.id.clone(), if own { 0.85 } else { 0.8 }, ResolvedBy::QualifiedName));
+                let Some(method) = cpp_method_of(class_node, &method_name, r, ctx) else {
+                    continue;
+                };
+                let own = method.qualified_name
+                    == format!("{}::{}", class_node.qualified_name, method_name);
+                return Some(ResolvedRef::new(
+                    r,
+                    method.id.clone(),
+                    if own { 0.85 } else { 0.8 },
+                    ResolvedBy::QualifiedName,
+                ));
             }
             // A Ruby call on a class is a call of its class method: `Widget.build` reaches
             // `def self.build`, not `def build`, whichever comes first.
-            if let Some(method) = class_strategy_method(class_node, &method_name, ctx, ruby_kind(r, RubyMethodKind::Class)) {
-                return Some(ResolvedRef::new(r, method.id.clone(), 0.85, ResolvedBy::QualifiedName));
+            let method = if class_node.language == Language::Php {
+                php_class_method(class_node, &method_name, ctx)
+            } else {
+                class_strategy_method(class_node, &method_name, ctx, ruby_kind(r, RubyMethodKind::Class))
+            };
+            if let Some(method) = method {
+                return Some(ResolvedRef::new(
+                    r,
+                    method.id.clone(),
+                    0.85,
+                    ResolvedBy::QualifiedName,
+                ));
+            }
+            if let Some(forwarded) = (class_node.language == Language::Php).then(|| php_facade_method(class_node, &method_name, ctx)).flatten() {
+                return Some(ResolvedRef::new(r, forwarded.id.clone(), 0.85, ResolvedBy::QualifiedName));
             }
         }
-        let same_language: Vec<NodeRef> = class_candidates.iter().filter(|c| c.language == r.language).cloned().collect();
-        if let Some(inherited) = inherited_class_method(&same_language, &method_name, ctx, ruby_kind(r, RubyMethodKind::Class)) {
-            return Some(ResolvedRef::new(r, inherited.id.clone(), 0.8, ResolvedBy::QualifiedName));
+        let same_language: Vec<NodeRef> = class_candidates
+            .iter()
+            .filter(|c| c.language == r.language)
+            .cloned()
+            .collect();
+        // PHP and Ruby already walked parents and mixins by the name the file can look up.
+        if r.language != Language::Php && r.language != Language::Ruby {
+            if let Some(inherited) = inherited_class_method(
+                &same_language,
+                &method_name,
+                ctx,
+                ruby_kind(r, RubyMethodKind::Class),
+            ) {
+                return Some(ResolvedRef::new(
+                    r,
+                    inherited.id.clone(),
+                    0.8,
+                    ResolvedBy::QualifiedName,
+                ));
+            }
         }
     }
     if r.language == Language::Cpp
         && kind == MatchKind::Colon
         && cpp_qualifier_arguments(r, ctx).is_some()
-        && ctx.get_nodes_by_name(&object_or_class).iter().any(|n| n.language == Language::Cpp && is_method_owner_kind(n))
+        && ctx
+            .get_nodes_by_name(&object_or_class)
+            .iter()
+            .any(|n| n.language == Language::Cpp && is_method_owner_kind(n))
     {
         return None;
     }
-    if is_calls(r) && is_js_family(r.language) && object_or_class != "this" && object_or_class != "super" && JS_BUILTIN_METHODS.contains(method_name.as_str()) {
+    if is_calls(r)
+        && is_js_family(r.language)
+        && object_or_class != "this"
+        && object_or_class != "super"
+        && JS_BUILTIN_METHODS.contains(method_name.as_str())
+    {
         return None;
     }
-    if is_calls(r) && is_js_family(r.language) && is_imported_module_receiver(&object_or_class, r, ctx) {
+    if is_calls(r)
+        && is_js_family(r.language)
+        && is_imported_module_receiver(&object_or_class, r, ctx)
+    {
         return None;
     }
     if r.language == Language::CSharp {
         if let Some(aliased) = csharp_using_alias(&object_or_class, r, ctx) {
-            return resolve_method_on_type(&aliased, &method_name, r, ctx, 0.9, ResolvedBy::InstanceMethod, None, 0);
+            return resolve_method_on_type(
+                &aliased,
+                &method_name,
+                r,
+                ctx,
+                0.9,
+                ResolvedBy::InstanceMethod,
+                None,
+                0,
+            );
         }
     }
-    let types_only = matches!(r.language, Language::CSharp | Language::Java | Language::Rust);
+    let types_only = matches!(
+        r.language,
+        Language::CSharp | Language::Java | Language::Rust
+    );
     if names_external_type(&object_or_class, r.language)
         && !ctx.get_nodes_by_name(&object_or_class).iter().any(|n| {
             same_language_family(n.language, r.language)
                 && (!types_only
                     || is_method_owner_kind(n)
-                    || matches!(n.kind, NodeKind::Enum | NodeKind::Namespace | NodeKind::Module | NodeKind::Trait | NodeKind::TypeAlias))
+                    || matches!(
+                        n.kind,
+                        NodeKind::Enum
+                            | NodeKind::Namespace
+                            | NodeKind::Module
+                            | NodeKind::Trait
+                            | NodeKind::TypeAlias
+                    ))
         })
     {
         return None;
     }
-    if r.language == Language::Rust && kind == MatchKind::Colon && re!(r"^[a-z_][\w]*(?:::[a-z_]\w*)*$").is_match(&object_or_class) {
+    if r.language == Language::Rust
+        && kind == MatchKind::Colon
+        && re!(r"^[a-z_][\w]*(?:::[a-z_]\w*)*$").is_match(&object_or_class)
+    {
         return None;
     }
     if r.language == Language::CSharp && re!(r"^(?:string|object|int|long|short|byte|bool|char|double|float|decimal|uint|ulong|ushort|sbyte)$").is_match(&object_or_class) {
         return None;
     }
-    let through_cpp_namespace = || r.language == Language::Cpp && kind == MatchKind::Colon && is_cpp_namespace_qualifier(&object_or_class, r, ctx);
+    let through_cpp_namespace = || {
+        r.language == Language::Cpp
+            && kind == MatchKind::Colon
+            && is_cpp_namespace_qualifier(&object_or_class, r, ctx)
+    };
     let capitalized = {
         let mut c = object_or_class.chars();
         match c.next() {
@@ -840,9 +1593,33 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             None => String::new(),
         }
     };
-    if capitalized != object_or_class {
-        let named: Vec<NodeRef> = ctx.get_nodes_by_name(&capitalized).iter().filter(|n| is_method_owner_kind(n)).cloned().collect();
-        let fuzzy = prefer_call_site_file(within_cpp_translation_unit(named, r, ctx, false), &r.file_path);
+    if capitalized != object_or_class && !php_declared_receiver {
+        let named: Vec<NodeRef> = ctx
+            .get_nodes_by_name(&capitalized)
+            .iter()
+            .filter(|n| is_method_owner_kind(n))
+            .cloned()
+            .collect();
+        let mut fuzzy = prefer_call_site_file(
+            within_cpp_translation_unit(named, r, ctx, false),
+            &r.file_path,
+        );
+        let php_classes: Vec<NodeRef> = fuzzy.iter().filter(|c| c.language == Language::Php).cloned().collect();
+        let php_named: Vec<NodeRef> = if r.language == Language::Php {
+            php_classes.iter().filter(|c| php_file_names_class(c, &r.file_path, ctx)).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        if r.language == Language::Php {
+            let rest: Vec<NodeRef> = fuzzy.iter().filter(|c| !php_named.iter().any(|n| n.id == c.id)).cloned().collect();
+            fuzzy = php_named.iter().cloned().chain(rest).collect();
+        }
+        // In Ruby, the class constant lookup finds from the call comes first.
+        if r.language == Language::Ruby && fuzzy.len() > 1 {
+            let looked = ruby_constant_qn(&capitalized, &ruby_scope_at(r, ctx), ctx);
+            fuzzy.sort_by(|a, b| (b.qualified_name == looked).cmp(&(a.qualified_name == looked)));
+        }
+        let only_of_name = php_classes.len() == 1;
         let production_caller = !is_test_path(&r.file_path);
         for class_node in &fuzzy {
             if class_node.language != r.language {
@@ -856,11 +1633,23 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             }
             // A Ruby receiver named after a class may hold the class as well as an instance of it,
             // so neither of a class's two methods of the name is preferred: the first declared is taken.
-            if let Some(method) = class_strategy_method(class_node, &method_name, ctx, None) {
+            let method = if class_node.language == Language::Php && !php_named.iter().any(|n| n.id == class_node.id) {
+                php_unnamed_class_method(class_node, &method_name, only_of_name, ctx)
+            } else if class_node.language == Language::Php {
+                php_class_method(class_node, &method_name, ctx)
+            } else if r.language == Language::CSharp && is_std_method_name("csharp", &method_name) {
+                super::members::find_own_method(&ctx.get_nodes_in_file(&class_node.file_path), class_node, &method_name, None)
+            } else {
+                class_strategy_method(class_node, &method_name, ctx, None)
+            };
+            if let Some(method) = method {
                 if through_cpp_namespace() {
                     return None;
                 }
-                return Some(ResolvedRef::new(r, method.id.clone(), 0.8, ResolvedBy::InstanceMethod).guessed_by_name());
+                return Some(
+                    ResolvedRef::new(r, method.id.clone(), 0.8, ResolvedBy::InstanceMethod)
+                        .guessed_by_name(),
+                );
             }
         }
     }
@@ -868,23 +1657,46 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     // `Outer::Inner` (Scala qualified names carry no package). Taken only when every match sits in
     // one file (a class and its companion share the name), or else from the call site's own file.
     // A Scala `object` is a `module`; a class / trait of the same name is preferred over it.
-    if r.language == Language::Scala && kind == MatchKind::Dot && method_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+    if r.language == Language::Scala
+        && kind == MatchKind::Dot
+        && method_name.starts_with(|c: char| c.is_ascii_uppercase())
+    {
         let type_qn = format!("{}::{method_name}", object_or_class.replace('.', "::"));
         let mut types: Vec<NodeRef> = ctx
             .get_nodes_by_qualified_name(&type_qn)
             .iter()
-            .filter(|n| n.language == Language::Scala && matches!(n.kind, NodeKind::Class | NodeKind::Trait | NodeKind::Module))
+            .filter(|n| {
+                n.language == Language::Scala
+                    && matches!(n.kind, NodeKind::Class | NodeKind::Trait | NodeKind::Module)
+            })
             .cloned()
             .collect();
         types.sort_by_key(|n| n.kind == NodeKind::Module);
-        let one_file = types.first().is_some_and(|first| types.iter().all(|n| n.file_path == first.file_path));
-        let chosen = if one_file { types.first() } else { types.iter().find(|n| n.file_path == r.file_path) };
+        let one_file = types
+            .first()
+            .is_some_and(|first| types.iter().all(|n| n.file_path == first.file_path));
+        let chosen = if one_file {
+            types.first()
+        } else {
+            types.iter().find(|n| n.file_path == r.file_path)
+        };
         if let Some(chosen) = chosen {
-            return Some(ResolvedRef::new(r, chosen.id.clone(), 0.85, ResolvedBy::QualifiedName));
+            return Some(ResolvedRef::new(
+                r,
+                chosen.id.clone(),
+                0.85,
+                ResolvedBy::QualifiedName,
+            ));
         }
     }
     if !method_name.is_empty() {
-        return match_by_method_name(r, ctx, &object_or_class, &method_name, kind == MatchKind::Colon, &through_cpp_namespace);
+        return match_by_method_name(
+            r,
+            ctx,
+            &object_or_class,
+            &method_name,
+            kind == MatchKind::Colon,
+            &through_cpp_namespace, csharp_builtin_receiver);
     }
     None
 }
@@ -913,8 +1725,11 @@ const SELF_RECEIVERS: [&str; 5] = ["this", "self", "Self", "super", "cls"];
 /// struct's fields are typed before this point, so a Go call that still arrives here is on a local
 /// the resolver could not type, mostly a range variable over the type's own children (cobra's
 /// `sub.checkCommandGroups()`, etcd's `child.Repr(…)`), which is real recursion.
-fn is_foreign_receiver_self_loop(candidate: &Node, receiver: &str, r: &UnresolvedRef) -> bool {
-    candidate.id == r.from_node_id && !SELF_RECEIVERS.contains(&receiver) && r.language != Language::Go
+fn is_foreign_receiver_self_loop(candidate: &Node, receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    candidate.id == r.from_node_id
+        && !SELF_RECEIVERS.contains(&receiver)
+        && r.language != Language::Go
+        && !super::csharp::is_csharp_extension_element_call(candidate, receiver, r, ctx)
 }
 
 /// The last strategy: the method's name alone, narrowed by reach and by the receiver's words.
@@ -925,17 +1740,37 @@ fn match_by_method_name(
     method_name: &str,
     colon: bool,
     through_cpp_namespace: &dyn Fn() -> bool,
+    csharp_builtin_receiver: bool,
 ) -> Option<ResolvedRef> {
     let method_candidates = ctx.get_nodes_by_name(method_name);
     if method_candidates.len() > ambiguous_name_ceiling() {
         return None;
     }
-    let methods: Vec<NodeRef> = method_candidates.iter().filter(|n| n.kind == NodeKind::Method && n.name == method_name).cloned().collect();
-    let same_language: Vec<NodeRef> = methods.iter().filter(|m| m.language == r.language).cloned().collect();
-    let mut target: Vec<NodeRef> = if !same_language.is_empty() { same_language } else { methods };
+    let methods: Vec<NodeRef> = method_candidates
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method && n.name == method_name)
+        .cloned()
+        .collect();
+    let same_language: Vec<NodeRef> = methods
+        .iter()
+        .filter(|m| m.language == r.language)
+        .cloned()
+        .collect();
+    let mut target: Vec<NodeRef> = if !same_language.is_empty() {
+        same_language
+    } else {
+        methods
+    };
+    if csharp_builtin_receiver {
+        target.retain(|m| super::csharp::is_csharp_extension_method(m, ctx));
+    }
     let mut narrowed = false;
     if is_js_family(r.language) && is_import_binding(object_or_class, r, ctx) {
-        let kept: Vec<NodeRef> = target.iter().filter(|m| m.file_path != r.file_path).cloned().collect();
+        let kept: Vec<NodeRef> = target
+            .iter()
+            .filter(|m| m.file_path != r.file_path)
+            .cloned()
+            .collect();
         narrowed = kept.len() != target.len();
         target = kept;
     }
@@ -943,7 +1778,9 @@ fn match_by_method_name(
         let kept: Vec<NodeRef> = target
             .iter()
             .filter(|m| {
-                !(DISPATCHED_ACTIONS.contains(&m.name.as_str()) && owner_of(&m.qualified_name).is_some_and(is_dispatched_owner)) && !is_kotlin_number_bitwise(m, r)
+                !(DISPATCHED_ACTIONS.contains(&m.name.as_str())
+                    && owner_of(&m.qualified_name).is_some_and(is_dispatched_owner))
+                    && !is_kotlin_number_bitwise(m, r)
             })
             .cloned()
             .collect();
@@ -953,7 +1790,10 @@ fn match_by_method_name(
     {
         let kept: Vec<NodeRef> = target
             .iter()
-            .filter(|m| !is_dart_unnamed_extension_member(m, ctx) || crate::dart_libraries::in_same_dart_library(&r.file_path, &m.file_path, ctx))
+            .filter(|m| {
+                !is_dart_unnamed_extension_member(m, ctx)
+                    || crate::dart_libraries::in_same_dart_library(&r.file_path, &m.file_path, ctx)
+            })
             .cloned()
             .collect();
         narrowed |= kept.len() != target.len();
@@ -962,18 +1802,38 @@ fn match_by_method_name(
     if !is_test_path(&r.file_path) {
         target.retain(|m| !is_test_path(&m.file_path));
     }
-    let reachable: Vec<NodeRef> = target.iter().filter(|m| is_lexically_reachable(m, r, ctx)).cloned().collect();
-    let scoped_out = reachable.len() != target.len();
+    let reachable: Vec<NodeRef> = target
+        .iter()
+        .filter(|m| is_lexically_reachable(m, r, ctx))
+        .cloned()
+        .collect();
+    // A Kotlin object expression's member out of reach leaves the by-name guess
+    // as it was before that member existed.
+    let scoped_out = target.iter().any(|m| {
+        !reachable.iter().any(|hit| hit.id == m.id)
+            && !(m.language == Language::Kotlin && is_anonymous_member(m))
+    });
     target = reachable;
     if is_js_family(r.language) {
-        let kept: Vec<NodeRef> = target.iter().filter(|m| !is_vue_component_method(m) || (object_or_class == "this" && m.file_path == r.file_path)).cloned().collect();
+        let kept: Vec<NodeRef> = target
+            .iter()
+            .filter(|m| {
+                !is_vue_component_method(m)
+                    || (object_or_class == "this" && m.file_path == r.file_path)
+            })
+            .cloned()
+            .collect();
         narrowed |= kept.len() != target.len();
         target = kept;
     }
     // A React class component's `render()` and lifecycle methods are React's to call (#2589):
     // react-dom's `root.render(<App />)` is no error boundary's `render`.
     if is_js_family(r.language) && object_or_class != "this" && object_or_class != "super" {
-        let kept: Vec<NodeRef> = target.iter().filter(|m| !super::js_binding::is_react_lifecycle_method(m, ctx)).cloned().collect();
+        let kept: Vec<NodeRef> = target
+            .iter()
+            .filter(|m| !super::js_binding::is_react_lifecycle_method(m, ctx))
+            .cloned()
+            .collect();
         narrowed |= kept.len() != target.len();
         target = kept;
     }
@@ -983,27 +1843,53 @@ fn match_by_method_name(
         && !scoped_out
         && !python_chain
         && target[0].language == r.language
+        && !(is_js_family(r.language)
+            && target[0].file_path != r.file_path
+            && js_file_assigns_member(&r.file_path, &method_name, ctx))
         && !is_unnamed_test_double(&target[0], object_or_class, r, ctx)
         && !(is_lua(r.language) && is_lua_library_call(object_or_class, method_name, r, &target[0]))
         && !(is_std_method_name(r.language.as_str(), method_name)
             && !re!(r"^(?:self|Self|this|base)$").is_match(object_or_class)
             && !receiver_names_owner(receiver_link(object_or_class), &target[0], ctx))
         && !(is_untyped_receiver_language(r.language)
-            && !re!(r"^(?:self|self\.class|this|super|weak_?self|strong_?self)$", "i").is_match(object_or_class)
+            && !re!(
+                r"^(?:self|self\.class|this|super|weak_?self|strong_?self)$",
+                "i"
+            )
+            .is_match(object_or_class)
             && !shares_receiver_word(object_or_class, &target[0].qualified_name)
-            && !(r.language == Language::ObjC && objc_receiver_reaches(object_or_class, &target[0], ctx))
-            && !(r.language == Language::Php && php_receiver_reaches(object_or_class, &target[0], ctx)))
+            && !(r.language == Language::ObjC
+                && objc_receiver_reaches(object_or_class, &target[0], ctx))
+            && !(r.language == Language::Php
+                && php_receiver_reaches(object_or_class, &target[0], ctx)))
     {
-        if through_cpp_namespace() && !is_cpp_constructor_through(object_or_class, &target[0], ctx) {
+        if through_cpp_namespace() && !is_cpp_constructor_through(object_or_class, &target[0], ctx)
+        {
             return None;
         }
-        if is_foreign_receiver_self_loop(&target[0], object_or_class, r) {
+        if is_foreign_receiver_self_loop(&target[0], object_or_class, r, ctx) {
             return None;
         }
-        return Some(ResolvedRef::new(r, target[0].id.clone(), 0.7, ResolvedBy::InstanceMethod).guessed_by_name());
+        return Some(
+            ResolvedRef::new(r, target[0].id.clone(), 0.7, ResolvedBy::InstanceMethod)
+                .guessed_by_name(),
+        );
     }
-    if target.len() > 1 || (target.len() == 1 && (scoped_out || python_chain) && !narrowed) {
-        let link = if python_chain { object_or_class.rsplit('.').next().unwrap_or("") } else { receiver_link(object_or_class) };
+    // A Ruby `!` or `?` name on a value (`options.key?`, `body.respond_to?`) is what the
+    // core classes answer on nearly every receiver. The receiver's words cannot tell which
+    // project method of that name, if any, is meant. A constant receiver (`CacheWriter.create!`)
+    // still names its owner.
+    let ruby_bang_or_predicate = r.language == Language::Ruby
+        && (method_name.ends_with('!') || method_name.ends_with('?'))
+        && receiver_link(object_or_class).starts_with(|c: char| matches!(c, 'a'..='z' | '_'));
+    if !ruby_bang_or_predicate
+        && (target.len() > 1 || (target.len() == 1 && (scoped_out || python_chain) && !narrowed))
+    {
+        let link = if python_chain {
+            object_or_class.rsplit('.').next().unwrap_or("")
+        } else {
+            receiver_link(object_or_class)
+        };
         let receiver_words = split_camel_case(link);
         let head = receiver_words.last().map(|w| w.to_lowercase());
         let whole_receiver = link.replace('_', "").to_lowercase();
@@ -1014,29 +1900,56 @@ fn match_by_method_name(
         let mut best: Option<NodeRef> = None;
         let mut best_score = 0i64;
         let mut tied: Vec<NodeRef> = Vec::new();
-        let std = is_std_method_name(r.language.as_str(), method_name) && !re!(r"^(?:self|Self|this|base)$").is_match(object_or_class);
-        for method in prefer_call_site_file(within_cpp_translation_unit(target.clone(), r, ctx, false), &r.file_path) {
+        let std = is_std_method_name(r.language.as_str(), method_name)
+            && !re!(r"^(?:self|Self|this|base)$").is_match(object_or_class);
+        for method in prefer_call_site_file(
+            within_cpp_translation_unit(target.clone(), r, ctx, false),
+            &r.file_path,
+        ) {
             if std && !receiver_names_owner(receiver_link(object_or_class), &method, ctx) {
                 continue;
             }
             let cut = method.qualified_name.rfind("::").filter(|c| *c > 0);
             let class_words: Vec<String> = match cut {
-                Some(c) => split_camel_case(re!(r"::|\.").split(&method.qualified_name[..c]).into_iter().last().unwrap_or("")),
+                Some(c) => split_camel_case(
+                    re!(r"::|\.")
+                        .split(&method.qualified_name[..c])
+                        .into_iter()
+                        .last()
+                        .unwrap_or(""),
+                ),
                 None => Vec::new(),
             };
             if python_chain {
                 if let Some(h) = &head {
-                    if !class_words.iter().any(|cw| singular(cw) == singular(h)) && whole_receiver != class_words.join("").to_lowercase() {
+                    if !class_words.iter().any(|cw| singular(cw) == singular(h))
+                        && whole_receiver != class_words.join("").to_lowercase()
+                    {
                         continue;
                     }
                 }
             }
-            let mut score = receiver_words.iter().filter(|w| class_words.iter().any(|cw| cw.to_lowercase() == w.to_lowercase())).count() as i64;
+            let mut score = receiver_words
+                .iter()
+                .filter(|w| {
+                    class_words
+                        .iter()
+                        .any(|cw| cw.to_lowercase() == w.to_lowercase())
+                })
+                .count() as i64;
             if is_test_double_owner(&class_words.join(" "))
                 && !receiver_words.iter().any(|w| is_test_double_owner(w))
                 && !ctx
                     .read_file(&r.file_path)
-                    .map(|s| s.contains(re!(r"::|\.").split(&method.qualified_name[..cut.unwrap_or(0)]).into_iter().last().unwrap_or("")))
+                    .map(|s| {
+                        s.contains(
+                            re!(r"::|\.")
+                                .split(&method.qualified_name[..cut.unwrap_or(0)])
+                                .into_iter()
+                                .last()
+                                .unwrap_or(""),
+                        )
+                    })
                     .unwrap_or(false)
             {
                 continue;
@@ -1065,16 +1978,23 @@ fn match_by_method_name(
         }
         if let Some(best) = best {
             if best_score >= 2 && best.id != r.from_node_id {
-                if r.language == Language::Cpp && colon && is_cpp_undeclared_qualifier(object_or_class, r, ctx) {
+                if r.language == Language::Cpp
+                    && colon
+                    && is_cpp_undeclared_qualifier(object_or_class, r, ctx)
+                {
                     return None;
                 }
-                if through_cpp_namespace() && !is_cpp_constructor_through(object_or_class, &best, ctx) {
+                if through_cpp_namespace()
+                    && !is_cpp_constructor_through(object_or_class, &best, ctx)
+                {
                     return None;
                 }
-                return Some(ResolvedRef::new(r, best.id.clone(), 0.65, ResolvedBy::InstanceMethod).guessed_by_name());
+                return Some(
+                    ResolvedRef::new(r, best.id.clone(), 0.65, ResolvedBy::InstanceMethod)
+                        .guessed_by_name(),
+                );
             }
         }
     }
     None
 }
-

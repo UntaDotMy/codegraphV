@@ -57,8 +57,17 @@ fn linked_worktrees_are_distinguished_and_share_common_directory() {
         git_worktree_root(linked.to_str().unwrap()),
         Some(m.worktree_root.clone())
     );
-    assert!(worktree_mismatch_warning(&m).contains(&m.worktree_root));
-    assert!(worktree_mismatch_notice(&m).contains("codegraphV init -i"));
+    let user = worktree_mismatch_warning(&m, WorktreeAudience::User);
+    let agent = worktree_mismatch_warning(&m, WorktreeAudience::Agent);
+    let notice = worktree_mismatch_notice(&m);
+    assert!(user.contains(&m.worktree_root));
+    // upstream cb7fb61e: `init -i` is gone, and an agent is told the user can index, never to.
+    assert!(user.contains("Run \"codegraphV init\" in this worktree"), "{user}");
+    assert!(agent.contains("The user can run \"codegraphV init\" in this worktree"), "{agent}");
+    assert!(notice.contains("The user can run \"codegraphV init\""), "{notice}");
+    for text in [&user, &agent, &notice] {
+        assert!(!text.contains("init -i"), "{text}");
+    }
     assert!(
         detect_worktree_index_mismatch(linked.to_str().unwrap(), linked.to_str().unwrap())
             .is_none()

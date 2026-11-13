@@ -30,6 +30,23 @@ fn ok(out: std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+#[test]
+fn refresh_preserves_explicit_hook_and_permission_opt_outs() {
+    let home = tempfile::tempdir().unwrap();
+    ok(cmd(home.path()).current_dir(home.path()).args([
+        "install", "--yes", "--target", "claude", "--no-permissions", "--prompt-hook", "off",
+    ]).output().unwrap());
+    let path = home.path().join(".claude/settings.json");
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
+    ok(cmd(home.path()).current_dir(home.path()).args(["install", "--target", "claude", "--refresh"]).output().unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), before);
+    assert!(!before.contains("mcp__codegraphV__") && !before.contains("prompt-hook"));
+    ok(cmd(home.path()).current_dir(home.path()).args(["install", "--target", "claude", "--refresh", "--prompt-hook", "on"]).output().unwrap());
+    let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"], json!(["prompt-hook"]));
+    assert!(data.get("permissions").is_none());
+}
+
 /// The original's user-visible names: tool names, the product name, its MCP permission.
 fn old_names(text: &str) -> Vec<String> {
     let re = regex::Regex::new(r"(^|[^\w/@.-])codegraph_(explore|node|search|callers|callees|impact|files|status)\b|CodeGraph[^V]|CodeGraph$|mcp__codegraph__").unwrap();
@@ -140,8 +157,8 @@ fn install_writes_codegraphv_and_leaves_the_originals_entries() {
         .iter()
         .filter_map(|g| g["hooks"][0]["command"].as_str())
         .collect();
-    let ours = format!("\"{}\" prompt-hook", env!("CARGO_BIN_EXE_codegraphV").replace('\\', "/"));
-    assert_eq!(hooks, vec!["codegraph prompt-hook", ours.as_str()]);
+    assert_eq!(hooks, vec!["codegraph prompt-hook", env!("CARGO_BIN_EXE_codegraphV")]);
+    assert_eq!(st["hooks"]["UserPromptSubmit"][1]["hooks"][0]["args"], json!(["prompt-hook"]));
     let md = std::fs::read_to_string(&claude_md).unwrap();
     assert!(md.contains("<!-- CODEGRAPH_START -->\n## CodeGraph\noriginal block"), "{md}");
     assert!(md.contains("<!-- CODEGRAPHV_START -->") && md.contains("<!-- CODEGRAPHV_END -->"), "{md}");

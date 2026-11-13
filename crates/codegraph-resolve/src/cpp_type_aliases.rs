@@ -307,6 +307,7 @@ fn local_aliased_type(name: &str, caller: Option<&NodeRef>, r: &UnresolvedRef, c
 enum Declared {
     Alias(NodeRef),
     Cls(String),
+    Enums(Vec<NodeRef>),
     Other,
     Ambiguous(Vec<NodeRef>),
 }
@@ -336,6 +337,10 @@ fn declared_in(scope: &str, name: &str, named: &[NodeRef], templated: bool, r: &
     }
     if here.iter().any(|n| is_class_kind(n.kind)) {
         return Some(Declared::Cls(qualified));
+    }
+    let enums: Vec<NodeRef> = here.iter().filter(|n| n.kind == NodeKind::Enum).cloned().collect();
+    if !enums.is_empty() {
+        return Some(Declared::Enums(enums));
     }
     if here.iter().any(|n| n.kind != NodeKind::TypeAlias) {
         return Some(Declared::Other);
@@ -680,14 +685,55 @@ pub enum CppNamedClass {
     Alias(NodeRef),
 }
 
+/// What a type name declares: a class, an enum, or the alias the name ends on.
+#[derive(Debug, Clone)]
+pub enum CppNamedType {
+    Class(CppNamedClass),
+    Enums(Vec<NodeRef>),
+}
+
 /// The class `written` names from `scopes`: `Undefined` when nothing of that name is declared,
 /// `Null` when something is but it is no class.
 pub fn cpp_class_named(written: &str, scopes: &[String], r: &UnresolvedRef, ctx: &Ctx, visible: Visible) -> Tri<CppNamedClass> {
     let Some(name) = cpp_type_name(written) else { return Tri::Null };
-    let (found, next) = lookup_segments(&name, scopes, r, ctx, visible);
+    class_found(&name, lookup_segments(&name, scopes, r, ctx, visible), r, ctx)
+}
+
+/// What `written` declares, looked up as `cpp_class_named` looks it up. An enum counts, and an
+/// alias is the answer rather than a step on the way to the class it names.
+pub fn cpp_type_named(written: &str, scopes: &[String], r: &UnresolvedRef, ctx: &Ctx, visible: Visible) -> Tri<CppNamedType> {
+    let Some(name) = cpp_type_name(written) else { return Tri::Null };
+    // A reference carries its name without template arguments, so an alias template
+    // can't be told by them. A name that finds one was written with them.
+    let name = TypeName { templated: vec![true; name.names.len()], ..name };
+    let lookup = lookup_segments(&name, scopes, r, ctx, visible);
+    match &lookup.0 {
+        Some(Declared::Enums(nodes)) => return Tri::Value(CppNamedType::Enums(nodes.clone())),
+        Some(Declared::Alias(_)) if lookup.1 == name.names.len() => {
+            if let Some(Declared::Alias(alias)) = lookup.0 {
+                return Tri::Value(CppNamedType::Class(CppNamedClass::Alias(alias)));
+            }
+        }
+        _ => {}
+    }
+    match class_found(&name, lookup, r, ctx) {
+        Tri::Value(found) => Tri::Value(CppNamedType::Class(found)),
+        Tri::Null => Tri::Null,
+        Tri::Undefined => Tri::Undefined,
+    }
+}
+
+/// The class a lookup of `name` found, followed through the alias it reached.
+fn class_found(
+    name: &TypeName,
+    lookup: (Option<Declared>, usize),
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Tri<CppNamedClass> {
+    let (found, next) = lookup;
     let Some(found) = found else { return Tri::Undefined };
     match found {
-        Declared::Other => Tri::Null,
+        Declared::Other | Declared::Enums(_) => Tri::Null,
         Declared::Cls(c) => Tri::Value(CppNamedClass::Cls(c)),
         Declared::Ambiguous(mut nodes) => {
             nodes.sort_by(|a, b| {
@@ -738,7 +784,7 @@ pub fn cpp_aliased_type_written(
     let Some(name) = cpp_type_name(written) else { return Tri::Undefined };
     let (found, next) = lookup_segments(&name, &scopes_for(&name, scopes), r, ctx, None);
     let alias = match found {
-        None | Some(Declared::Cls(_)) | Some(Declared::Other) => return Tri::Undefined,
+        None | Some(Declared::Cls(_)) | Some(Declared::Enums(_)) | Some(Declared::Other) => return Tri::Undefined,
         Some(Declared::Ambiguous(_)) => return Tri::Null,
         Some(Declared::Alias(alias)) => alias,
     };

@@ -16,11 +16,11 @@ use crate::orchestrator::{ChangedFiles, ExtractionOrchestrator, IndexPhase, Inde
 use crate::utils::FileLock;
 use crate::directory::database_path;
 use codegraph_db::{remove_database_files, OpenOptions as DbOpenOptions, Store};
-use codegraph_extract::languages::is_file_level_only_language;
+use codegraph_extract::languages::{detect_language, is_file_level_only_language, yields_symbols};
 use codegraph_extract::scan::config::load_deprioritize_patterns;
 use codegraph_extract::scan::ignore::Ignore;
 use codegraph_graph::{GraphQueryManager, GraphTraverser};
-use codegraph_resolve::callback_synthesizer::{has_synthesis_pattern, is_jsx_child_candidate, synthesize_callback_edges};
+use codegraph_resolve::callback_synthesizer::{alias_may_name, has_synthesis_pattern, is_jsx_child_candidate, synthesize_callback_edges};
 use codegraph_resolve::module_importers::{
     reopen_name_matched_imports, reopen_references_through_added_files, reopen_references_through_barrels,
     reopen_references_through_changed_defaults, reopen_references_through_declared_packages, ChangedFile, ImportReader,
@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The extraction version this engine stamps into an index it builds (`extraction-version.ts`).
 /// Bump when a release changes extraction output enough that existing indexes should be rebuilt.
@@ -54,6 +54,11 @@ const FRAMEWORKS_AT_INDEX_KEY: &str = "frameworks_at_index";
 /// Metadata key: `{added, removed}` — the frameworks a sync detected since the last full index,
 /// against `FRAMEWORKS_AT_INDEX_KEY`; '' when none.
 const FRAMEWORKS_SINCE_INDEX_KEY: &str = "frameworks_since_index";
+/// Metadata key: the frameworks (sorted JSON names) the resolver had at the last full index
+/// (upstream 5526e33d). A sync detects again only when it extracts a file, so one that finds just
+/// `package.json` changed records nothing in `FRAMEWORKS_SINCE_INDEX_KEY`; the resolver detects on
+/// every open, so its set is compared with this one as it is now.
+const RESOLVER_FRAMEWORKS_AT_INDEX_KEY: &str = "resolver_frameworks_at_index";
 /// The ES module family whose references a moved workspace map re-opens (ESM_IMPORT_LANGUAGES).
 const ESM_IMPORT_LANGUAGES: [Language; 8] =
     [Language::TypeScript, Language::Tsx, Language::JavaScript, Language::Jsx, Language::ArkTs, Language::Svelte, Language::Vue, Language::Astro];
@@ -110,6 +115,17 @@ impl IndexState {
             IndexState::Failed => "failed",
         }
     }
+}
+
+/// Files found against files that yielded symbols, by language, for `status` (upstream
+/// 7889da66): `GraphStats::files_by_language` reads the same for a language that parsed and one
+/// that yielded nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanguageCoverage {
+    /// Files that yielded a symbol, for the languages expected to yield any.
+    pub parsed_files_by_language: std::collections::BTreeMap<String, u64>,
+    /// Of those, the languages with files and no symbols at all.
+    pub unparsed_languages: Vec<String>,
 }
 
 /// Which engine built the current index.
@@ -176,6 +192,23 @@ pub struct CodeGraph {
     /// Set when this instance followed a database replaced on disk (#1902): the next sync that
     /// can run reconciles the whole tree.
     pending_full_reconcile: Cell<bool>,
+    /// When this instance last rebuilt the synthesized edges, for
+    /// `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS` (upstream 17395382). Per instance: the watcher's own
+    /// engine is what syncs on every edit, and its first synthesis is never held.
+    last_synthesis_at: Cell<Option<Instant>>,
+}
+
+/// `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS`: the least time between two whole-graph synthesis passes a
+/// long-lived instance's syncs run (upstream 17395382, #2911). Whole milliseconds, 1 s to 24 h;
+/// unset, empty or out of range means no hold.
+pub fn parse_synth_min_interval(raw: Option<&str>) -> Option<Duration> {
+    let raw = raw?.trim();
+    let ms: u64 = raw.parse().ok()?;
+    (1_000..=86_400_000).contains(&ms).then(|| Duration::from_millis(ms))
+}
+
+fn synth_min_interval() -> Option<Duration> {
+    parse_synth_min_interval(std::env::var("CODEGRAPHV_SYNTH_MIN_INTERVAL_MS").ok().as_deref())
 }
 
 impl CodeGraph {
@@ -191,6 +224,7 @@ impl CodeGraph {
             file_lock: RefCell::new(file_lock),
             indexing: Cell::new(false),
             pending_full_reconcile: Cell::new(false),
+            last_synthesis_at: Cell::new(None),
         }
     }
 
@@ -350,7 +384,7 @@ impl CodeGraph {
             } else {
                 file_path.replace('\\', "/")
             };
-            if rel.is_empty() || rel.starts_with("..") {
+            if rel.is_empty() || codegraph_types::nodepath::leaves_root(&rel) {
                 return false;
             }
             slot.as_ref().map(|(_, ig)| ig.ignores(&rel).unwrap_or(false)).unwrap_or(false)
@@ -538,6 +572,9 @@ impl CodeGraph {
             // callback registrations whose member is inherited (#808).
             self.resolver().resolve_chained_calls_via_conformance()?;
             self.resolver().resolve_deferred_this_member_refs()?;
+            // A call on a Ruby parameter takes its class from the method's call sites: last, once
+            // every call has an answer.
+            self.resolver().resolve_parameter_flows();
 
             // Over an existing graph the vocabulary was kept (see the top of the run). Every write
             // of this run has landed, so drop the rows of names deleted or renamed since they
@@ -568,6 +605,10 @@ impl CodeGraph {
         if result.success {
             self.stamp_python_root_fingerprint(None);
             self.stamp_workspace_fingerprint(None);
+            let (aliases, go, cargo) = self.resolver().context().refresh_module_configuration();
+            self.store.set_metadata("module_alias_config", &aliases)?;
+            self.store.set_metadata("module_go_config", &go)?;
+            self.store.set_metadata("module_cargo_config", &cargo)?;
             self.stamp_indexed_frameworks();
         }
         if result.success && result.files_indexed > 0 {
@@ -660,6 +701,11 @@ impl CodeGraph {
             let _ = self.store.set_metadata(FRAMEWORKS_AT_INDEX_KEY, &json);
             let _ = self.store.set_metadata(FRAMEWORKS_SINCE_INDEX_KEY, "");
         }
+        let mut resolver_names = self.resolver().detected_frameworks();
+        resolver_names.sort();
+        if let Ok(json) = serde_json::to_string(&resolver_names) {
+            let _ = self.store.set_metadata(RESOLVER_FRAMEWORKS_AT_INDEX_KEY, &json);
+        }
     }
 
     /// A sync detected frameworks again because what detection read had changed (#2516): a
@@ -722,6 +768,7 @@ impl CodeGraph {
         if synthesize {
             let t = Instant::now();
             let count = synthesize_callback_edges(&self.store, self.resolver().context()).unwrap_or(0);
+            self.last_synthesis_at.set(Some(Instant::now()));
             stats.by_method.insert("callback-synthesis".to_string(), count);
             if timings() {
                 eprintln!("[phase-timing]   synthesis: {}ms", t.elapsed().as_millis());
@@ -765,6 +812,53 @@ impl CodeGraph {
         outcome
     }
 
+    /// How much longer a sync must wait before it may rebuild the synthesized edges: the rest of
+    /// `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS` since this instance last did. Zero when the variable is
+    /// unset or invalid, the instance has not synthesized yet, or the interval has passed.
+    fn synthesis_hold(&self) -> Duration {
+        match (synth_min_interval(), self.last_synthesis_at.get()) {
+            (Some(interval), Some(last)) => interval.saturating_sub(last.elapsed()),
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// Run the synthesis a sync put off under `CODEGRAPHV_SYNTH_MIN_INTERVAL_MS`, under the lock a
+    /// sync takes. `Ok(None)` when it ran or nothing was pending; `Ok(Some(ms))` to try again
+    /// after `ms`: the interval is not up yet, or another process holds the index. The watcher
+    /// calls this when the interval is up, so a held synthesis runs even if no edit follows.
+    pub fn run_deferred_synthesis(&mut self) -> Result<Option<u64>> {
+        let retry_ms = || synth_min_interval().map_or(1_000, |d| d.as_millis() as u64);
+        if self.indexing.get() {
+            return Ok(Some(retry_ms()));
+        }
+        if self.store().get_metadata("synthesis_pending")?.as_deref() != Some("1") {
+            return Ok(None);
+        }
+        let hold = self.synthesis_hold();
+        if !hold.is_zero() {
+            return Ok(Some(hold.as_millis().max(1) as u64));
+        }
+        if self.file_lock.borrow_mut().acquire().is_err() {
+            return Ok(Some(retry_ms()));
+        }
+        self.indexing.set(true);
+        let outcome = (|| -> Result<()> {
+            // A rebuild may have replaced the file meanwhile, as sync checks.
+            self.reopen_replaced_database()?;
+            if self.store().get_metadata("synthesis_pending")?.as_deref() != Some("1") {
+                return Ok(());
+            }
+            self.resolver().refresh_synthesis()?;
+            self.store().set_metadata("synthesis_pending", "0")?;
+            self.last_synthesis_at.set(Some(Instant::now()));
+            self.store().run_maintenance();
+            Ok(())
+        })();
+        self.indexing.set(false);
+        self.file_lock.borrow_mut().release();
+        outcome.map(|()| None)
+    }
+
     fn sync_inner(&self, options: &IndexOptions, on_progress: &mut Option<ProgressFn<'_>>, started: Instant) -> Result<SyncResult> {
         // Detect frameworks from the index as it stands before this sync writes (as at open).
         self.resolver();
@@ -806,8 +900,12 @@ impl CodeGraph {
         // navigation calls to routes.
         let watch_routes = self.resolver().has_navigation_routers();
         let mut routes_before: Option<Vec<Node>> = None;
+        // A call in one Ruby file types a parameter in another, so an edit of the caller can move
+        // the callee's edges.
+        let mut ruby_changed = false;
         let mut result = {
             let mut on_file_change = |file_path: &str, content: Option<&str>| {
+                ruby_changed = ruby_changed || detect_language(file_path, content, None, None) == Language::Ruby;
                 if watch_routes && routes_before.is_none() {
                     routes_before = store.get_nodes_by_kind(NodeKind::Route).ok();
                 }
@@ -831,11 +929,13 @@ impl CodeGraph {
 
         // A component a tag in an unchanged file may render: `<Team />` links to the `Team` this
         // sync adds. Removing one needs no check: a component a tag rendered had synthesized edges
-        // into its file.
+        // into its file. A function a const in an unchanged file names is the same: `const late =
+        // fns.join` links to the `join` this sync adds.
         if !refresh_synthesis {
             if let (Some(delta), Some(changed)) = (&result.definition_delta, &result.changed_file_paths) {
                 let delta: HashSet<&str> = delta.iter().map(String::as_str).collect();
-                if store.get_nodes_by_files(changed)?.iter().any(|n| delta.contains(n.name.as_str()) && is_jsx_child_candidate(n.kind, &n.name, n.language)) {
+                let defined: Vec<Node> = store.get_nodes_by_files(changed)?.into_iter().filter(|n| delta.contains(n.name.as_str())).collect();
+                if defined.iter().any(|n| is_jsx_child_candidate(n.kind, &n.name, n.language)) || alias_may_name(store, &defined) {
                     refresh_synthesis = true;
                     store.set_metadata("synthesis_pending", "1")?;
                 }
@@ -892,6 +992,23 @@ impl CodeGraph {
         }
 
         // Resolve references if files were updated.
+        let (aliases, go, cargo) = self.resolver().context().refresh_module_configuration();
+        for (key, current, languages) in [
+            ("module_alias_config", aliases, ESM_IMPORT_LANGUAGES.to_vec()),
+            ("module_go_config", go, vec![Language::Go]),
+            ("module_cargo_config", cargo, vec![Language::Rust]),
+        ] {
+            let previous = store.get_metadata(key)?;
+            if previous.as_deref().is_some_and(|old| old != current) {
+                self.resolver().clear_caches();
+                for language in languages { self.orchestrator.resurrect_resolution_edges_for_language(language)?; }
+                refresh_synthesis = true;
+                store.set_metadata("synthesis_pending", "1")?;
+            }
+            if previous.as_deref() != Some(current.as_str()) { store.set_metadata(key, &current)?; }
+        }
+
+        // Resolve references if files were updated.
         let files_changed = result.files_added > 0 || result.files_modified > 0;
         // The last edge before the failed-ref retry below: the rebind's per-name ceiling counts
         // only edges up to it (see resurrect_stale_resolution_edges).
@@ -899,14 +1016,19 @@ impl CodeGraph {
         // And the last edge before this sync resolved anything: an importer's edge up to it was
         // bound before a module this sync adds was there.
         let edges_before_resolution = store.get_max_edge_id()?;
-        if files_changed {
+        // A sync that only deleted or renamed definitions still has work: failed references that
+        // shared the removed name can now bind (upstream 2d98c1b6).
+        let has_delta = result.definition_delta.as_ref().is_some_and(|delta| !delta.is_empty());
+        if files_changed || has_delta {
             if let Some(changed) = result.changed_file_paths.clone() {
                 self.resolve_changed_files(&result, &changed, edges_before_resolution, &mut edges_before_retry, on_progress)?;
-            } else {
+            } else if files_changed {
                 // No git info — use batched resolution to avoid OOM.
                 let unresolved_count = store.get_unresolved_references_count()? as usize;
                 emit(on_progress, IndexPhase::Resolving, 0, unresolved_count);
                 self.resolve_references_batched(on_progress, false)?;
+            } else {
+                self.resolve_changed_files(&result, &[], edges_before_resolution, &mut edges_before_retry, on_progress)?;
             }
         }
 
@@ -977,6 +1099,26 @@ impl CodeGraph {
                         let bindings = self.resolver().get_python_package_importers(&edited_inits);
                         reopened.extend(self.orchestrator.resurrect_python_package_importers(&bindings)?);
                     }
+                    // An edit can give a module that only a script's folder provides the names its importers take, or take them away.
+                    let edited_modules: Vec<String> = result
+                        .changed_file_paths
+                        .iter()
+                        .flatten()
+                        .filter(|f| python_files_before.contains(*f) && after.contains(*f))
+                        .cloned()
+                        .collect();
+                    if !edited_modules.is_empty() {
+                        let scope = self.resolver().get_python_script_module_scope(&edited_modules);
+                        if !scope.target_files.is_empty() {
+                            self.resolver().clear_caches();
+                            reopened.extend(self.orchestrator.resurrect_resolution_edges_touching(
+                                Language::Python,
+                                &scope.target_files,
+                                &scope.source_dirs,
+                                &scope.module_leaves,
+                            )?);
+                        }
+                    }
                     // Resolve the narrow set now, the way the changed files' own references were
                     // resolved above, rather than leaving a handful of refs to the orphan sweep.
                     if !reopened.is_empty() {
@@ -1043,13 +1185,30 @@ impl CodeGraph {
             self.resolver().resolve_deferred_this_member_refs()?;
         }
 
+        // The synthesis passes read the whole graph whatever this sync changed, so on a large repo
+        // almost every edit paid for a whole-repo pass (#2911). With CODEGRAPHV_SYNTH_MIN_INTERVAL_MS
+        // set, one within that long of this instance's last is put off, not dropped:
+        // `synthesis_pending` stays set, a later sync or `run_deferred_synthesis` runs it.
+        let mut synthesized = false;
         if refresh_synthesis {
-            self.resolver().refresh_synthesis()?;
-            store.set_metadata("synthesis_pending", "0")?;
+            let hold = self.synthesis_hold();
+            if hold.is_zero() {
+                self.resolver().refresh_synthesis()?;
+                store.set_metadata("synthesis_pending", "0")?;
+                self.last_synthesis_at.set(Some(Instant::now()));
+                synthesized = true;
+            } else {
+                result.synthesis_deferred_ms = Some(hold.as_millis().max(1) as u64);
+            }
+        }
+
+        // Last, as in a full index.
+        if ruby_changed || orphan_count > 0 {
+            self.resolver().resolve_parameter_flows();
         }
 
         // Refresh planner stats + checkpoint the WAL after bulk writes.
-        if files_changed || result.files_removed > 0 || orphan_count > 0 || refresh_synthesis {
+        if files_changed || result.files_removed > 0 || orphan_count > 0 || synthesized {
             store.run_maintenance();
         }
 
@@ -1103,6 +1262,10 @@ impl CodeGraph {
         let t = Instant::now();
         *edges_before_retry = Some(store.get_max_edge_id()?);
         let mut names: IndexSet<String> = store.get_node_names_by_files(changed, None)?.into_iter().collect();
+        // A deletion or a rename removes definitions the changed files no longer list, so the
+        // failed references that shared those names are only visible through the delta
+        // (upstream 2d98c1b6).
+        names.extend(result.definition_delta.iter().flatten().cloned());
         for f in changed {
             names.extend(codegraph_db::reference_tail::module_reference_keys(f));
         }
@@ -1225,6 +1388,10 @@ impl CodeGraph {
         if timings() {
             eprintln!("[phase-timing] sync-name-matched-imports: {}ms ({} refs re-opened)", t.elapsed().as_millis(), name_matched);
         }
+        if let Some(paths) = &result.re_exports_changed_file_paths {
+            let modules: Vec<_> = edited_modules.into_iter().filter(|m| paths.contains(&m.path)).collect();
+            codegraph_resolve::module_importers::reopen_references_through_retargeted_modules(store, &reader, &modules)?;
+        }
         Ok(())
     }
 
@@ -1344,13 +1511,29 @@ impl CodeGraph {
     /// The frameworks a sync detected since the last full index, against the ones that index
     /// extracted every file with. `None` when nothing changed, or for an index built before this
     /// was recorded.
+    ///
+    /// A sync that only finds a manifest changed (`express` added to `package.json`, no source
+    /// edited) extracts nothing, so it records nothing; the resolver's set as detected now, against
+    /// the one the last full index stamped, covers that (upstream 5526e33d).
     pub fn get_framework_changes_since_index(&self) -> Option<FrameworkChanges> {
-        let value = self.store().get_metadata(FRAMEWORKS_SINCE_INDEX_KEY).ok().flatten().filter(|v| !v.is_empty())?;
-        let parsed: serde_json::Value = serde_json::from_str(&value).ok()?;
-        let names = |key: &str| -> Vec<String> {
-            parsed.get(key).and_then(|l| l.as_array()).map(|l| l.iter().filter_map(|n| n.as_str().map(String::from)).collect()).unwrap_or_default()
-        };
-        let changes = FrameworkChanges { added: names("added"), removed: names("removed") };
+        let mut added = std::collections::BTreeSet::new();
+        let mut removed = std::collections::BTreeSet::new();
+        if let Some(value) = self.store().get_metadata(FRAMEWORKS_SINCE_INDEX_KEY).ok().flatten().filter(|v| !v.is_empty()) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value) {
+                for (key, into) in [("added", &mut added), ("removed", &mut removed)] {
+                    if let Some(list) = parsed.get(key).and_then(|l| l.as_array()) {
+                        into.extend(list.iter().filter_map(|n| n.as_str().map(String::from)));
+                    }
+                }
+            }
+        }
+        let at_index = self.store().get_metadata(RESOLVER_FRAMEWORKS_AT_INDEX_KEY).ok().flatten().and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok());
+        if let Some(at_index) = at_index {
+            let now = self.get_detected_frameworks();
+            added.extend(now.iter().filter(|n| !at_index.contains(n)).cloned());
+            removed.extend(at_index.iter().filter(|n| !now.contains(n)).cloned());
+        }
+        let changes = FrameworkChanges { added: added.into_iter().collect(), removed: removed.into_iter().collect() };
         (!changes.added.is_empty() || !changes.removed.is_empty()).then_some(changes)
     }
 
@@ -1369,6 +1552,22 @@ impl CodeGraph {
     pub fn resolve_references(&self) -> Result<codegraph_resolve::types::ResolutionResult> {
         let refs = self.store.get_unresolved_references()?;
         Ok(self.resolver().resolve_and_persist(&refs)?)
+    }
+
+    /// Files found against files that yielded symbols, by language. Reported by `status`, whose
+    /// `--strict` fails on a language that yielded none.
+    pub fn get_language_coverage(&self) -> Result<LanguageCoverage> {
+        let mut coverage = LanguageCoverage::default();
+        for (language, _files, parsed) in self.store().get_parsed_file_counts()? {
+            if !Language::parse(&language).is_some_and(yields_symbols) {
+                continue;
+            }
+            if parsed == 0 {
+                coverage.unparsed_languages.push(language.clone());
+            }
+            coverage.parsed_files_by_language.insert(language, parsed);
+        }
+        Ok(coverage)
     }
 
     /// Indexed files whose symbols are missing although their content is current — rows a

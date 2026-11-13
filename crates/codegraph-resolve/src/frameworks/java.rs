@@ -223,8 +223,6 @@ impl FrameworkResolver for SpringResolver {
             None => vec![String::new()],
         };
 
-        let method_re = re!(r"\bfun\s+(\w+)\s*\(|\b(?:public|private|protected)\s+[^;{=]*?\s+(\w+)\s*\(");
-
         // Verb-specific method mappings — always method-level, BARE or with a path.
         let mapping_regex = re!(r"@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\b\s*(\([^)]*\))?", "g");
         for m in mapping_regex.captures_iter(safe) {
@@ -238,11 +236,9 @@ impl FrameworkResolver for SpringResolver {
             };
             let paths = parse_mapping_paths(&strip_parens(m.text(2).unwrap_or("")), &consts);
             let line = line_of(safe, whole.start());
-            // Method it decorates: first declared method after (skip stacked annotations; Java
-            // puts the return type before the name). Bounded so we don't grab a far one.
-            let tail = utf16_prefix(&safe[whole.end()..], 600);
-            let method_match = method_re.captures(tail);
-            let handler = method_match.as_ref().and_then(|mm| mm.text(1).or(mm.text(2))).map(String::from);
+            // The method the annotation is written on — package-private too, and the overload
+            // whose own annotation sits under a tall stack (upstream 851).
+            let handler = handler_name_after(safe, whole.end());
             for route_path in class_prefixes.iter().flat_map(|prefix| paths.iter().map(move |sub| join_path(prefix, sub))) {
                 let route_node = Node::new(
                     format!("route:{file_path}:{line}:{method}:{route_path}"),
@@ -274,12 +270,11 @@ impl FrameworkResolver for SpringResolver {
         for m in req_re.captures_iter(safe) {
             let Some(whole) = m.get(0) else { continue };
             let args = strip_parens(m.text(1).unwrap_or(""));
-            let after = utf16_prefix(&safe[whole.end()..], 600);
+            let after = utf16_prefix(&safe[whole.end()..], 1200);
             if class_after.is_match(after) {
                 continue; // class-level prefix
             }
-            let Some(method_match) = method_re.captures(after) else { continue };
-            let handler = method_match.text(1).or(method_match.text(2)).unwrap_or("").to_string();
+            let Some(handler) = handler_name_after(safe, whole.end()) else { continue };
             let method = match re!(r"method\s*=\s*[{\[]?\s*(?:RequestMethod\.)?(\w+)").captures(&args) {
                 Some(verb) => verb.text(1).unwrap_or("").to_uppercase(),
                 None => "ANY".to_string(),
@@ -320,6 +315,156 @@ impl FrameworkResolver for SpringResolver {
 fn strip_parens(s: &str) -> String {
     let s = s.strip_prefix('(').unwrap_or(s);
     s.strip_suffix(')').unwrap_or(s).to_string()
+}
+
+const JAVA_METHOD_MODIFIERS: &[&str] = &[
+    "public", "private", "protected", "static", "final", "abstract", "synchronized", "native", "default",
+    "strictfp", "transient", "volatile", "open", "override", "suspend", "inline", "operator", "infix",
+    "external", "tailrec", "internal", "const", "lateinit", "sealed", "data", "value", "annotation",
+];
+
+fn ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_' || c == '$'
+}
+
+fn ident_continue(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+fn char_at(s: &str, at: usize) -> Option<char> {
+    s.get(at..)?.chars().next()
+}
+
+fn skip_ws(s: &str, mut at: usize) -> usize {
+    while let Some(c) = char_at(s, at) {
+        if !c.is_whitespace() {
+            break;
+        }
+        at += c.len_utf8();
+    }
+    at
+}
+
+/// The index just past the bracket matching the one at `at`, quote-aware.
+fn skip_balanced(s: &str, at: usize, open: char, close: char) -> usize {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut i = at;
+    while let Some(c) = char_at(s, i) {
+        i += c.len_utf8();
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+        } else if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return i;
+            }
+        }
+    }
+    s.len()
+}
+
+/// The name of the method declaration the annotation ending at `from` is written on. Skips
+/// stacked annotations and modifiers, accepts a package-private Java method (no modifier) and a
+/// Kotlin `fun`, and refuses a statement, field or constructor (upstream 851).
+fn handler_name_after(source: &str, from: usize) -> Option<String> {
+    let tail = utf16_prefix(source.get(from..)?, 1600);
+    let mut i = 0usize;
+    while i < tail.len() {
+        let c = char_at(tail, i)?;
+        if c.is_whitespace() {
+            i += c.len_utf8();
+            continue;
+        }
+        if c == '@' {
+            i += 1;
+            while let Some(c) = char_at(tail, i) {
+                if ident_continue(c) || c == '.' {
+                    i += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            i = skip_ws(tail, i);
+            if char_at(tail, i) == Some('(') {
+                i = skip_balanced(tail, i, '(', ')');
+            }
+            continue;
+        }
+        if c == '<' {
+            i = skip_balanced(tail, i, '<', '>');
+            continue;
+        }
+        if !ident_start(c) {
+            return None;
+        }
+        let start = i;
+        while let Some(c) = char_at(tail, i) {
+            if ident_continue(c) {
+                i += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let word = &tail[start..i];
+        if JAVA_METHOD_MODIFIERS.contains(&word) {
+            continue;
+        }
+        if word == "fun" {
+            i = skip_ws(tail, i);
+            if char_at(tail, i) == Some('<') {
+                i = skip_ws(tail, skip_balanced(tail, i, '<', '>'));
+            }
+            let name_start = i;
+            while let Some(c) = char_at(tail, i) {
+                if ident_continue(c) {
+                    i += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            return (i > name_start).then(|| tail[name_start..i].to_string());
+        }
+        if matches!(
+            word,
+            "class" | "interface" | "enum" | "record" | "if" | "for" | "while" | "switch" | "catch" | "return" | "new" | "throw" | "else" | "do"
+        ) {
+            return None;
+        }
+        // A Java signature: the last identifier before `(` on this declaration is the method.
+        let mut j = i;
+        while let Some(c) = char_at(tail, j) {
+            if c == '(' {
+                let before = tail[start..j].trim_end();
+                let name_start = before.rfind(|c: char| !ident_continue(c)).map(|p| p + 1).unwrap_or(0);
+                let name = &before[name_start..];
+                let before_name = before[..name_start].trim_end();
+                if before_name.is_empty() || !name.chars().next().is_some_and(ident_start) {
+                    return None;
+                }
+                return Some(name.to_string());
+            }
+            if matches!(c, '\n' | ';' | '{' | '}' | '=') {
+                return None;
+            }
+            j += c.len_utf8();
+        }
+        return None;
+    }
+    None
 }
 
 /// Spring config file patterns: application(-profile)?.{yml,yaml,properties} + bootstrap

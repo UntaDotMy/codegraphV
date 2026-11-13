@@ -7,9 +7,9 @@ pub const ORIGINAL: Brand = Brand {
     permission: "mcp__codegraph__*",
     permission_prefix: "mcp__codegraph__",
     // Also `<path>/codegraph[.exe] prompt-hook`. The npm build wrote `codegraph.cmd prompt-hook`
-    // on Windows; `npx @colbymchenry/codegraph prompt-hook` contains the first form.
+    // on Windows; the npm invocation is recognized as an exact legacy command.
     binary: BINARY,
-    hook_forms: &["codegraph prompt-hook", "codegraph.cmd prompt-hook"],
+    hook_forms: &["codegraph prompt-hook", "codegraph.cmd prompt-hook", "npx @colbymchenry/codegraph prompt-hook"],
     start: "<!-- CODEGRAPH_START -->",
     end: "<!-- CODEGRAPH_END -->",
 };

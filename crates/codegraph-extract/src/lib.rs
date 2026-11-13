@@ -59,6 +59,7 @@ pub mod templates;
 pub mod ts;
 mod swift;
 mod textutil;
+pub use textutil::mask_js_noncode;
 mod tsjs;
 mod wasm_grammars;
 mod erlang;

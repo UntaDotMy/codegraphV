@@ -78,18 +78,30 @@ pub fn windows_powershell() -> Command {
 }
 
 fn run_installer(tag: &str, dir: &Path) -> std::io::Result<bool> {
-    let url = installer_url(cfg!(windows));
-    let mut command = if cfg!(windows) {
-        let mut c = windows_powershell();
-        c.args(["-ExecutionPolicy", "Bypass", "-Command", &format!("irm '{url}' | iex")]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", &format!("curl -fsSL '{url}' | sh")]);
-        c
-    };
-    command.env("CODEGRAPHV_VERSION", tag).env("CODEGRAPHV_INSTALL_DIR", dir);
-    Ok(command.status()?.success())
+    // The selected release's own script first (an older release may not carry one), then the
+    // branch's, so a rollback to a pre-script tag still installs.
+    let mut urls = Vec::new();
+    if let Some(url) = codegraph_installer::upgrade::installer_url_for_tag(tag, cfg!(windows)) {
+        urls.push(url);
+    }
+    urls.push(installer_url(cfg!(windows)));
+    for (at, url) in urls.iter().enumerate() {
+        let mut command = if cfg!(windows) {
+            let mut c = windows_powershell();
+            c.args(["-ExecutionPolicy", "Bypass", "-Command", &format!("irm '{url}' | iex")]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", &format!("curl -fsSL '{url}' | sh")]);
+            c
+        };
+        command.env("CODEGRAPHV_VERSION", tag).env("CODEGRAPHV_INSTALL_DIR", dir);
+        let ok = command.status()?.success();
+        if ok || at + 1 == urls.len() {
+            return Ok(ok);
+        }
+    }
+    Ok(false)
 }
 
 /// Returns the process exit code.
@@ -160,6 +172,25 @@ pub fn run(version: Option<String>, check: bool, force: bool) -> i32 {
                 let refreshed = Command::new(&installed).args(["install", "--refresh"]).status();
                 if !refreshed.is_ok_and(|s| s.success()) {
                     println!("Could not refresh agent configuration; run `codegraphV install --refresh`.");
+                }
+                // A local-only setup lives in the project the user upgrades from. Refresh it
+                // only when it is already configured for this project; never scan or write
+                // other projects (A11).
+                if let Ok(environment) = codegraph_installer::Environment::current() {
+                    let configured = codegraph_installer::TARGETS.iter().any(|id| {
+                        environment.supports(id, codegraph_installer::Location::Local)
+                            && environment.configured(id, codegraph_installer::Location::Local)
+                    });
+                    if configured {
+                        println!("Refreshing this project's local agent configuration...");
+                        let refreshed = Command::new(&installed)
+                            .args(["install", "--refresh", "--location", "local"])
+                            .current_dir(&environment.project)
+                            .status();
+                        if !refreshed.is_ok_and(|s| s.success()) {
+                            println!("Could not refresh this project's local configuration; run `codegraphV install --refresh --location local`.");
+                        }
+                    }
                 }
             }
             // The installer renamed the binary this process runs from aside; drop it once we exit.

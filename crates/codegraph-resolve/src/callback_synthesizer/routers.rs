@@ -804,3 +804,52 @@ pub fn svelte_kit_page_component_edges(ctx: &Ctx) -> Vec<Edge> {
     }
     edges
 }
+
+/// Every route a Next proxy runs before, linked to what runs in it, app by app: each app's proxy
+/// is looked for only where Next loads it. With no `matcher` it runs on every request; with one, a
+/// route is linked when some entry accepts an address it serves, and an entry this can't read
+/// links nothing. The edge carries the entry that matched, and `registeredAt` is where that entry
+/// is written (upstream 446d08c2).
+pub fn next_proxy_edges(ctx: &Ctx) -> Vec<Edge> {
+    use crate::frameworks::next_proxy::{compile_matcher, matcher_covers, next_proxy_dir, next_proxy_for, read_proxy_matcher, ProxyMatcher};
+    use crate::frameworks::nextjs::{next_route_for_file, NextRouteKind};
+    use crate::types::FrameworkResolver;
+    let mut apps: IndexMap<String, Vec<(NodeRef, String)>> = IndexMap::new();
+    for route in ctx.get_nodes_by_kind(NodeKind::Route).iter() {
+        let Some(file) = next_route_for_file(&route.file_path) else { continue };
+        // A page is named by its path, an endpoint by its method and path.
+        let named = if matches!(file.kind, NextRouteKind::Page) { route.name == file.path } else { route.name.ends_with(&format!(" {}", file.path)) };
+        if !named {
+            continue;
+        }
+        apps.entry(file.root).or_default().push((route.clone(), file.path));
+    }
+    if apps.is_empty() || !crate::frameworks::nextjs::NextjsResolver::new().detect(ctx) {
+        return Vec::new();
+    }
+    let mut edges = Vec::new();
+    for (root, routes) in &apps {
+        let files: Vec<&str> = routes.iter().map(|(r, _)| r.file_path.as_str()).collect();
+        let Some(proxy) = next_proxy_for(ctx, &next_proxy_dir(root, &files), root) else { continue };
+        let source = ctx.read_file(&proxy.file).unwrap_or_else(|| "".into());
+        let safe = codegraph_text::strip_comments_for_regex(&source, "typescript");
+        let entries = match read_proxy_matcher(&safe) {
+            ProxyMatcher::All => None,
+            ProxyMatcher::Entries(list) => Some(list.into_iter().map(|e| { let re = compile_matcher(&e.source); (e, re) }).collect::<Vec<_>>()),
+        };
+        let line_of = make_line_at(&safe, 1);
+        for (route, path) in routes {
+            let hit = entries.as_ref().and_then(|list| list.iter().find(|(_, re)| re.as_ref().is_some_and(|re| matcher_covers(re, path, &route.file_path))));
+            if entries.is_some() && hit.is_none() {
+                continue;
+            }
+            let registered = format!("{}:{}", proxy.file, hit.map_or(proxy.entry.start_line, |(e, _)| line_of.at(e.index)));
+            let metadata = match hit {
+                Some((e, _)) => meta! { "synthesizedBy" => "next-proxy", "matcher" => e.source.as_str(), "registeredAt" => registered },
+                None => meta! { "synthesizedBy" => "next-proxy", "registeredAt" => registered },
+            };
+            edges.push(calls_edge(&route.id, &proxy.entry.id, Some(route.start_line), metadata));
+        }
+    }
+    edges
+}

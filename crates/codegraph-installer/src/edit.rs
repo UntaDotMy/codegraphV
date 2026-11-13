@@ -103,7 +103,10 @@ pub fn toml(text: &str, server: &str, value: Option<&Value>) -> Result<String> {
             parent.set_implicit(true);
             doc["mcp_servers"] = toml_edit::Item::Table(parent);
         }
-        let mut table = toml_edit::Table::new();
+        let mut table = match doc.get("mcp_servers").and_then(|m| m.get(server)) {
+            Some(item) => item.as_table().ok_or("Managed MCP entry must be a TOML table; nothing was changed")?.clone(),
+            None => toml_edit::Table::new(),
+        };
         table["command"] = toml_edit::value(expected_command);
         let mut args = toml_edit::Array::new();
         for arg in expected_args {

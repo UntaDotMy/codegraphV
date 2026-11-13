@@ -1,5 +1,5 @@
-//! BUG-67: `codegraph uninstall` removes the installed binary unless --keep-cli, like the
-//! original. The binary is a copy placed in a throwaway install dir; agent config lives in a
+//! All-target uninstall may remove the installed binary; selected targets retain it.
+//! The binary is a copy placed in a throwaway install dir; agent config lives in a
 //! throwaway home, so nothing on the machine is touched.
 use std::{
     path::{Path, PathBuf},
@@ -25,13 +25,21 @@ fn installed_copy(root: &Path) -> PathBuf {
 }
 
 fn uninstall(exe: &Path, home: &Path, extra: &[&str]) -> std::process::Output {
+    std::fs::create_dir_all(home.join("project")).unwrap();
     Command::new(exe)
-        .args(["uninstall", "--yes", "--target", "claude"])
+        .args(["uninstall", "--yes"])
         .args(extra)
+        .current_dir(home.join("project"))
         .env("HOME", home)
         .env("USERPROFILE", home)
         // The default install location must never be the machine's real one in a test.
         .env("LOCALAPPDATA", home)
+        .env("APPDATA", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("HERMES_HOME")
+        .env_remove("COPILOT_HOME")
         .env("CODEGRAPHV_INSTALL_DIR", exe.parent().unwrap())
         .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
         .output()
@@ -81,6 +89,25 @@ fn uninstall_removes_the_installed_binary_unless_keep_cli() {
 }
 
 #[test]
+fn selected_target_and_remaining_local_consumer_keep_the_binary() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let exe = installed_copy(root.path());
+    let out = uninstall(&exe, &home, &["--target", "claude"]);
+    assert!(out.status.success());
+    assert!(exe.exists());
+    let config = home.join("project/.cursor/mcp.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let entry = serde_json::json!({"mcpServers":{"codegraphV":{"command":exe,"args":["serve","--mcp"]}}}).to_string();
+    std::fs::write(&config, &entry).unwrap();
+    let out = uninstall(&exe, &home, &["--target", "all"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read_to_string(config).unwrap(), entry);
+    assert!(Command::new(&exe).arg("--version").output().unwrap().status.success());
+}
+
+#[test]
 fn a_cargo_built_binary_is_reported_never_deleted() {
     let home = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_codegraphV"))
@@ -94,5 +121,5 @@ fn a_cargo_built_binary_is_reported_never_deleted() {
         .unwrap();
     assert!(out.status.success());
     assert!(Path::new(env!("CARGO_BIN_EXE_codegraphV")).exists());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("source checkout"), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("CLI retained"), "{}", String::from_utf8_lossy(&out.stdout));
 }

@@ -13,6 +13,7 @@ pub mod log;
 mod model;
 pub mod nodepath;
 pub mod paths;
+pub mod request;
 
 pub use ids::{file_node_id, node_id, node_id_str, NodeIdAllocator};
 pub use indexmap::IndexMap;

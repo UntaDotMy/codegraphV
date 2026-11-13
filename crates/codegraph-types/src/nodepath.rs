@@ -436,6 +436,16 @@ pub fn is_absolute(p: &str) -> bool {
     native::is_absolute(p)
 }
 
+/// Does a project-relative path leave the root? Only a `..` segment or an absolute path does;
+/// a folder merely named like `..generated` is inside the project.
+pub fn leaves_root(rel: &str) -> bool {
+    if is_absolute(rel) {
+        return true;
+    }
+    let normalized = rel.replace('\\', "/");
+    normalized == ".." || normalized.starts_with("../")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +468,17 @@ mod tests {
         assert_eq!(posix::relative("/a/b", "/a/c/d"), "../c/d");
         assert_eq!(posix::relative("/a", "/a"), "");
         assert_eq!(posix::resolve_from("/w", &["x", "../y"]), "/w/y");
+    }
+
+    #[test]
+    fn leaving_the_root_needs_a_dotdot_segment() {
+        for rel in ["..", "../x", "..\\x", "../.."] {
+            assert!(leaves_root(rel), "{rel}");
+        }
+        for rel in ["..generated", "..generated/client.ts", "..generated\\client.ts", "src/..x/y.ts", ".hidden/z.ts", ""] {
+            assert!(!leaves_root(rel), "{rel}");
+        }
+        assert!(leaves_root(&resolve(&["elsewhere"])));
     }
 
     #[test]

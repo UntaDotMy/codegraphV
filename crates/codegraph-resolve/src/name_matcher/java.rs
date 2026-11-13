@@ -7,6 +7,7 @@ use super::lang_shape::RefShape;
 use crate::types::{NodeRef, UnresolvedRef};
 use codegraph_extract::strip_comments::strip_comments_for_regex;
 use codegraph_jsre::{escape_regex, re, Re};
+use codegraph_types::jscompat::utf16_byte_index;
 use codegraph_types::{Language, Node, NodeKind, ReferenceKind};
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
@@ -66,49 +67,111 @@ pub fn java_file_scope(file: &str, ctx: &Ctx) -> Rc<JavaFileScope> {
     })
 }
 
-/// The simple names of everything the type `qn` extends or implements, transitively (to a depth).
-fn java_ancestor_names(qn: &str, ctx: &Ctx, depth: u32) -> Rc<RefCell<HashSet<String>>> {
+/// The simple names a Java type's own header extends or implements.
+fn java_header_supertypes(decl: &Node, ctx: &Ctx) -> Vec<String> {
+    let lines = lines_of(ctx, &decl.file_path);
+    let mut header = String::new();
+    let mut i = (decl.start_line as usize).saturating_sub(1);
+    while i < lines.len().min(decl.start_line as usize + 6) && !header.contains('{') {
+        header.push_str(&lines[i]);
+        header.push(' ');
+        i += 1;
+    }
+    let before_brace = header.split('{').next().unwrap_or("");
+    let list = re!(r"\b(?:extends|implements)\b([^{]*)").captures(before_brace).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
+    let flat = re!(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>", "g").replace_all_str(&list, "");
+    let mut names = Vec::new();
+    for m in re!(r"([A-Za-z_]\w*)\s*(?=,|$|\bimplements\b|\s*$)", "g").captures_iter(&flat) {
+        let name = m.text(1).unwrap_or("");
+        if name != "implements" && name != "extends" {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// The Java types a supertype `name` in `from`'s header can mean: those its file has in reach (its
+/// own, its package's, imported) when it has any, else every type of the name. elasticsearch's
+/// `InternalGeoGrid implements GeoGrid` is its package's interface, not a record nested elsewhere.
+fn java_supertype_decls(name: &str, from: &Node, ctx: &Ctx) -> Vec<NodeRef> {
+    let all: Vec<NodeRef> = ctx.get_nodes_by_name(name).iter().filter(|t| t.language == Language::Java && is_visible_type_kind(t.kind)).cloned().collect();
+    if all.len() < 2 {
+        return all;
+    }
+    let here = java_file_scope(&from.file_path, ctx);
+    let in_reach: Vec<NodeRef> = all
+        .iter()
+        .filter(|t| {
+            if t.file_path == from.file_path {
+                return true;
+            }
+            let pkg = java_file_scope(&t.file_path, ctx).pkg.clone();
+            if pkg == here.pkg {
+                return true;
+            }
+            let segs: Vec<&str> = t.qualified_name.split("::").collect();
+            let path: &[&str] = if !pkg.is_empty() && segs[0] == pkg { &segs[1..] } else { &segs[..] };
+            let join = |parts: &[&str]| parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(".");
+            let mut all_parts = vec![pkg.as_str()];
+            all_parts.extend(path.iter().copied());
+            let fqn = join(&all_parts);
+            let parent = &fqn[..fqn.rfind('.').unwrap_or(0)];
+            here.single.contains(&fqn) || here.demand.contains(parent) || (path.len() > 1 && here.single.contains(&join(&[pkg.as_str(), path[0]])))
+        })
+        .cloned()
+        .collect();
+    if in_reach.is_empty() { all } else { in_reach }
+}
+
+/// The simple names of the Java types `qn` extends or implements, all the way up (upstream
+/// fab65e9d). Only a finished answer is memoized, so the answer is the index's alone and not the
+/// order references were resolved in.
+pub(crate) fn java_ancestor_names(qn: &str, ctx: &Ctx) -> Rc<RefCell<HashSet<String>>> {
     let memo = ctx.memo::<JavaAncestorsMemo>();
     if let Some(hit) = memo.lookup(&qn.to_string()) {
         return hit;
     }
-    let names: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
-    memo.store(qn.to_string(), Rc::clone(&names));
-    for decl in ctx.get_nodes_by_qualified_name(qn).iter() {
-        if decl.language != Language::Java || !is_visible_type_kind(decl.kind) {
-            continue;
-        }
-        let lines = lines_of(ctx, &decl.file_path);
-        let mut header = String::new();
-        let mut i = (decl.start_line as usize).saturating_sub(1);
-        while i < lines.len().min(decl.start_line as usize + 6) && !header.contains('{') {
-            header.push_str(&lines[i]);
-            header.push(' ');
-            i += 1;
-        }
-        let before_brace = header.split('{').next().unwrap_or("");
-        let list = re!(r"\b(?:extends|implements)\b([^{]*)").captures(before_brace).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
-        let flat = re!(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>", "g").replace_all_str(&list, "");
-        for m in re!(r"([A-Za-z_]\w*)\s*(?=,|$|\bimplements\b|\s*$)", "g").captures_iter(&flat) {
-            let name = m.text(1).unwrap_or("");
-            if name != "implements" && name != "extends" {
-                names.borrow_mut().insert(name.to_string());
-            }
-        }
-    }
-    if depth < 4 {
-        let bases: Vec<String> = names.borrow().iter().cloned().collect();
-        for base in bases {
-            for t in ctx.get_nodes_by_name(&base).iter() {
-                if t.language != Language::Java || !is_visible_type_kind(t.kind) || t.qualified_name == qn {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::from([qn.to_string()]);
+    let mut level = vec![qn.to_string()];
+    while !level.is_empty() {
+        let mut next: Vec<String> = Vec::new();
+        for name in &level {
+            for decl in ctx.get_nodes_by_qualified_name(name).iter() {
+                if decl.language != Language::Java || !is_visible_type_kind(decl.kind) {
                     continue;
                 }
-                let ups: Vec<String> = java_ancestor_names(&t.qualified_name, ctx, depth + 1).borrow().iter().cloned().collect();
-                names.borrow_mut().extend(ups);
+                for base in java_header_supertypes(decl, ctx) {
+                    for t in java_supertype_decls(&base, decl, ctx) {
+                        if !seen.insert(t.qualified_name.clone()) {
+                            continue;
+                        }
+                        match memo.lookup(&t.qualified_name) {
+                            Some(finished) => names.extend(finished.borrow().iter().cloned()),
+                            None => next.push(t.qualified_name.clone()),
+                        }
+                    }
+                    names.insert(base);
+                }
             }
         }
+        level = next;
     }
+    let names = Rc::new(RefCell::new(names));
+    memo.store(qn.to_string(), Rc::clone(&names));
     names
+}
+
+/// Whether a type of `r`'s name is nested in the type `qualifier` ends in.
+fn java_nested_in_qualifier(r: &UnresolvedRef, qualifier: &str, ctx: &Ctx) -> bool {
+    let owner = qualifier.rsplit('.').next().unwrap_or(qualifier);
+    ctx.get_nodes_by_name(&r.reference_name).iter().any(|n| {
+        if n.language != Language::Java || !is_visible_type_kind(n.kind) {
+            return false;
+        }
+        let segs: Vec<&str> = n.qualified_name.split("::").collect();
+        segs.len() > 1 && segs[segs.len() - 2] == owner
+    })
 }
 
 /// Whether Java lets the reference's file name the candidate type: its own package's, one an
@@ -182,6 +245,22 @@ pub fn is_java_type_visible(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> b
     if qualifiers.iter().any(|q| (nested && (q == owner_name || q.ends_with(&format!(".{owner_name}")))) || (!nested && *q == candidate_scope.pkg)) {
         return true;
     }
+    // Through a package it is that package's: `java.io.Reader` is no `Writeable.Reader` the class
+    // inherits. And through a type that declares one of the name it is that one: `Bucket.Reader`.
+    let written: Option<String> = {
+        let at = utf16_byte_index(&line, r.column as usize);
+        if line[at..].starts_with(r.reference_name.as_str()) {
+            let from = line[..at].char_indices().rev().nth(239).map_or(0, |(i, _)| i);
+            re!(r"([A-Za-z_$][\w$.]*)\s*\.\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*$").captures(&line[from..at]).and_then(|c| c.text(1).map(String::from))
+        } else {
+            None
+        }
+    };
+    if let Some(w) = &written {
+        if re!(r"^[a-z_$]").is_match(w) || (nested && java_nested_in_qualifier(r, w, ctx)) {
+            return false;
+        }
+    }
     if !nested {
         if candidate.file_path == r.file_path || candidate_scope.pkg == here.pkg {
             return true;
@@ -204,12 +283,12 @@ pub fn is_java_type_visible(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> b
             .and_then(|c| c.text(1).map(String::from))
             .or_else(|| re!(r"<([A-Za-z_$][\w$]*)\$anon@\d+>").captures(p.qualified_name.split("::").last().unwrap_or("")).and_then(|c| c.text(1).map(String::from)));
         let Some(anon) = anon else {
-            return java_ancestor_names(&p.qualified_name, ctx, 0).borrow().iter().cloned().collect();
+            return java_ancestor_names(&p.qualified_name, ctx).borrow().iter().cloned().collect();
         };
         let mut ups = vec![anon.clone()];
         for t in ctx.get_nodes_by_name(&anon).iter() {
             if t.language == Language::Java && is_visible_type_kind(t.kind) {
-                ups.extend(java_ancestor_names(&t.qualified_name, ctx, 0).borrow().iter().cloned());
+                ups.extend(java_ancestor_names(&t.qualified_name, ctx).borrow().iter().cloned());
             }
         }
         ups

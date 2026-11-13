@@ -79,17 +79,19 @@ fn find_exported_symbol_walk(
     if want.is_default {
         // The file's own `export default` statement decides first: a default it leaves unnamed
         // has no declaration to link.
-        if matches!(stated_default_export(file_path, &export_index, ctx), StatedDefault::Anonymous) {
+        let stated = stated_default_export(file_path, &export_index, ctx);
+        if matches!(stated, StatedDefault::Anonymous) {
             return None;
         }
-        if let Some(direct) = esm_default_export(file_path, &export_index, ctx) {
-            return Some(direct);
-        }
-        // CommonJS `module.exports = …` is the default of a `require`d module.
-        if let Some(common_js) = common_js_default_export(file_path, ctx) {
+        // `module.exports = …` is said outright, so it beats the guess below at a neighbour
+        // assigned to `exports.x`. A stated `export default` already decided, so it skips this.
+        let common_js = if matches!(stated, StatedDefault::Node(_)) { None } else { common_js_default_export(file_path, ctx) };
+        if let Some(common_js) = common_js {
             if let Some(source) = common_js.source.as_deref() {
                 if let Some(next) = resolve_import_path(source, file_path, language, ctx) {
-                    return find_exported_symbol(&next, want, language, ctx, visited, depth + 1);
+                    if let Some(forwarded) = find_exported_symbol(&next, want, language, ctx, visited, depth + 1) {
+                        return Some(forwarded);
+                    }
                 }
             } else if let Some(name) = common_js.name.as_deref() {
                 let mut bound: Vec<NodeRef> = nodes_in_file_named(file_path, name, ctx)
@@ -102,9 +104,20 @@ fn find_exported_symbol_walk(
                 }
             }
         }
+        if let Some(direct) = esm_default_export(file_path, &export_index, ctx) {
+            return Some(direct);
+        }
     } else if want.is_namespace && want.member_name.is_some() {
         if let Some(direct) = exported_by_name(file_path, &export_index, want.member_name.as_deref().unwrap(), ctx) {
             return Some(direct);
+        }
+        // `module.exports = require('./lib/m')` forwards the whole module.
+        if let Some(source) = common_js_default_export(file_path, ctx).and_then(|c| c.source) {
+            if let Some(next) = resolve_import_path(&source, file_path, language, ctx) {
+                if let Some(forwarded) = find_exported_symbol(&next, want, language, ctx, visited, depth + 1) {
+                    return Some(forwarded);
+                }
+            }
         }
     } else {
         if let Some(direct) = exported_by_name(file_path, &export_index, &want.exported_name, ctx) {
@@ -229,7 +242,10 @@ pub fn resolve_static_member(container: &NodeRef, r: &UnresolvedRef, local_name:
         return None;
     }
     let after = &r.reference_name[local_name.len() + 1..];
-    let member = after.split('.').next().unwrap_or("");
+    let (member, rest) = match after.split_once('.') {
+        Some((member, rest)) => (member, Some(rest)),
+        None => (after, None),
+    };
     if member.is_empty() {
         return None;
     }
@@ -241,6 +257,17 @@ pub fn resolve_static_member(container: &NodeRef, r: &UnresolvedRef, local_name:
         .collect();
     if candidates.is_empty() {
         return None;
+    }
+    // A Python chain is read at its last link. `Foo.bar.fset()` is no call of
+    // `bar`, and `Foo.Inner.objects.create()` is no new `Inner`. `Foo.Inner.run()`
+    // is `Inner`'s `run`. A link that is not itself a class ends the walk.
+    if r.language == Language::Python {
+        if let Some(rest) = rest.filter(|rest| !rest.is_empty()) {
+            let next = candidates.iter().find(|n| is_static_member_container(n.kind))?;
+            let mut nested = r.clone();
+            nested.reference_name = format!("{member}.{rest}");
+            return resolve_static_member(next, &nested, member, ctx);
+        }
     }
     if r.is_kind(EdgeKind::Calls) {
         if let Some(callable) = candidates.iter().find(|n| matches!(n.kind, NodeKind::Method | NodeKind::Function)) {

@@ -8,6 +8,7 @@ mod error;
 pub mod dead_code_queries;
 pub mod graph_queries;
 pub mod migrations;
+pub mod parameter_flow_queries;
 pub mod reference_tail;
 pub mod resolver_queries;
 pub mod rows;

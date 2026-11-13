@@ -17,7 +17,7 @@ use codegraph_resolve::module_importers::{reopen_references_through_removed_file
 use codegraph_resolve::resurrect_ref::resurrect_ref_from_dropped_edge;
 use codegraph_resolve::resolver::to_db_reference;
 use codegraph_types::log::log_debug;
-use codegraph_types::{FileRecord, Severity, UnresolvedReference};
+use codegraph_types::{FileRecord, Severity, UnresolvedReference, NodeKind};
 use indexmap::IndexSet;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -91,6 +91,10 @@ impl ExtractionOrchestrator {
         let mut nodes_updated = 0usize;
         let mut changed_file_paths: Vec<String> = Vec::new();
         let mut added_file_paths: Vec<String> = Vec::new();
+        // Tracked with no symbols (over the size limit, or a parse failure): if this sync now
+        // indexes it, its importers are waiting on a module that effectively just appeared
+        // (upstream 4b0f72b7).
+        let mut previously_empty: HashSet<String> = HashSet::new();
         // `file\0name` definition pairs for the files this sync touches, sampled BEFORE their nodes
         // are replaced/deleted. Compared against the post-store pairs below to derive
         // `definition_delta` (CG-33).
@@ -253,6 +257,9 @@ impl ExtractionOrchestrator {
                     if let Some(cb) = on_file_change.as_deref_mut() {
                         cb(file_path, Some(&content));
                     }
+                    if t.node_count == 0 {
+                        previously_empty.insert(file_path.clone());
+                    }
                     files_to_index.push(file_path.clone());
                     changed_file_paths.push(file_path.clone());
                     files_modified += 1;
@@ -284,8 +291,19 @@ impl ExtractionOrchestrator {
         }
 
         // Index changed files
+        let re_exports = |file: &str| -> Result<Vec<String>> {
+            let mut statements: Vec<_> = self.store.get_nodes_by_file(file)?.into_iter()
+                .filter(|n| n.kind == NodeKind::Import)
+                .filter_map(|n| n.signature)
+                .filter(|s| s.trim_start().starts_with("export"))
+                .collect();
+            statements.sort();
+            Ok(statements)
+        };
+        let mut re_exports_changed = Vec::new();
         let total = files_to_index.len();
         for (i, file_path) in files_to_index.iter().enumerate() {
+            let before_exports = re_exports(file_path)?;
             emit(IndexProgress::with_file(IndexPhase::Parsing, i + 1, total, file_path));
             let result = self.index_file(file_path)?;
             if result.errors.iter().any(|e| e.severity == Severity::Error) {
@@ -293,6 +311,14 @@ impl ExtractionOrchestrator {
             }
             if !has_grammar_load_failure(&result.errors) {
                 nodes_updated += result.nodes.len(); // else nothing was stored (#2335)
+                if !result.nodes.is_empty() && previously_empty.contains(file_path) {
+                    // It could not be imported before; treat it like an added module so its
+                    // unchanged importers' file-level import edges are re-opened.
+                    added_file_paths.push(file_path.clone());
+                }
+                if !added_file_paths.contains(file_path) && before_exports != re_exports(file_path)? {
+                    re_exports_changed.push(file_path.clone());
+                }
             }
             if let Some(pause) = backpressure {
                 pause();
@@ -324,6 +350,7 @@ impl ExtractionOrchestrator {
 
         let non_empty = |v: Vec<String>| if v.is_empty() { None } else { Some(v) };
         Ok(SyncResult {
+            re_exports_changed_file_paths: non_empty(re_exports_changed),
             files_checked,
             files_added,
             files_modified,

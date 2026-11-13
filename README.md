@@ -57,7 +57,8 @@ Everything runs on your machine. The rewrite keeps:
   React Native, SvelteKit, Nuxt and the rest.
 - **The same dynamic-dispatch bridges** (callbacks, events, React re-renders).
 - **The same agent installer** for Claude Code, Cursor, Codex, opencode, Gemini, Kiro,
-  Hermes, Antigravity and GitHub Copilot.
+  Hermes, Antigravity, GitHub Copilot, IBM Bob, Factory Droid, Windsurf, Qwen Code,
+  DeepSeek Harness, Grok Build, Kimi Code, Qoder CLI and Pi.
 - **Automatic sync:** the index follows your edits while an agent session runs, and catches
   up on edits made while no session was running.
 - **The Claude Code prompt hook,** which adds codegraphV context to "how / where / trace"

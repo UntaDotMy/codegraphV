@@ -709,6 +709,9 @@ impl<'t> Walker<'t> {
                         None
                     };
                     let signature = value_node.map(|v| util::init_signature(self.text(v)));
+                    // A var/const spec has no `name` field on the declaration node; its
+                    // exportedness is its own first letter, as a function's is.
+                    let exported = name.as_bytes().first().is_some_and(u8::is_ascii_uppercase);
                     // A member of a `const ( … )` or `var ( … )` group has its
                     // own doc comment beside it in the parentheses; one without
                     // keeps the group's.
@@ -717,7 +720,7 @@ impl<'t> Walker<'t> {
                         if is_const_decl { "constant" } else { "variable" },
                         &name,
                         spec,
-                        Extra { docstring: doc, signature, ..Extra::default() },
+                        Extra { docstring: doc, signature, is_exported: Some(exported), ..Extra::default() },
                     );
                 }
             }

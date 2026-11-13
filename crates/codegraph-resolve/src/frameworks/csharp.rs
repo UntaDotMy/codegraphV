@@ -421,7 +421,12 @@ fn extract_csharp_tail_ident(expr: &str) -> Option<String> {
 
 /// A framework name heuristic's pick (see `name_heuristic`), preferring these folders.
 fn resolve_by_name_and_kind(r: &UnresolvedRef, kinds: &[NodeKind], preferred_dir_patterns: &[&str], ctx: &Ctx) -> Option<String> {
-    pick_by_name_and_kind(r, kinds, &|f: &str| preferred_dir_patterns.iter().any(|d| f.contains(d)), ctx, &NamePickOptions::default())
+    let picked = pick_by_name_and_kind(r, kinds, &|f: &str| preferred_dir_patterns.iter().any(|d| f.contains(d)), ctx, &NamePickOptions::default())?;
+    // A name written with type arguments is a type declaring as many (upstream 092e6cf8).
+    match ctx.node_by_id(&picked) {
+        Some(t) if !crate::name_matcher::csharp::csharp_type_arity_fits(&t, r, ctx) => None,
+        _ => Some(picked),
+    }
 }
 
 #[cfg(test)]

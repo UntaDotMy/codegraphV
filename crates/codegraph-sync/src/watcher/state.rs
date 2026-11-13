@@ -21,6 +21,11 @@ pub struct PendingFile {
 pub struct WatchSyncResult {
     pub files_changed: usize,
     pub duration_ms: u64,
+    /// Work this sync put off (a held synthesis, upstream 17395382): when set, the sync thread
+    /// calls the callback again with `Some(vec![])` (no paths) after this long, unless another
+    /// sync runs first. The driver never sends an empty path list, so the call is unambiguous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun_after_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

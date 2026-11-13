@@ -2,13 +2,15 @@
 //! resolution: a name (or `Receiver.member`) the file imports is followed to the module it
 //! comes from and the symbol that module exports.
 
+use super::exports::is_stated_default_export;
 use super::{
     find_exported_symbol, is_cobol_copybook_ref, is_dart_import_ref, is_esm_import_language, is_external_import,
     is_nix_path_import_ref, is_php_include_path_ref, lua_basename_index, names_own_config_module, resolve_import_path,
     resolve_php_include_path, resolve_static_member, ExternalOpts, Want, REEXPORT_MAX_DEPTH,
 };
 use crate::ambient_modules::{
-    ambient_module_declares, find_ambient_module_export, find_ambient_module_file, in_block, is_in_module_block, namespace_blocks, AmbientWant, NamespaceBlock,
+    ambient_module_declares, declaring_file_answers, find_ambient_module_export, find_ambient_module_file, in_block, is_declaration_file, is_in_module_block,
+    namespace_blocks, AmbientWant, NamespaceBlock,
 };
 use crate::ctx::Ctx;
 use crate::dart_libraries::dart_directive_file;
@@ -22,6 +24,7 @@ use crate::name_matcher::python::python_function_module_alias;
 use crate::name_matcher::reach::{is_ts_js_file, ts_global_scope};
 use crate::name_matcher::resolve_method_on_type;
 use crate::types::{ImportMapping, NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
+use crate::workspace_packages::workspace_import_targets;
 use codegraph_db::reference_tail::{module_reference_keys, module_tail};
 use codegraph_jsre::re;
 use codegraph_search::is_test_file;
@@ -53,6 +56,48 @@ pub fn is_bare_module_specifier(source: &str, language: Language) -> bool {
     is_esm_import_language(language) && !source.starts_with('.') && !source.starts_with('/')
 }
 
+/// Whether `specifier`, resolving to `file`, names a module of a package this repository holds.
+/// A `declare module` of that name only describes the module. A declaration file is not one:
+/// the checker still takes the declared module first.
+fn is_repository_module(specifier: &str, file: Option<&str>, from_file: &str, ctx: &Ctx) -> bool {
+    if file.is_none_or(is_declaration_file) {
+        return false;
+    }
+    let Some(ws) = ctx.get_workspace_packages() else { return false };
+    workspace_import_targets(specifier, &ws, Some(from_file)).is_some()
+}
+
+/// The export an import of `source` names: a module this repository implements, then its own
+/// `declare module`, then any other file.
+fn find_imported_export(source: &str, file: Option<&str>, want: &Want, amb: &AmbientWant, r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
+    let in_file = || file.and_then(|f| exported(f, want, r.language, ctx));
+    let declared = if is_bare_module_specifier(source, r.language) { find_ambient_module_export(source, amb, r, ctx) } else { None };
+    match declared {
+        None => in_file(),
+        Some(node) => {
+            if is_repository_module(source, file, &r.file_path, ctx) {
+                in_file().or(Some(node))
+            } else {
+                Some(node)
+            }
+        }
+    }
+}
+
+/// The file that declares `specifier`, unless a module of this repository implements it.
+fn declared_module_file(specifier: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
+    if !is_bare_module_specifier(specifier, r.language) {
+        return None;
+    }
+    let declaring = find_ambient_module_file(specifier, &r.file_path, ctx)?;
+    let resolved = resolve_import_path(specifier, &r.file_path, r.language, ctx);
+    if is_repository_module(specifier, resolved.as_deref(), &r.file_path, ctx) {
+        None
+    } else {
+        Some(declaring)
+    }
+}
+
 // -- JS path / bare module imports -------------------------------------------------------------
 
 fn is_js_path_specifier(name: &str) -> bool {
@@ -77,10 +122,8 @@ pub fn js_module_file(r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
     if !is_js_path_import_ref(r) && !is_js_bare_module_ref(r, ctx) {
         return None;
     }
-    if is_bare_module_specifier(&r.reference_name, r.language) {
-        if let Some(declaring) = find_ambient_module_file(&r.reference_name, &r.file_path, ctx) {
-            return Some(declaring.file_path.clone());
-        }
+    if let Some(declaring) = declared_module_file(&r.reference_name, r, ctx) {
+        return Some(declaring.file_path.clone());
     }
     let file = resolve_import_path(&r.reference_name, &r.file_path, r.language, ctx)?;
     if file != r.file_path {
@@ -124,6 +167,49 @@ fn pick_closest_jvm_candidate(candidates: &[NodeRef], from_path: &str) -> NodeRe
     best
 }
 
+/// The source set a file is in: `androidMain` of `lib/src/androidMain/kotlin/a/Util.kt`.
+fn kmp_source_set(file_path: &str) -> Option<String> {
+    re!(r"(?:^|/)src/([^/]+)/").captures(file_path).and_then(|c| c.text(1).map(String::from))
+}
+
+/// What a source set builds for: `android` of `androidMain` and `androidUnitTest`.
+fn kmp_build_target(set: &str) -> String {
+    re!(r"(?:Main|(?:Unit|Instrumented|Device|Host)?Test)$").replace_first(set, |_| String::new())
+}
+
+/// `pickJvmDeclaration` (upstream 59bfe6d7): which of a declaration's same-named Kotlin
+/// Multiplatform declarations a JVM reference reaches. Common code sees the `expect` (nearest,
+/// `expect` on a tie); a platform's source sets see their target's `actual`, or that of a target they
+/// build on; Java and a plain Kotlin module see the JVM `actual` their path names, Android's only by
+/// name; an intermediate source set the `expect`.
+fn pick_jvm_declaration(declarations: &[NodeRef], r: &UnresolvedRef) -> NodeRef {
+    let is_actual = |n: &NodeRef| n.decorators.as_ref().is_some_and(|d| d.iter().any(|x| x == "actual"));
+    let actuals: Vec<NodeRef> = declarations.iter().filter(|n| is_actual(n)).cloned().collect();
+    if actuals.is_empty() || actuals.len() == declarations.len() {
+        return pick_closest_jvm_candidate(declarations, &r.file_path);
+    }
+    let target = kmp_source_set(&r.file_path).map(|s| kmp_build_target(&s));
+    let target_of = |n: &NodeRef| kmp_build_target(&kmp_source_set(&n.file_path).unwrap_or_default());
+    let java = r.language == Language::Java;
+    if target.as_deref().is_some_and(|t| t.starts_with("common")) || (target.is_none() && !java) {
+        return pick_closest_jvm_candidate(declarations, &r.file_path);
+    }
+    let own: Vec<NodeRef> = actuals.iter().filter(|n| Some(target_of(n)) == target).cloned().collect();
+    if !own.is_empty() {
+        return pick_closest_jvm_candidate(&own, &r.file_path);
+    }
+    if java || matches!(target.as_deref(), Some("main") | Some("test")) {
+        let jvm: Vec<NodeRef> = actuals.iter().filter(|n| re!(r"^(?:android|jvm|desktop)").is_match(&target_of(n))).cloned().collect();
+        let android = re!(r"android", "i").is_match(&r.file_path);
+        let named: Vec<NodeRef> = jvm.iter().filter(|n| target_of(n).starts_with("android") == android).cloned().collect();
+        let pool = if !named.is_empty() { named } else if !jvm.is_empty() { jvm } else { actuals };
+        return pick_closest_jvm_candidate(&pool, &r.file_path);
+    }
+    let t = target.unwrap_or_default();
+    let above: Vec<NodeRef> = actuals.iter().filter(|n| { let o = target_of(n); !o.is_empty() && t.starts_with(&o) }).cloned().collect();
+    pick_closest_jvm_candidate(if above.is_empty() { declarations } else { &above }, &r.file_path)
+}
+
 /// A Java/Kotlin `import a.b.C` resolved by qualified name.
 pub fn resolve_jvm_import(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     if !r.is_kind(EdgeKind::Imports) || !matches!(r.language, Language::Java | Language::Kotlin) {
@@ -138,10 +224,125 @@ pub fn resolve_jvm_import(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     }
     let candidates = ctx.get_nodes_by_qualified_name(&format!("{pkg}::{sym}"));
     if candidates.is_empty() {
+        // A Kotlin file facade: `p.UtilsKt` names the top-level declarations in `p/Utils.kt`.
+        if let Some(file) = jvm_file_facade(fqn, ctx) {
+            return Some(imported(r, &file.id, 0.9));
+        }
+        // A Kotlin top-level declaration imported by name (`import p.extOther`).
+        if let Some(node) = jvm_package_member(fqn, ctx) {
+            return Some(imported(r, &node.id, 0.85));
+        }
         return None;
     }
-    let best = if candidates.len() == 1 { candidates[0].clone() } else { pick_closest_jvm_candidate(&candidates, &r.file_path) };
+    let best = if candidates.len() == 1 { candidates[0].clone() } else { pick_jvm_declaration(&candidates, r) };
     Some(imported(r, &best.id, 0.95))
+}
+
+/// A top-level Java/Kotlin declaration named by the last segment of `fqn`, declared in its package.
+fn jvm_package_member(fqn: &str, ctx: &Ctx) -> Option<NodeRef> {
+    let mut parts: Vec<&str> = fqn.split('.').collect();
+    let name = parts.pop()?;
+    let dir = parts.join("/");
+    ctx.get_nodes_by_name(name)
+        .iter()
+        .find(|n| matches!(n.language, Language::Java | Language::Kotlin)
+            && (dir.is_empty() || n.file_path.starts_with(&format!("{dir}/"))))
+        .cloned()
+}
+
+/// `p.UtilsKt` → the node for `p/Utils.kt`, the file a JVM file-facade class stands for.
+fn jvm_file_facade(fqn: &str, ctx: &Ctx) -> Option<NodeRef> {
+    let mut parts: Vec<&str> = fqn.split('.').collect();
+    let last = parts.pop()?;
+    let base = last.strip_suffix("Kt").filter(|b| !b.is_empty())?;
+    let path = if parts.is_empty() { format!("{base}.kt") } else { format!("{}/{base}.kt", parts.join("/")) };
+    file_node_by_path(&path, ctx)
+}
+
+/// One step down a JVM declaration's members: a nested class/object, a method, or a top-level
+/// declaration when the parent is the file its facade names.
+fn jvm_child(parent: &NodeRef, name: &str, ctx: &Ctx) -> Option<NodeRef> {
+    let members = ctx.get_nodes_by_qualified_name(&format!("{}::{name}", parent.qualified_name));
+    // The member the parent's own declaration holds: a Multiplatform `expect` and each `actual`
+    // share a qualified name, and the parent was already picked for the caller (upstream 59bfe6d7).
+    members
+        .iter()
+        .find(|n| n.id != parent.id && n.file_path == parent.file_path)
+        .or_else(|| members.iter().find(|n| n.id != parent.id))
+        .cloned()
+        .or_else(|| {
+            if parent.kind == NodeKind::File {
+                ctx.get_nodes_in_file(&parent.file_path).iter().find(|n| n.name == name && n.kind != NodeKind::File).cloned()
+            } else {
+                None
+            }
+        })
+}
+
+/// The declaration a Java/Kotlin `import` names, whichever JVM language declares it.
+fn jvm_import_node(imp: &ImportMapping, r: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
+    let qualified = imp.source.split('.').collect::<Vec<_>>().join("::");
+    let found: Vec<NodeRef> = ctx.get_nodes_by_qualified_name(&qualified).iter().filter(|n| n.kind != NodeKind::File).cloned().collect();
+    if !found.is_empty() {
+        return Some(if found.len() == 1 { found[0].clone() } else { pick_jvm_declaration(&found, r) });
+    }
+    if let Some(file) = jvm_file_facade(&imp.source, ctx) {
+        return Some(file);
+    }
+    jvm_package_member(&imp.source, ctx)
+}
+
+pub fn resolve_java_imported_reference(r: &UnresolvedRef, imports: &[ImportMapping], ctx: &Ctx) -> Option<ResolvedRef> {
+    if imports.is_empty() {
+        return None;
+    }
+    for imp in imports {
+        let matches_bare = imp.local_name == r.reference_name;
+        let matches_qualified = r.reference_name.starts_with(&format!("{}.", imp.local_name));
+        if !matches_bare && !matches_qualified {
+            continue;
+        }
+        let Some(target) = jvm_import_node(imp, r, ctx) else { continue };
+        let member_path: Vec<&str> = if matches_bare {
+            Vec::new()
+        } else {
+            r.reference_name[imp.local_name.len() + 1..].split('.').collect()
+        };
+        if member_path.is_empty() {
+            return Some(imported(r, &target.id, 0.9));
+        }
+        // Walk the path the call spells (`JUtil.Nested.deep`, `KUtil.INSTANCE.kmake`,
+        // `KCompanion.Companion.make`, `UtilsKt.helper`), across languages (#3023).
+        let mut current = target;
+        let mut failed = false;
+        for (i, segment) in member_path.iter().enumerate() {
+            if *segment == "INSTANCE" {
+                continue;
+            }
+            if *segment == "Companion" {
+                let next = member_path.get(i + 1).copied();
+                match jvm_child(&current, segment, ctx) {
+                    Some(child) if next.is_none() || jvm_child(&child, next.unwrap_or(""), ctx).is_some() => {
+                        current = child;
+                    }
+                    // Kotlin may place a companion's members on the class itself.
+                    _ => {}
+                }
+                continue;
+            }
+            match jvm_child(&current, segment, ctx) {
+                Some(child) => current = child,
+                None => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if !failed {
+            return Some(imported(r, &current.id, 0.9));
+        }
+    }
+    None
 }
 
 fn resolve_jvm_alias(r: &UnresolvedRef, imports: &[ImportMapping], ctx: &Ctx) -> Option<ResolvedRef> {
@@ -158,47 +359,6 @@ fn resolve_jvm_alias(r: &UnresolvedRef, imports: &[ImportMapping], ctx: &Ctx) ->
             Some(m) if m.contains('.') => None,
             Some(m) => ctx.get_nodes_by_qualified_name(&format!("{}::{m}", target.qualified_name)).first().map(|f| imported(r, &f.id, 0.9)),
         };
-    }
-    None
-}
-
-fn resolve_java_imported_reference(r: &UnresolvedRef, imports: &[ImportMapping], ctx: &Ctx) -> Option<ResolvedRef> {
-    if imports.is_empty() {
-        return None;
-    }
-    let ext = if r.language == Language::Kotlin { ".kt" } else { ".java" };
-    for imp in imports {
-        let matches_bare = imp.local_name == r.reference_name;
-        let matches_qualified = r.reference_name.starts_with(&format!("{}.", imp.local_name));
-        if !matches_bare && !matches_qualified {
-            continue;
-        }
-        let fqn_path = format!("{}{ext}", imp.source.replace('.', "/"));
-        let member_name = if matches_bare { imp.local_name.clone() } else { r.reference_name[imp.local_name.len() + 1..].to_string() };
-        let candidates = ctx.get_nodes_by_name(&member_name);
-        for node in candidates.iter() {
-            if node.language != r.language {
-                continue;
-            }
-            let fp = node.file_path.replace('\\', "/");
-            if fp.ends_with(&fqn_path) || fp.ends_with(&format!("/{fqn_path}")) {
-                return Some(imported(r, &node.id, 0.9));
-            }
-        }
-        if matches_bare {
-            if let Some(dot) = imp.source.rfind('.').filter(|d| *d > 0) {
-                let owner_path = format!("{}{ext}", imp.source[..dot].replace('.', "/"));
-                for node in candidates.iter() {
-                    if node.language != r.language {
-                        continue;
-                    }
-                    let fp = node.file_path.replace('\\', "/");
-                    if fp.ends_with(&owner_path) || fp.ends_with(&format!("/{owner_path}")) {
-                        return Some(imported(r, &node.id, 0.9));
-                    }
-                }
-            }
-        }
     }
     None
 }
@@ -460,14 +620,12 @@ fn type_qualifier(r: &UnresolvedRef, ctx: &Ctx) -> Option<Vec<String>> {
 
 fn imported_type_member(imp: &ImportMapping, path: &[String], r: &UnresolvedRef, ctx: &Ctx) -> Tri<NodeRef> {
     let file = resolve_import_path(&imp.source, &r.file_path, r.language, ctx);
-    let bare = is_bare_module_specifier(&imp.source, r.language);
     let found: Option<NodeRef>;
     let rest: Vec<String>;
     if imp.is_namespace {
         let w = want(false, true, &path[0], Some(&path[0]));
         let amb = AmbientWant { is_default: false, is_namespace: true, exported_name: &path[0], member_name: Some(&path[0]) };
-        found = (if bare { find_ambient_module_export(&imp.source, &amb, r, ctx) } else { None })
-            .or_else(|| file.as_deref().and_then(|f| exported(f, &w, r.language, ctx)));
+        found = find_imported_export(&imp.source, file.as_deref(), &w, &amb, r, ctx);
         if found.is_some() && path.len() == 1 {
             return Tri::Value(found.unwrap());
         }
@@ -476,8 +634,7 @@ fn imported_type_member(imp: &ImportMapping, path: &[String], r: &UnresolvedRef,
         let exported_name = if imp.is_default { "default" } else { imp.exported_name.as_str() };
         let w = want(imp.is_default, false, exported_name, None);
         let amb = AmbientWant { is_default: imp.is_default, is_namespace: false, exported_name, member_name: None };
-        found = (if bare { find_ambient_module_export(&imp.source, &amb, r, ctx) } else { None })
-            .or_else(|| file.as_deref().and_then(|f| exported(f, &w, r.language, ctx)));
+        found = find_imported_export(&imp.source, file.as_deref(), &w, &amb, r, ctx);
         rest = path.to_vec();
     }
     if let Some(found) = found {
@@ -611,15 +768,22 @@ fn resolve_python_module_member(r: &UnresolvedRef, imports: &[ImportMapping], ct
     if member.is_empty() {
         return None;
     }
-    if let Some(local) = python_function_module_alias(receiver, r, ctx) {
-        let local_path = resolve_import_path(&local, &r.file_path, r.language, ctx);
+    let local_alias = python_function_module_alias(receiver, r, ctx);
+    if let Some(local) = &local_alias {
+        let local_path = resolve_import_path(local, &r.file_path, r.language, ctx);
         let target = match local_path {
             Some(p) if p != r.file_path => exported(&p, &want(false, false, member, None), Language::Python, ctx),
             _ => None,
         };
         return target.map(|t| imported(r, &t.id, 0.85));
     }
+    // A from-import written inside a function binds the name only there; only a module-scope
+    // from-import may answer a call from another function (upstream b700a3ee).
+    let module_level = crate::name_matcher::python::python_module_import_keys(receiver, &r.file_path, ctx);
     for imp in imports {
+        if !imp.is_namespace && !module_level.contains(&format!("{}:{}", imp.source, imp.exported_name)) {
+            continue;
+        }
         let spelled_out = imp.is_namespace
             && Some(imp.local_name.as_str()) == imp.source.rsplit('.').next()
             && imp.source.contains('.')
@@ -696,10 +860,8 @@ fn resolve_module_import_to_file(r: &UnresolvedRef, imports: &[ImportMapping], c
         } else {
             continue;
         }
-        if is_bare_module_specifier(&module_path, r.language) {
-            if let Some(declaring) = find_ambient_module_file(&module_path, &r.file_path, ctx) {
-                return Some(imported(r, &declaring.id, 0.9));
-            }
+        if let Some(declaring) = declared_module_file(&module_path, r, ctx) {
+            return Some(imported(r, &declaring.id, 0.9));
         }
         if let Some(resolved) = resolve_import_path(&module_path, &r.file_path, r.language, ctx).filter(|p| *p != r.file_path) {
             if let Some(file_node) = file_node_of(&resolved, ctx) {
@@ -859,14 +1021,15 @@ fn resolve_go_cross_package_reference(r: &UnresolvedRef, imports: &[ImportMappin
 /// Can a reference written in its file reach the ambient module `specifier` declared in
 /// `declaring_file`?
 pub fn reaches_ambient_module(r: &UnresolvedRef, specifier: &str, declaring_file: &str, ctx: &Ctx) -> bool {
-    if is_in_module_block(&r.file_path, r.line, r.column, specifier, ctx) {
+    let answers = declaring_file_answers(declaring_file, &r.file_path, ctx);
+    if answers && is_in_module_block(&r.file_path, r.line, r.column, specifier, ctx) {
         return true;
     }
     let mappings = ctx.get_import_mappings(&r.file_path, r.language);
     let relative = |source: &str| source.starts_with('.') || source.starts_with('/');
     let leads_to = |source: &str, through: &dyn Fn(&str) -> bool| -> bool {
         if source == specifier {
-            return true;
+            return answers;
         }
         if !relative(source) {
             return false;
@@ -978,13 +1141,31 @@ pub fn resolve_via_import(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             let bare = is_bare_module_specifier(&imp.source, r.language);
             if resolved_path.is_some() || bare {
                 let exported_name = if imp.is_default { "default" } else { imp.exported_name.as_str() };
+                let member_read = !imp.is_namespace && r.reference_name.starts_with(&format!("{}.", imp.local_name));
                 let member_name = if imp.is_namespace { Some(r.reference_name.replacen(&format!("{}.", imp.local_name), "", 1)) } else { None };
                 let w = want(imp.is_default, imp.is_namespace, exported_name, member_name.as_deref());
                 let amb = AmbientWant { is_default: imp.is_default, is_namespace: imp.is_namespace, exported_name, member_name: member_name.as_deref() };
-                let target = (if bare { find_ambient_module_export(&imp.source, &amb, r, ctx) } else { None })
-                    .or_else(|| resolved_path.as_deref().and_then(|p| exported(p, &w, r.language, ctx)));
+                let target = find_imported_export(&imp.source, resolved_path.as_deref(), &w, &amb, r, ctx);
+                // `named.second()` through a default binding is the export named `second`.
+                // Where the module states no default, that name comes first: the binding found
+                // so far is only the guess at the first export.
+                let through_default = member_read && imp.is_default && is_esm_import_language(r.language);
+                let exported = if through_default {
+                    let member = &r.reference_name[imp.local_name.len() + 1..];
+                    let w = want(false, true, exported_name, Some(member));
+                    let amb = AmbientWant { is_default: false, is_namespace: true, exported_name, member_name: Some(member) };
+                    find_imported_export(&imp.source, resolved_path.as_deref(), &w, &amb, r, ctx)
+                } else {
+                    None
+                };
+                let guessed = through_default && target.as_ref().is_none_or(|t| !is_stated_default_export(t, ctx));
+                if guessed {
+                    if let Some(exported) = &exported {
+                        return Some(imported(r, &exported.id, 0.9));
+                    }
+                }
                 if let Some(target) = target {
-                    if !imp.is_namespace && r.reference_name.starts_with(&format!("{}.", imp.local_name)) {
+                    if member_read {
                         if let Some(member) = resolve_static_member(&target, r, &imp.local_name, ctx) {
                             return Some(imported(r, &member.id, 0.9));
                         }
@@ -1002,8 +1183,16 @@ pub fn resolve_via_import(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
                         if let Some(instance) = resolve_imported_instance_member(&target, r, &imp.local_name, ctx) {
                             return Some(instance);
                         }
+                        // `module.exports = main; module.exports.extra = …`, then `named.extra()`.
+                        if let Some(exported) = &exported {
+                            return Some(imported(r, &exported.id, 0.9));
+                        }
                         if r.language == Language::Python {
                             return None;
+                        }
+                        // A member of the guess at the module's first export is no member of the module.
+                        if guessed {
+                            continue;
                         }
                     }
                     return Some(imported(r, &target.id, 0.9));

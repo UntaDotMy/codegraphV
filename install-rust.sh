@@ -25,7 +25,17 @@ if [ "$os-$arch" = linux-arm64 ]; then
   exit 1
 fi
 
-fetch() { if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"; else wget -qO "$2" "$1"; fi; }
+# Try curl, then wget: a host can have curl installed but blocked from the release host.
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2" && return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1" && return 0
+  fi
+  echo "Could not download $1" >&2
+  return 1
+}
 
 # "latest" comes from the releases/latest web redirect first: the unauthenticated API is
 # limited to 60 requests an hour per IP.
@@ -36,7 +46,9 @@ if [ -n "${CODEGRAPH_INSTALL_DIR:-}" ] && [ -z "${CODEGRAPHV_INSTALL_DIR:-}" ]; 
 version=${CODEGRAPHV_VERSION:-}
 if [ -z "$version" ] && [ -n "$legacy" ]; then version=${CODEGRAPH_VERSION:-}; fi
 if [ -z "$version" ] && command -v curl >/dev/null 2>&1; then
-  version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest" | sed -n 's#.*/releases/tag/##p')
+  # A failed request must fall through to the API; a plain assignment would end the script
+  # under `set -e` when the host is offline or redirects are blocked.
+  version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest" 2>/dev/null | sed -n 's#.*/releases/tag/##p') || version=
 fi
 if [ -z "$version" ]; then
   tmpjson=$(mktemp)
@@ -51,7 +63,20 @@ name="codegraphV-$version-$os-$arch"
 base="https://github.com/$repo/releases/download/$version"
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$dir"
+# One installer at a time. A crashed run leaves the lock; take it over after ten minutes.
+lock="$dir/.codegraphV.install.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  if [ -n "$(find "$lock" -mmin +10 2>/dev/null)" ]; then
+    rmdir "$lock" 2>/dev/null || true
+  fi
+  if ! mkdir "$lock" 2>/dev/null; then
+    echo "Another codegraphV install is in progress ($lock). Retry when it finishes." >&2
+    rm -rf "$tmp"
+    exit 1
+  fi
+fi
+trap 'rm -rf "$tmp"; rmdir "$lock" 2>/dev/null || true' EXIT
 echo "Downloading codegraphV $version..."
 fetch "$base/$name.tar.gz" "$tmp/$name.tar.gz"
 fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
@@ -66,11 +91,12 @@ if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
   exit 1
 fi
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
-mkdir -p "$dir"
-# Replace by rename so a running codegraphV (an MCP server) keeps its old file.
-cp "$tmp/$name/codegraphV" "$dir/.codegraphV.new"
-chmod +x "$dir/.codegraphV.new"
-mv -f "$dir/.codegraphV.new" "$dir/codegraphV"
+# Replace by rename so a running codegraphV (an MCP server) keeps its old file. The stage name
+# is unique per process, so concurrent installers never share or overwrite a partial download.
+stage=$(mktemp "$dir/.codegraphV.new.XXXXXX")
+cp "$tmp/$name/codegraphV" "$stage"
+chmod +x "$stage"
+mv -f "$stage" "$dir/codegraphV"
 
 echo "Installed $("$dir/codegraphV" --version) to $dir/codegraphV"
 case ":$PATH:" in
@@ -86,7 +112,9 @@ case ":$PATH:" in
 esac
 if [ -n "$legacy" ]; then
   echo "codegraph is now called codegraphV. Moving your agents and indexes over (codegraphV migrate)..."
-  "$dir/codegraphV" migrate --yes || true
+  if ! "$dir/codegraphV" migrate --yes; then
+    echo "Warning: migration did not complete. Run 'codegraphV migrate' to retry." >&2
+  fi
   echo "From now on run 'codegraphV'. The old 'codegraph upgrade' may now report that codegraph does not report $version; that is expected, because codegraphV replaced it."
 # The original codegraph (npm @colbymchenry/codegraph, or codegraph v0.0.1 of this fork).
 elif command -v codegraph >/dev/null 2>&1; then

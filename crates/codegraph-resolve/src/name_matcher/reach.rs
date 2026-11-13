@@ -2,11 +2,12 @@
 //! modules, unexported module bindings and TypeScript global scope — the reach region of
 //! `src/resolution/name-matcher.ts`.
 
-use super::object_literal::{host_global_prefix, is_object_literal_owner, is_object_member_reachable_by_name, is_path_holder};
+use super::object_literal::{host_global_prefix, is_object_literal_owner, is_object_member_reachable_by_name, is_path_holder, literal_place_of};
 use super::util::*;
 use crate::ambient_modules::{in_block, is_declaration_file, scan_global_scope, GlobalScopeScan};
+use crate::workspace_packages::leaves_workspace_root;
 use crate::ctx::Ctx;
-use crate::types::{is_inheritance_ref, UnresolvedRef};
+use crate::types::{is_inheritance_ref, NodeRef, UnresolvedRef};
 use codegraph_extract::strip_comments::{blank_string_contents, strip_comments_for_regex};
 use codegraph_jsre::re;
 use codegraph_search::query_utils::is_test_file;
@@ -49,8 +50,75 @@ fn is_plain_name(s: &str) -> bool {
     is_js_ident(s)
 }
 
+/// A qualified name through an anonymous class: the declaration holding it, then `::<T$anon@line>`.
+fn anon_member_holder(qualified_name: &str) -> Option<(String, u32)> {
+    if !qualified_name.contains("$anon@") {
+        return None;
+    }
+    let caps = re!(r"^(.+?)::<[^<>:]*\$anon@(\d+)>(?:::|$)").captures(qualified_name)?;
+    let holder = caps.text(1)?.to_string();
+    let line = caps.text(2)?.parse().ok()?;
+    Some((holder, line))
+}
+
+fn is_anon_holder_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constant | NodeKind::Field | NodeKind::Variable | NodeKind::Property
+    )
+}
+
+/// An anonymous class — Java's `new T() { … }`, Kotlin's `object : T { … }` — named `<T$anon@line>`.
+pub fn is_anonymous_class(n: &Node) -> bool {
+    n.name.starts_with('<') && n.name.contains("$anon@")
+}
+
+/// A member of an anonymous class: its qualified name passes through `<T$anon@line>`.
+pub fn is_anonymous_member(n: &Node) -> bool {
+    anon_member_holder(&n.qualified_name).is_some()
+}
+
+/// How many anonymous classes a qualified name passes through.
+pub fn anonymous_depth(qualified_name: &str) -> usize {
+    qualified_name.matches("$anon@").count()
+}
+
 /// Can `r` see `candidate` by its bare name? Locals are visible only inside their function.
 pub fn is_lexically_reachable(candidate: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    // An anonymous class's member — Java's `new Listener() { … }`, Kotlin's
+    // `object : Listener { … }` — is named only inside the declaration holding
+    // the class. Its overrides are reached through the type it implements.
+    if let Some((holder_qn, at)) = anon_member_holder(&candidate.qualified_name) {
+        if r.file_path != candidate.file_path {
+            return false;
+        }
+        let mut holders: Vec<NodeRef> = ctx
+            .get_nodes_by_qualified_name(&holder_qn)
+            .iter()
+            .filter(|n| n.file_path == candidate.file_path && n.start_line <= at && n.end_line.max(n.start_line) >= at)
+            .cloned()
+            .collect();
+        // A Kotlin extension is named by its receiver, not by the path its object's
+        // members carry: the innermost declaration around the class's line holds it.
+        if holders.is_empty() {
+            let mut around: Vec<NodeRef> = ctx
+                .get_nodes_in_file(&candidate.file_path)
+                .iter()
+                .filter(|n| {
+                    is_anon_holder_kind(n.kind)
+                        && n.start_line <= at
+                        && n.end_line.max(n.start_line) >= at
+                        && !n.qualified_name.contains("$anon@")
+                })
+                .cloned()
+                .collect();
+            around.sort_by_key(|n| std::cmp::Reverse(n.start_line));
+            if let Some(innermost) = around.into_iter().next() {
+                holders.push(innermost);
+            }
+        }
+        return holders.is_empty() || holders.iter().any(|n| r.line >= n.start_line && r.line <= n.end_line.max(n.start_line));
+    }
     if candidate.kind == NodeKind::Function && is_plain_name(&r.reference_name) && !is_object_member_reachable_by_name(candidate, r, ctx) {
         return false;
     }
@@ -178,7 +246,7 @@ fn lexical_scope_of(candidate: &Node, ctx: &Ctx) -> Option<(u32, u32)> {
             }
             return Some((container.start_line, container.end_line));
         }
-        None
+        literal_place_of(candidate, ctx).and_then(|place| place.block)
     })
 }
 
@@ -206,10 +274,12 @@ pub fn ts_global_scope(file: &str, ctx: &Ctx) -> Option<Rc<GlobalScopeScan>> {
     memoized::<GlobalScopeMemo>(ctx, file.to_string(), || {
         let source = ctx.read_file(file)?;
         let scope = scan_global_scope(&source);
-        if scope.script && has_cjs_export(&source) {
+        // `declare module.exports` inside a Flow library is not a CommonJS export.
+        if scope.script && has_cjs_export(&source) && !is_flow_library(file, &scope) {
             return Some(Rc::new(GlobalScopeScan {
                 script: false,
                 global_words: Default::default(),
+                declares: scope.declares,
                 module_blocks: scope.module_blocks,
                 import_aliases: scope.import_aliases,
             }));
@@ -218,19 +288,33 @@ pub fn ts_global_scope(file: &str, ctx: &Ctx) -> Option<Rc<GlobalScopeScan>> {
     })
 }
 
-/// A type declared in another TS/JS file is visible only when that file is a global script or declares it under `declare global`.
+/// A `.js` script with a top-level `declare`. Its declarations are globals of the JavaScript
+/// files Flow reads, and a TypeScript file keeps TypeScript's own types.
+fn is_flow_library(file: &str, scope: &GlobalScopeScan) -> bool {
+    scope.declares && re!(r"\.[cm]?jsx?$", "i").is_match(file)
+}
+
+/// A type declared in another TS/JS file is visible when that file is a declaration file, a Flow library seen from JavaScript, or the name sits in `declare global`.
 pub fn is_ts_type_in_scope(n: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     if n.file_path == r.file_path || !is_ts_js_file(&n.file_path) {
         return true;
     }
     let Some(scope) = ts_global_scope(&n.file_path, ctx) else { return true };
-    if (scope.script && !is_declaration_file(&n.file_path)) || (is_test_file(&n.file_path) && !is_test_file(&r.file_path)) {
+    // A Flow library counts as a declaration file for JavaScript. A `.ts` file does not see it.
+    let declaration = is_declaration_file(&n.file_path) || (is_flow_library(&n.file_path, &scope) && !re!(r"\.[cm]?tsx?$", "i").is_match(&r.file_path));
+    if (scope.script && !declaration) || (is_test_file(&n.file_path) && !is_test_file(&r.file_path)) {
         return false;
     }
     scope.global_words.contains(&format!("{}:{}", n.start_line, n.start_column))
 }
 
-/// A bare type name in a module file (not a script, not imported, not inside an ambient module) can only mean a type declared in that file.
+/// Whether a name in a JS/TS monorepo inside the repository would reach past that monorepo.
+/// Asked of the winner: dropping a candidate from the pool leaves a lone one, and a lone one is an answer.
+pub fn crosses_workspace_root(n: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    is_js_family(r.language) && is_js_family(n.language) && leaves_workspace_root(&r.file_path, &n.file_path, ctx.get_workspace_packages().as_deref())
+}
+
+/// A bare type name in a module, or in a Flow library, can only mean a type declared in that file or in a global declaration. A plain script is not held to that rule.
 pub fn is_ts_bare_type_name(r: &UnresolvedRef, ctx: &Ctx) -> bool {
     let type_ref = r.reference_kind == ReferenceKind::Edge(EdgeKind::References);
     if !(type_ref || is_inheritance_ref(r))
@@ -243,7 +327,10 @@ pub fn is_ts_bare_type_name(r: &UnresolvedRef, ctx: &Ctx) -> bool {
         return false;
     }
     let Some(scope) = ts_global_scope(&r.file_path, ctx) else { return false };
-    !scope.script && !scope.import_aliases.contains(&r.reference_name) && !scope.module_blocks.iter().any(|b| in_block(r.line, r.column, b))
+    // A Flow library is a script, and its own bare type names follow the same rule as a module.
+    (!scope.script || is_flow_library(&r.file_path, &scope))
+        && !scope.import_aliases.contains(&r.reference_name)
+        && !scope.module_blocks.iter().any(|b| in_block(r.line, r.column, b))
 }
 
 /// `ns.Type` / `a . Type`: the name as written follows a `.`.

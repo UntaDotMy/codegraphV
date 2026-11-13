@@ -3,6 +3,7 @@
 
 use super::enclosing_member::match_enclosing_scope_member;
 use super::calls::{is_bare_go_call, is_bare_js_call, is_bare_php_call, is_bare_r_call};
+use super::cpp_tu::c_source_ext;
 use super::js_imports::{is_out_of_repo_binding, is_this_call_in_own_file, is_vue_component_method};
 use super::js_scope::is_locally_bound_js_name;
 use super::js_store::{match_js_store_binding_call, match_destructured_call_result};
@@ -12,13 +13,17 @@ use super::pending::{
     CASE_INSENSITIVE_LANGUAGES,
 };
 use super::visibility::{is_visible_across_files, is_visible_by_language};
+use super::csharp::is_csharp_type_visible;
+use super::java::java_file_scope;
+use super::kotlin::kotlin_file_scope;
 use super::reach::{is_cross_file_reachable, is_lexically_reachable, is_sealed_module, is_ts_bare_type_name, is_ts_type_in_scope};
 use super::util::*;
 use super::{ambiguous_name_ceiling, same_language_family};
+use crate::ambient_modules::{ambient_module_declarations, declaring_file_answers};
 use crate::cpp_namespaces::cpp_macro_namespace_frames;
 use crate::ctx::Ctx;
 use crate::js_super_calls::is_js_super_call_site;
-use crate::types::{is_cpp_define_signature, is_importable_kind, is_inheritance_ref, is_supertype_target, NodeRef, ResolvedBy, ResolvedRef, UnresolvedRef};
+use crate::types::{is_cpp_define_signature, is_importable_kind, is_inheritance_ref, is_supertype_target, NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
 use codegraph_jsre::re;
 use codegraph_types::{EdgeKind, Language, NodeKind, ReferenceKind};
 use std::cell::Cell;
@@ -91,6 +96,48 @@ fn inner_scope_shadows(nodes: &[NodeRef], r: &UnresolvedRef, ctx: &Ctx) -> Vec<N
         .collect()
 }
 
+/// What an Objective-C struct's member or an alias can be declared with.
+fn is_objc_declared_type_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Class | NodeKind::Protocol | NodeKind::Struct | NodeKind::Union | NodeKind::Enum | NodeKind::TypeAlias
+    )
+}
+
+/// Does `ref` name the type an Objective-C struct's member or an alias is declared with?
+/// Extraction writes no other `references` from either: a value read is its function's. (A
+/// node's id starts with its kind.)
+pub fn is_objc_declared_type_ref(r: &UnresolvedRef) -> bool {
+    r.language == Language::ObjC
+        && r.is_kind(EdgeKind::References)
+        && (r.from_node_id.starts_with("struct:")
+            || r.from_node_id.starts_with("union:")
+            || r.from_node_id.starts_with("type_alias:"))
+}
+
+/// The declarations an Objective-C type name stands for: a class's own header (`NSString.h`),
+/// then any header or the file itself. A class has a node per `@implementation` and category,
+/// and the one in some other source file is the least of them: GNUstep's `NSString` has 14, in
+/// test files too.
+fn objc_type_declarations(candidates: Vec<NodeRef>, r: &UnresolvedRef) -> Vec<NodeRef> {
+    let visible: Vec<NodeRef> =
+        candidates.iter().filter(|n| n.file_path == r.file_path || !c_source_ext(&n.file_path)).cloned().collect();
+    let own: Vec<NodeRef> = visible
+        .iter()
+        .filter(|n| {
+            n.file_path.ends_with(&format!("/{}.h", r.reference_name)) || n.file_path == format!("{}.h", r.reference_name)
+        })
+        .cloned()
+        .collect();
+    if !own.is_empty() {
+        own
+    } else if !visible.is_empty() {
+        visible
+    } else {
+        candidates
+    }
+}
+
 pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let bare_js = is_bare_js_call(r, ctx);
     let bare_no_members = is_bare_go_call(r, ctx) || is_bare_r_call(r, ctx);
@@ -132,10 +179,12 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
     };
     let same_name = ctx.get_nodes_by_name(&r.reference_name);
     let same_name: crate::types::NodeList = if out_of_repo_call { std::rc::Rc::new(inner_scope_shadows(&same_name, r, ctx)) } else { same_name };
+    let objc_declared_type = is_objc_declared_type_ref(r);
     let c_macro_call = is_calls(r)
         && is_c_family(r.language)
         && same_name.iter().any(|n| n.kind == NodeKind::Constant && is_cpp_define_signature(n.signature.as_deref().unwrap_or("")));
     let shape = LangShape::compute(r, ctx);
+    let ambient_declarations = ambient_module_declarations(ctx);
     let scala_symbolic_reference = r.language == Language::Scala && is_kind(r, EdgeKind::References) && re!(r"^(?:[A-Z]|[^\w\s]+$)").is_match(&r.reference_name);
     let filtered: Vec<NodeRef> = same_name
         .iter()
@@ -144,14 +193,17 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
                 && !(r.language == Language::Dart && super::dart::is_dart_private_of_another_library(n, r, ctx))
                 && !(c_macro_call && !matches!(n.kind, NodeKind::Function | NodeKind::Method))
                 && !(scala_symbolic_reference && matches!(n.kind, NodeKind::Method | NodeKind::Function))
+                && !(objc_declared_type && !is_objc_declared_type_kind(n.kind))
                 && (!value_ref || same_language_family(n.language, r.language))
                 && n.kind != NodeKind::Import
                 && !((bare_js || bare_no_members) && is_type_member_kind(n.kind))
                 && !(bare_php && n.kind != NodeKind::Function)
                 && !(lua_bare_call && n.kind == NodeKind::Method)
                 && !(is_calls(r) && is_js_family(r.language) && is_vue_component_method(n) && !is_this_call_in_own_file(n, r, ctx))
-                && (!inheritance_ref || is_supertype_target(n))
+                // A Kotlin object expression's `instantiates` names a supertype, never an enum entry.
+                && (!(inheritance_ref || (r.language == Language::Kotlin && is_kind(r, EdgeKind::Instantiates))) || is_supertype_target(n))
                 && !(n.file_path != r.file_path && ts_bare_type_name() && !is_ts_type_in_scope(n, r, ctx))
+                && !(ambient_declarations.contains_key(&n.id) && !declaring_file_answers(&n.file_path, &r.file_path, ctx))
                 && (!import_ref || is_importable_kind(n.kind))
                 && is_lexically_reachable(n, r, ctx)
                 && is_visible_by_language(n, r, ctx)
@@ -160,9 +212,13 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         })
         .cloned()
         .collect();
-    let ranked = match shape.rank_exact(&filtered, r, ctx) {
-        Some(pool) => pool,
-        None => cpp_specialization_pool(filtered, r, ctx),
+    let ranked = if objc_declared_type {
+        objc_type_declarations(filtered, r)
+    } else {
+        match shape.rank_exact(&filtered, r, ctx) {
+            Some(pool) => pool,
+            None => cpp_specialization_pool(filtered, r, ctx),
+        }
     };
     let candidates = if ranked.len() <= ambiguous_name_ceiling() { within_cpp_translation_unit(ranked, r, ctx, true) } else { ranked };
     if candidates.is_empty() {
@@ -172,7 +228,8 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         if !is_cross_file_reachable(&candidates[0], r, ctx) {
             return None;
         }
-        let cross_language = candidates[0].language != r.language;
+        // A `.tsx` component calling the one `.ts` helper is the same family, not a cross-language guess.
+        let cross_language = !super::same_language_family(candidates[0].language, r.language);
         return Some(ResolvedRef::new(r, candidates[0].id.clone(), if cross_language { 0.5 } else { 0.9 }, ResolvedBy::ExactMatch));
     }
     // A member of the caller's own class (or what it inherits / is nested in) is what the name
@@ -199,15 +256,24 @@ pub fn match_by_exact_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
     let best = cpp_function_overload(&nearest, pool, r, ctx);
     if is_cross_file_reachable(&best, r, ctx) {
         let proximity = compute_path_proximity(&r.file_path, &best.file_path);
+        // A view's `<script>` calls a global, and the page's script tags decide which file
+        // answers: nopCommerce's admin and public bundles both define `setLocation`, and a
+        // storefront view has no path nearer to either (upstream 97492056).
+        if is_js_family(r.language)
+            && re!(r"\.(?:cshtml|razor)$", "i").is_match(&r.file_path)
+            && pool.iter().any(|c| c.id != best.id && compute_path_proximity(&r.file_path, &c.file_path) == proximity)
+        {
+            return None;
+        }
         // Every candidate is a copy of one symbol and this is the caller's own copy: the name
         // itself is not ambiguous, only which copy — so rank it above a proximity guess, but below
         // a unique name or the file's own definition (0.9). The candidates are those
-        // `find_best_match` weighed: a namesake in another language never wins while one in the
-        // reference's own language exists. The caller's own copy being the caller itself is no
-        // evidence, as for a same-file match.
+        // `find_best_match` weighed: a namesake in another ranking language never wins while one
+        // in the reference's own ranking language exists (C, C++ and Objective-C count as one).
+        // The caller's own copy being the caller itself is no evidence, as for a same-file match.
         let is_closest_copy = || {
-            let weighed: Vec<NodeRef> = if candidates.iter().any(|c| c.language == r.language) {
-                candidates.iter().filter(|c| c.language == r.language).cloned().collect()
+            let weighed: Vec<NodeRef> = if candidates.iter().any(|c| super::same_ranking_language(c.language, r.language)) {
+                candidates.iter().filter(|c| super::same_ranking_language(c.language, r.language)).cloned().collect()
             } else {
                 candidates.clone()
             };
@@ -280,6 +346,109 @@ pub fn prefer_call_site_file(nodes: Vec<NodeRef>, call_site_file: &str) -> Vec<N
     } else {
         same.into_iter().chain(other).collect()
     }
+}
+
+fn is_dotted_supertype_kind(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Class | NodeKind::Interface | NodeKind::Struct | NodeKind::Trait | NodeKind::Enum)
+}
+
+fn dotted_written_path(name: &str) -> String {
+    let stripped = re!(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>").replace_all_str(name, "");
+    re!(r"\s+").replace_all_str(&stripped, "")
+}
+
+fn directory_closeness(from: &str, to: &str) -> usize {
+    let from = from.replace('\\', "/");
+    let to = to.replace('\\', "/");
+    let from_dirs: Vec<&str> = from.rsplit_once('/').map(|(dirs, _)| dirs.split('/').collect()).unwrap_or_default();
+    let to_dirs: Vec<&str> = to.rsplit_once('/').map(|(dirs, _)| dirs.split('/').collect()).unwrap_or_default();
+    let mut shared = 0;
+    while shared < from_dirs.len() && shared < to_dirs.len() && from_dirs[shared] == to_dirs[shared] {
+        shared += 1;
+    }
+    shared
+}
+
+/// A supertype written through its enclosing type — `Outer.Inner`, `Api.Listener`,
+/// `object : KOuter.KListener` — or in full. The written path is the tail of the
+/// nested type's qualified name, and the file must be able to name the path's
+/// first type. Of several, the closest in the tree, or nothing on a tie.
+/// `Undefined` when no project type has the path (a library supertype).
+pub fn match_dotted_supertype(r: &UnresolvedRef, ctx: &Ctx) -> Tri<ResolvedRef> {
+    if !matches!(r.language, Language::Java | Language::Kotlin | Language::CSharp) {
+        return Tri::Undefined;
+    }
+    if !(is_inheritance_ref(r) || (r.language == Language::Kotlin && is_kind(r, EdgeKind::Instantiates))) {
+        return Tri::Undefined;
+    }
+    let written = dotted_written_path(&r.reference_name);
+    if !re!(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$").is_match(&written) {
+        return Tri::Undefined;
+    }
+    let parts: Vec<&str> = written.split('.').collect();
+    let last = parts[parts.len() - 1];
+    let candidates: Vec<NodeRef> = ctx
+        .get_nodes_by_name(last)
+        .iter()
+        .filter(|n| {
+            if !is_dotted_supertype_kind(n.kind) || !same_language_family(n.language, r.language) || n.id == r.from_node_id {
+                return false;
+            }
+            let dotted = n.qualified_name.replace("::", ".");
+            dotted == written || dotted.ends_with(&format!(".{written}"))
+        })
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return Tri::Undefined;
+    }
+    let visible: Vec<NodeRef> = candidates
+        .iter()
+        .filter(|n| {
+            let dotted = n.qualified_name.replace("::", ".");
+            if dotted == written || n.file_path == r.file_path {
+                return true;
+            }
+            let segments: Vec<&str> = n.qualified_name.split("::").collect();
+            let root_len = segments.len().saturating_sub(parts.len() - 1);
+            let root_qn = segments[..root_len].join("::");
+            let pkg = root_qn.split_once("::").map(|(pkg, _)| pkg).unwrap_or("");
+            let root_fqn = root_qn.replace("::", ".");
+            match r.language {
+                Language::Java => {
+                    let scope = java_file_scope(&r.file_path, ctx);
+                    scope.pkg == pkg || scope.single.contains(&root_fqn) || scope.demand.contains(pkg)
+                }
+                Language::Kotlin => {
+                    let scope = kotlin_file_scope(&r.file_path, ctx);
+                    scope.pkg == pkg || scope.imports.contains(&root_fqn) || scope.stars.contains(pkg)
+                }
+                _ => {
+                    let mut named = r.clone();
+                    named.reference_name = parts[0].to_string();
+                    ctx.get_nodes_by_qualified_name(&root_qn)
+                        .iter()
+                        .find(|root| is_dotted_supertype_kind(root.kind))
+                        .is_some_and(|root| is_csharp_type_visible(root, &named, ctx))
+                }
+            }
+        })
+        .cloned()
+        .collect();
+    if visible.is_empty() {
+        return Tri::Null;
+    }
+    let chosen = if visible.len() == 1 {
+        visible[0].clone()
+    } else {
+        let mut ranked: Vec<(usize, NodeRef)> = visible.iter().map(|n| (directory_closeness(&r.file_path, &n.file_path), n.clone())).collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        if ranked[0].0 == ranked[1].0 {
+            return Tri::Null;
+        }
+        ranked[0].1.clone()
+    };
+    Tri::Value(ResolvedRef::new(r, chosen.id.clone(), 0.9, ResolvedBy::QualifiedName))
 }
 
 pub fn match_by_qualified_name(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
@@ -389,7 +558,7 @@ pub fn match_fuzzy(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
             && !(only.kind != NodeKind::Function && is_bare_php_call(r, ctx))
             && is_lexically_reachable(only, r, ctx)
         {
-            let cross_language = only.language != r.language;
+            let cross_language = !super::same_language_family(only.language, r.language);
             return Some(ResolvedRef::new(r, only.id.clone(), if cross_language { 0.3 } else { 0.5 }, ResolvedBy::Fuzzy));
         }
     }

@@ -49,6 +49,7 @@ impl CppWrittenType {
             parameters: Rc::clone(&self.parameters),
             self_id: None,
             class_scope: self.class_scope.clone(),
+            declared: false,
         }
     }
 
@@ -682,6 +683,7 @@ pub fn cpp_test_fixture(caller: &Node, r: &UnresolvedRef, ctx: &Ctx) -> Option<S
         parameters: Rc::new(HashSet::new()),
         self_id: None,
         class_scope: None,
+        declared: false,
     };
     let written = re!(r"\s+", "g").replace_all_str(&fixture, "");
     match cpp_class_written(&written, &site, r, ctx) {

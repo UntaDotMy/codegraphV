@@ -158,7 +158,53 @@ pub fn extract(file: &str, source: &str) -> ExtractionResult {
             }
         }
     }
+    process_script_blocks(&mut doc, file, source, &id);
     doc.finish()
+}
+
+/// Hand each inline `<script>` to the JavaScript or TypeScript extractor and keep what it
+/// references, as the view's (upstream 97492056): one component node per file, as for `@code`.
+/// The references stay `javascript` / `typescript`, never `razor`: `razor` is in the `dotnet`
+/// family, and the name matcher's family gate would keep them from a `.js` symbol. What the view's
+/// blocks declare for themselves is nobody else's. A `<script src>` has no body, and a
+/// `type="text/html"` template or a JSON island is no script.
+fn process_script_blocks(doc: &mut Document, file: &str, source: &str, id: &str) {
+    use super::razor_script::{blank_razor_comments, blank_razor_in_script, is_javascript_block};
+    let source = blank_razor_comments(source);
+    let mut blocks: Vec<(ExtractionResult, Language, u32)> = Vec::new();
+    for m in re!(r"<script(\s[^>]*?)?(?:/>|>(?<content>[\s\S]*?)</script\s*>)", "g").captures_iter(&source) {
+        let attrs = m.text(1).unwrap_or("");
+        let Some(content) = m.get(2).filter(|c| !js_trim(c.as_str()).is_empty()) else { continue };
+        if !is_javascript_block(attrs) {
+            continue;
+        }
+        let language = if re!(r#"lang\s*=\s*["'](ts|typescript)["']"#).is_match(attrs) { Language::TypeScript } else { Language::JavaScript };
+        let whole = m.get(0).unwrap();
+        let tag_end = whole.start() + whole.as_str().find('>').map_or(0, |i| i + 1);
+        let line_offset = source[..tag_end].matches('\n').count() as u32;
+        // Grammar unavailable / parse failure — skip this block.
+        if let Ok(result) = crate::extract_file(file, &blank_razor_in_script(content.as_str()), language) {
+            blocks.push((result, language, line_offset));
+        }
+    }
+    let own: std::collections::HashSet<String> = blocks
+        .iter()
+        .flat_map(|(result, _, _)| result.nodes.iter())
+        .filter(|n| n.kind != NodeKind::File && n.kind != NodeKind::Import)
+        .map(|n| n.name.clone())
+        .collect();
+    for (result, language, line_offset) in blocks {
+        for mut reference in result.unresolved_references {
+            if own.contains(reference.reference_name.split('.').next().unwrap_or("")) {
+                continue;
+            }
+            reference.from_node_id = id.to_owned();
+            reference.line += line_offset;
+            reference.file_path = Some(file.to_owned());
+            reference.language = Some(language);
+            doc.out.unresolved_references.push(reference);
+        }
+    }
 }
 
 fn matching_brace(source: &str, open: usize) -> Option<usize> {

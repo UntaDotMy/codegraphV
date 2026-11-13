@@ -19,7 +19,7 @@ use crate::name_matcher::members::declared_supertypes;
 use crate::name_matcher::util::{after_col, before_col, lines_of};
 use crate::types::{NodeRef, ResolvedBy, ResolvedRef, UnresolvedRef};
 use codegraph_jsre::{escape_regex, re, Re};
-use codegraph_types::jscompat::js_trim;
+use codegraph_types::jscompat::{js_trim, utf16_len};
 use codegraph_types::{EdgeKind, Language, NodeKind, ReferenceKind};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -31,6 +31,7 @@ enum Mode {
     Read,
     Ref,
     Recv,
+    Args,
 }
 
 #[derive(Clone)]
@@ -41,7 +42,7 @@ struct Found {
 }
 
 fn parenless() -> &'static Re {
-    re!(r"^\{(call|read|ref|recv)(?:@([^}]+))?\}\.(.+)$")
+    re!(r"^\{(call|read|ref|recv|args)(?:=([^@}]+))?(?:@([^}]+))?\}\.(.+)$")
 }
 
 fn is_class_kind(k: NodeKind) -> bool {
@@ -66,17 +67,95 @@ fn is_unit_kind(k: NodeKind) -> bool {
 
 /// What a class declares as its members.
 fn is_member_kind(k: NodeKind) -> bool {
-    matches!(k, NodeKind::Method | NodeKind::Field | NodeKind::Property | NodeKind::Constant | NodeKind::Variable)
+    matches!(
+        k,
+        NodeKind::Method
+            | NodeKind::Field
+            | NodeKind::Property
+            | NodeKind::Constant
+            | NodeKind::Variable
+    )
 }
 
 /// Declarations that hold a value rather than run code.
 fn is_data_kind(k: NodeKind) -> bool {
-    matches!(k, NodeKind::Field | NodeKind::Property | NodeKind::Variable | NodeKind::Constant | NodeKind::EnumMember)
+    matches!(
+        k,
+        NodeKind::Field
+            | NodeKind::Property
+            | NodeKind::Variable
+            | NodeKind::Constant
+            | NodeKind::EnumMember
+    )
 }
 
 /// The RTL's routine types whose names don't say so (`TProc`, `TFunc<T>`), lowercased.
 fn is_rtl_procedural_type(lower: &str) -> bool {
-    matches!(lower, "tproc" | "tfunc" | "tpredicate" | "tcomparison" | "tthreadprocedure" | "tlistsortcompare" | "tstringlistsortcompare")
+    matches!(
+        lower,
+        "tproc"
+            | "tfunc"
+            | "tpredicate"
+            | "tcomparison"
+            | "tthreadprocedure"
+            | "tlistsortcompare"
+            | "tstringlistsortcompare"
+    )
+}
+
+/// The System unit's value types, lowercased. None of them holds a routine.
+fn is_system_value_type(lower: &str) -> bool {
+    matches!(
+        lower,
+        "boolean"
+            | "bytebool"
+            | "wordbool"
+            | "longbool"
+            | "integer"
+            | "cardinal"
+            | "shortint"
+            | "smallint"
+            | "longint"
+            | "longword"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "byte"
+            | "word"
+            | "dword"
+            | "nativeint"
+            | "nativeuint"
+            | "single"
+            | "double"
+            | "extended"
+            | "real"
+            | "currency"
+            | "comp"
+            | "char"
+            | "ansichar"
+            | "widechar"
+            | "string"
+            | "ansistring"
+            | "widestring"
+            | "unicodestring"
+            | "shortstring"
+            | "rawbytestring"
+            | "utf8string"
+            | "pchar"
+            | "pansichar"
+            | "pwidechar"
+            | "pointer"
+            | "variant"
+            | "olevariant"
+            | "tdatetime"
+            | "tdate"
+            | "ttime"
+    )
 }
 
 const MAX_HIERARCHY_DEPTH: usize = 8;
@@ -158,47 +237,86 @@ fn put<V>(map: &Map<V>, key: String, value: V) {
 
 /// Whether `r` is a paren-less Pascal name, which only this module resolves.
 pub fn is_pascal_parenless_ref(r: &UnresolvedRef) -> bool {
-    r.language == Language::Pascal && r.reference_kind == ReferenceKind::Edge(EdgeKind::References) && parenless().is_match(&r.reference_name)
+    r.language == Language::Pascal
+        && r.reference_kind == ReferenceKind::Edge(EdgeKind::References)
+        && parenless().is_match(&r.reference_name)
 }
 
 /// The routine a paren-less Pascal name reaches in its scope, or None.
 pub fn match_pascal_parenless_ref(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     let m = parenless().captures(&r.reference_name)?;
-    let mode = match m.text(1)? {
+    let mut mode = match m.text(1)? {
         "call" => Mode::Call,
         "read" => Mode::Read,
         "ref" => Mode::Ref,
+        "args" => Mode::Args,
         _ => Mode::Recv,
     };
-    let path: Vec<&str> = m.text(3)?.split('.').collect();
+    let target = m.text(2);
+    let path: Vec<&str> = m.text(4)?.split('.').collect();
     // Most such names read data, often the framework's: a name no Pascal routine has is settled
-    // here, before any lookup in scope.
-    if let Some(names) = routine_names(ctx) {
-        if !names.contains(&js_lower(path[path.len() - 1])) {
-            return None;
+    // here, before any lookup in scope. Called with its arguments, a chain may end at data that
+    // holds a routine.
+    if mode != Mode::Args {
+        if let Some(names) = routine_names(ctx) {
+            if !names.contains(&js_lower(path[path.len() - 1])) {
+                return None;
+            }
         }
     }
-    let cls = match m.text(2) {
+    let cls = match m.text(3) {
         Some(qn) => class_by_qualified_name(qn, &r.file_path, ctx),
-        None => ctx.node_by_id(&r.from_node_id).and_then(|routine| class_of_routine(&routine, ctx)),
+        None => ctx
+            .node_by_id(&r.from_node_id)
+            .and_then(|routine| class_of_routine(&routine, ctx)),
     };
-    let found =
-        if path.len() == 1 { name_in_scope(path[0], cls.as_ref(), r, ctx) } else { member_through_path(&path, cls.as_ref(), r, ctx) }?;
-    // Written without arguments, a routine that needs some can only be a method pointer — save a
-    // constructor, whose name then means an inherited one outside the project — and so is a
-    // procedure read for a value, and an event's method; any other runs.
-    let needs_args = needs_arguments(&found.node);
-    if needs_args && routine_keyword(&found.node, ctx).as_deref() == Some("constructor") {
-        return None;
+    let found = if path.len() == 1 {
+        name_in_scope(path[0], cls.as_ref(), r, ctx)
+    } else {
+        member_through_path(&path, cls.as_ref(), r, ctx, mode == Mode::Args)
+    }?;
+    let mut edge_kind = EdgeKind::Calls;
+    // Written with its arguments, the routine runs, or the routine the data holds.
+    if mode != Mode::Args {
+        if let Some(target) = target {
+            // Given to a target, a method is a method pointer when the target's declared type is
+            // a routine type, and a value otherwise. A function whose result is a routine type
+            // is called for it.
+            if let Some(routine_typed) = assigned_routine_type(target, cls.as_ref(), r, ctx) {
+                mode = if routine_typed { Mode::Ref } else { Mode::Read };
+            }
+            if mode == Mode::Ref && returns_routine_type(&found.node, ctx) {
+                mode = Mode::Read;
+            }
+        }
+        // Written without arguments, a routine that needs some can only be a method pointer —
+        // save a constructor, whose name then means an inherited one outside the project — and
+        // so is a procedure read for a value, and an event's method; any other runs.
+        let needs_args = needs_arguments(&found.node);
+        if needs_args && routine_keyword(&found.node, ctx).as_deref() == Some("constructor") {
+            return None;
+        }
+        let pointer = mode == Mode::Ref
+            || needs_args
+            || (mode != Mode::Call && !yields_value(&found.node, ctx));
+        // A statement runs its routine, and a receiver is a routine's value.
+        if pointer && (mode == Mode::Call || mode == Mode::Recv) {
+            return None;
+        }
+        edge_kind = if pointer {
+            EdgeKind::References
+        } else {
+            EdgeKind::Calls
+        };
     }
-    let pointer = mode == Mode::Ref || needs_args || (mode != Mode::Call && !yields_value(&found.node, ctx));
-    // A statement runs its routine, and a receiver is a routine's value.
-    if pointer && (mode == Mode::Call || mode == Mode::Recv) {
-        return None;
-    }
-    let mut res = ResolvedRef::new(r, found.node.id.clone(), found.confidence, found.resolved_by);
-    res.edge_kind = Some(if pointer { EdgeKind::References } else { EdgeKind::Calls });
-    if pointer {
+    let mut res = ResolvedRef::new(
+        r,
+        found.node.id.clone(),
+        found.confidence,
+        found.resolved_by,
+    );
+    res.edge_kind = Some(edge_kind);
+    if edge_kind == EdgeKind::References {
         // A method pointer is a function used as a value, as `@Handler` is (#756).
         let mut md = codegraph_types::Metadata::new();
         md.insert("fnRef".to_string(), true.into());
@@ -221,8 +339,14 @@ fn is_bare_call(r: &UnresolvedRef, ctx: &Ctx) -> bool {
         return false;
     }
     let lines = lines_of(ctx, &r.file_path);
-    let line = (r.line as usize).checked_sub(1).and_then(|i| lines.get(i)).map(String::as_str).unwrap_or("");
-    re!(r"^[A-Za-z_]\w*").find(after_col(line, r.column)).is_some_and(|w| js_lower(w.as_str()) == js_lower(&r.reference_name))
+    let line = (r.line as usize)
+        .checked_sub(1)
+        .and_then(|i| lines.get(i))
+        .map(String::as_str)
+        .unwrap_or("");
+    re!(r"^[A-Za-z_]\w*")
+        .find(after_col(line, r.column))
+        .is_some_and(|w| js_lower(w.as_str()) == js_lower(&r.reference_name))
 }
 
 /// A call to one of the System unit's names is the System unit's unless a declaration in the
@@ -236,13 +360,20 @@ pub fn match_pascal_system_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<Resolved
     if !decl.node.qualified_name.contains("::") && declared_under_condition(&decl.node, ctx) {
         return None;
     }
-    Some(ResolvedRef::new(r, decl.node.id.clone(), decl.confidence, decl.resolved_by))
+    Some(ResolvedRef::new(
+        r,
+        decl.node.id.clone(),
+        decl.confidence,
+        decl.resolved_by,
+    ))
 }
 
 /// What a Pascal call another strategy resolved stands for, when it landed on data or on a
 /// routine nested in another.
 pub fn gate_pascal_call(result: ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
-    let Some(target) = ctx.node_by_id(&result.target_node_id) else { return Some(result) };
+    let Some(target) = ctx.node_by_id(&result.target_node_id) else {
+        return Some(result);
+    };
     if is_data_kind(target.kind) {
         return gate_pascal_data_call(&target, result, r, ctx);
     }
@@ -259,9 +390,15 @@ fn retarget(mut result: ResolvedRef, found: &Found) -> ResolvedRef {
     result
 }
 
-fn gate_pascal_data_call(target: &NodeRef, result: ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+fn gate_pascal_data_call(
+    target: &NodeRef,
+    result: ResolvedRef,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<ResolvedRef> {
     if !is_bare_call(r, ctx) {
-        return (target.language == Language::Pascal && is_procedural_data(target, ctx)).then_some(result);
+        return (target.language == Language::Pascal && is_procedural_data(target, ctx))
+            .then_some(result);
     }
     let lower = js_lower(&r.reference_name);
     if declared_in_routine(&lower, r, ctx) {
@@ -270,10 +407,14 @@ fn gate_pascal_data_call(target: &NodeRef, result: ResolvedRef, r: &UnresolvedRe
     let cls = class_of_call(r, ctx);
     let Some(decl) = declaration_in_scope(&lower, cls.as_ref(), r, ctx) else {
         let only = target.language == Language::Pascal
-            && pascal_named(&lower, ctx).iter().all(|n| n.id == target.id || n.kind == NodeKind::Import);
+            && pascal_named(&lower, ctx)
+                .iter()
+                .all(|n| n.id == target.id || n.kind == NodeKind::Import);
         return (only && is_procedural_data(target, ctx)).then_some(result);
     };
-    if !is_routine(&decl.node) && !(is_data_kind(decl.node.kind) && is_procedural_data(&decl.node, ctx)) {
+    if !is_routine(&decl.node)
+        && !(is_data_kind(decl.node.kind) && is_procedural_data(&decl.node, ctx))
+    {
         return None;
     }
     if decl.node.id == target.id {
@@ -289,7 +430,10 @@ fn declared_in_routine(lower: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     let from = routine_header_at(&r.file_path, r.line, ctx);
     let name = escape_regex(lower);
     let mentions = Re::cached(&format!(r"\b{name}\b"), "i");
-    let declares = Re::cached(&format!(r"\b(?:procedure|function)\s+{name}\b|\b{name}\s*(?:,\s*[A-Za-z_]\w*\s*)*:(?!=)"), "i");
+    let declares = Re::cached(
+        &format!(r"\b(?:procedure|function)\s+{name}\b|\b{name}\s*(?:,\s*[A-Za-z_]\w*\s*)*:(?!=)"),
+        "i",
+    );
     let mut i = from.max(1);
     while i <= r.line && (i as usize) <= lines.len() {
         let text = &lines[i as usize - 1];
@@ -346,14 +490,21 @@ fn declared_under_condition(node: &NodeRef, ctx: &Ctx) -> bool {
     };
     let idx = (node.start_line as usize).wrapping_sub(1);
     let line = lines.get(idx).map(String::as_str).unwrap_or("");
-    condition_depth_after(before_col(line, node.start_column), depths.get(idx).copied().unwrap_or(0)) > 0
+    condition_depth_after(
+        before_col(line, node.start_column),
+        depths.get(idx).copied().unwrap_or(0),
+    ) > 0
 }
 
 /// The depth of conditional blocks after a line's directives.
 fn condition_depth_after(text: &str, mut depth: u32) -> u32 {
     for m in re!(r"\{\$(ifdef|ifndef|ifopt|ifend|endif|if)\b", "gi").captures_iter(text) {
         let directive = js_lower(m.text(1).unwrap_or(""));
-        depth = if directive == "endif" || directive == "ifend" { depth.saturating_sub(1) } else { depth + 1 };
+        depth = if directive == "endif" || directive == "ifend" {
+            depth.saturating_sub(1)
+        } else {
+            depth + 1
+        };
     }
     depth
 }
@@ -381,7 +532,10 @@ fn header_classes(file_path: &str, ctx: &Ctx) -> Rc<Vec<Header>> {
     }
     let mut headers = Vec::new();
     let lines = lines_of(ctx, file_path);
-    let header = re!(r"^(?:class\s+)?(?:procedure|function|constructor|destructor|operator)\s+([A-Za-z_][\w.<>, ]*?)\s*[(:;]", "i");
+    let header = re!(
+        r"^(?:class\s+)?(?:procedure|function|constructor|destructor|operator)\s+([A-Za-z_][\w.<>, ]*?)\s*[(:;]",
+        "i"
+    );
     for (i, text) in lines.iter().enumerate() {
         // Each starts its line with one of c, d, e, f, i, o, p (either case).
         let first = text.encode_utf16().next().map_or(0x20, |u| u | 0x20);
@@ -389,15 +543,26 @@ fn header_classes(file_path: &str, ctx: &Ctx) -> Rc<Vec<Header>> {
             continue;
         }
         if re!(r"^(?:end;|(?:initialization|finalization)\b)", "i").is_match(text) {
-            headers.push(Header { line: i as u32 + 1, class_qn: None, routine: false });
+            headers.push(Header {
+                line: i as u32 + 1,
+                class_qn: None,
+                routine: false,
+            });
             continue;
         }
-        let Some(c) = header.captures(text) else { continue };
+        let Some(c) = header.captures(text) else {
+            continue;
+        };
         let raw = c.text(1).unwrap_or("");
-        let cleaned = re!(r"\s+", "g").replace_all_str(&re!(r"<[^>]*>", "g").replace_all_str(raw, ""), "");
+        let cleaned =
+            re!(r"\s+", "g").replace_all_str(&re!(r"<[^>]*>", "g").replace_all_str(raw, ""), "");
         let parts: Vec<&str> = cleaned.split('.').collect();
         let class_qn = (parts.len() > 1).then(|| parts[..parts.len() - 1].join("::"));
-        headers.push(Header { line: i as u32 + 1, class_qn, routine: true });
+        headers.push(Header {
+            line: i as u32 + 1,
+            class_qn,
+            routine: true,
+        });
     }
     let h = Rc::new(headers);
     put(&m.header_classes, file_path.to_string(), Rc::clone(&h));
@@ -428,7 +593,10 @@ fn name_in_scope(name: &str, cls: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx
 /// the innermost one declared above the call.
 fn nested_routine_in_scope(lower: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<Found> {
     let named = pascal_named(lower, ctx);
-    if !named.iter().any(|n| n.kind == NodeKind::Function && n.qualified_name.contains("::")) {
+    if !named
+        .iter()
+        .any(|n| n.kind == NodeKind::Function && n.qualified_name.contains("::"))
+    {
         return None;
     }
     let m = memos(ctx);
@@ -443,7 +611,12 @@ fn nested_routine_in_scope(lower: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<
             let mut best: Option<NodeRef> = None;
             let mut depth: i64 = -1;
             for n in named.iter() {
-                if n.file_path != caller.file_path || n.start_line > r.line || !is_nested_routine(n, ctx) {
+                if n.file_path != caller.file_path || !is_nested_routine(n, ctx) {
+                    continue;
+                }
+                // A body that starts after the call is still in scope when it was
+                // declared `forward` above the call.
+                if n.start_line > r.line && !declared_forward(n, r.line, ctx) {
                     continue;
                 }
                 let outer = owner_of(n);
@@ -451,16 +624,64 @@ fn nested_routine_in_scope(lower: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<
                     continue;
                 }
                 let len = outer.encode_utf16().count() as i64;
-                if len > depth || (len == depth && best.as_ref().is_some_and(|b| n.start_line < b.start_line)) {
+                if len > depth
+                    || (len == depth && best.as_ref().is_some_and(|b| n.start_line < b.start_line))
+                {
                     best = Some(Rc::clone(n));
                     depth = len;
                 }
             }
-            found = best.map(|node| Found { node, resolved_by: ResolvedBy::ExactMatch, confidence: 0.95 });
+            found = best.map(|node| Found {
+                node,
+                resolved_by: ResolvedBy::ExactMatch,
+                confidence: 0.95,
+            });
         }
     }
     put(&m.nested_in_scope, key, found.clone());
     found
+}
+
+/// Whether a routine nested in another is declared `forward` above `line`.
+/// A header of its name, indented as its own body is, that ends in `forward;`,
+/// between the line and the less-indented header of the routine both sit in.
+fn declared_forward(routine: &NodeRef, line: u32, ctx: &Ctx) -> bool {
+    let lines = lines_of(ctx, &routine.file_path);
+    if lines.is_empty() {
+        return false;
+    }
+    let name = js_lower(&routine.name);
+    let header = re!(
+        r"^(\s*)(?:class\s+)?(?:procedure|function|constructor|destructor)\s+([A-Za-z_]\w*)",
+        "i"
+    );
+    let mut i = (line as usize).min(lines.len());
+    while i > 0 {
+        i -= 1;
+        let Some(c) = header.captures(&lines[i]) else {
+            continue;
+        };
+        let indent = utf16_len(c.text(1).unwrap_or("")) as u32;
+        if indent < routine.start_column {
+            return false;
+        }
+        if indent != routine.start_column || js_lower(c.text(2).unwrap_or("")) != name {
+            continue;
+        }
+        // Parameters may continue for a few lines.
+        let mut text = strip_comments(&lines[i]);
+        let mut j = i + 1;
+        while j < lines.len() && j <= i + 4 && text.matches('(').count() > text.matches(')').count()
+        {
+            text.push(' ');
+            text.push_str(&strip_comments(&lines[j]));
+            j += 1;
+        }
+        if re!(r"\bforward\s*;", "i").is_match(&text) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a node is a Pascal function qualified under a routine.
@@ -468,13 +689,18 @@ fn is_nested_routine(node: &NodeRef, ctx: &Ctx) -> bool {
     if node.kind != NodeKind::Function || node.language != Language::Pascal {
         return false;
     }
-    let Some(cut) = node.qualified_name.rfind("::") else { return false };
+    let Some(cut) = node.qualified_name.rfind("::") else {
+        return false;
+    };
     let outer = &node.qualified_name[..cut];
     let m = memos(ctx);
     if let Some(hit) = get(&m.routine_qns, outer) {
         return hit;
     }
-    let routine = ctx.get_nodes_by_qualified_name(outer).iter().any(|n| n.language == Language::Pascal && is_routine(n));
+    let routine = ctx
+        .get_nodes_by_qualified_name(outer)
+        .iter()
+        .any(|n| n.language == Language::Pascal && is_routine(n));
     put(&m.routine_qns, outer.to_string(), routine);
     routine
 }
@@ -493,7 +719,10 @@ fn routine_node(id: &str, ctx: &Ctx) -> Option<NodeRef> {
 /// reaches the rest of that routine's scope. None when that scope holds no routine of the name,
 /// for the other strategies to resolve.
 pub fn match_pascal_nested_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
-    if r.language != Language::Pascal || r.reference_kind != ReferenceKind::Edge(EdgeKind::Calls) || !is_bare_call(r, ctx) {
+    if r.language != Language::Pascal
+        || r.reference_kind != ReferenceKind::Edge(EdgeKind::Calls)
+        || !is_bare_call(r, ctx)
+    {
         return None;
     }
     let lower = js_lower(&r.reference_name);
@@ -506,23 +735,36 @@ pub fn match_pascal_nested_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<Resolved
             }
             let cls = class_of_call(r, ctx);
             let decl = declaration_in_scope(&lower, cls.as_ref(), r, ctx)?;
-            if !(is_routine(&decl.node) || (is_data_kind(decl.node.kind) && is_procedural_data(&decl.node, ctx))) {
+            if !(is_routine(&decl.node)
+                || (is_data_kind(decl.node.kind) && is_procedural_data(&decl.node, ctx)))
+            {
                 return None;
             }
             decl
         }
     };
-    Some(ResolvedRef::new(r, found.node.id.clone(), found.confidence, found.resolved_by))
+    Some(ResolvedRef::new(
+        r,
+        found.node.id.clone(),
+        found.confidence,
+        found.resolved_by,
+    ))
 }
 
-fn gate_pascal_nested_target(result: ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+fn gate_pascal_nested_target(
+    result: ResolvedRef,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<ResolvedRef> {
     if !is_bare_call(r, ctx) {
         return None;
     }
     let lower = js_lower(&r.reference_name);
     let cls = class_of_call(r, ctx);
     let decl = declaration_in_scope(&lower, cls.as_ref(), r, ctx)?;
-    if !is_routine(&decl.node) && !(is_data_kind(decl.node.kind) && is_procedural_data(&decl.node, ctx)) {
+    if !is_routine(&decl.node)
+        && !(is_data_kind(decl.node.kind) && is_procedural_data(&decl.node, ctx))
+    {
         return None;
     }
     if decl.node.id == result.target_node_id {
@@ -533,25 +775,47 @@ fn gate_pascal_nested_target(result: ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) 
 
 /// The first declaration a bare name reaches from a routine of class `cls` (None: a free
 /// routine), whatever it declares.
-fn declaration_in_scope(lower: &str, cls: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> Option<Found> {
+fn declaration_in_scope(
+    lower: &str,
+    cls: Option<&NodeRef>,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<Found> {
     if let Some(nested) = nested_routine_in_scope(lower, r, ctx) {
         return Some(nested);
     }
     let m = memos(ctx);
-    let key = format!("{}|{}|{}", cls.map_or("", |c| c.id.as_str()), r.file_path, lower);
+    let key = format!(
+        "{}|{}|{}",
+        cls.map_or("", |c| c.id.as_str()),
+        r.file_path,
+        lower
+    );
     if let Some(hit) = get(&m.in_scope, &key) {
         return hit;
     }
     let mut found = None;
     if let Some(member) = cls.and_then(|c| member_in_hierarchy(c, lower, ctx)) {
-        found = Some(Found { node: member, resolved_by: ResolvedBy::InstanceMethod, confidence: 0.9 });
+        found = Some(Found {
+            node: member,
+            resolved_by: ResolvedBy::InstanceMethod,
+            confidence: 0.9,
+        });
     } else if let Some(own) = own_unit_declaration(&r.file_path, lower, ctx) {
-        found = Some(Found { node: own, resolved_by: ResolvedBy::ExactMatch, confidence: 0.9 });
+        found = Some(Found {
+            node: own,
+            resolved_by: ResolvedBy::ExactMatch,
+            confidence: 0.9,
+        });
     } else {
         let used = used_unit_files(&r.file_path, ctx);
         for file in used.iter().rev() {
             if let Some(decl) = unit_declaration(file, lower, ctx, &r.file_path) {
-                found = Some(Found { node: decl, resolved_by: ResolvedBy::Import, confidence: 0.85 });
+                found = Some(Found {
+                    node: decl,
+                    resolved_by: ResolvedBy::Import,
+                    confidence: 0.85,
+                });
                 break;
             }
         }
@@ -560,52 +824,216 @@ fn declaration_in_scope(lower: &str, cls: Option<&NodeRef>, r: &UnresolvedRef, c
     found
 }
 
-/// A dotted name: the method its receiver's declared type has.
-fn member_through_path(path: &[&str], cls: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> Option<Found> {
-    let (head_type, unit_file) = head_of(path[0], cls, r, ctx)?;
-    let mut ty: Option<NodeRef>;
-    let mut rest: &[&str] = &path[1..];
-    if let Some(unit_file) = unit_file {
-        let decl = unit_declaration(&unit_file, &js_lower(rest[0]), ctx, &r.file_path)?;
-        if rest.len() == 1 {
-            return is_routine(&decl).then(|| Found { node: decl, resolved_by: ResolvedBy::Import, confidence: 0.9 });
-        }
-        ty = type_of_member(&decl, ctx);
-        rest = &rest[1..];
-    } else {
-        ty = head_type;
-    }
-    for link in &rest[..rest.len() - 1] {
-        let member = member_in_hierarchy(ty.as_ref()?, &js_lower(link), ctx)?;
-        ty = type_of_member(&member, ctx);
-    }
-    let member = member_in_hierarchy(ty.as_ref()?, &js_lower(rest[rest.len() - 1]), ctx)?;
-    is_routine(&member).then(|| Found { node: member, resolved_by: ResolvedBy::InstanceMethod, confidence: 0.9 })
+struct Head {
+    ty: Option<NodeRef>,
+    /// The head names the class itself (`TLog.Create`), not a value of it.
+    class_ref: bool,
+    unit_file: Option<String>,
 }
 
-/// What a dotted name's first link is: a value of a known class, a class itself, or a unit.
-/// `(type, unit_file)`.
-fn head_of(name: &str, cls: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> Option<(Option<NodeRef>, Option<String>)> {
+struct AtPath {
+    node: NodeRef,
+    /// The last link is a declaration the unit's name qualifies.
+    unit: bool,
+}
+
+/// A dotted name: the method its receiver's declared type has. With
+/// `holds_routine`, the last link may be data that holds a routine
+/// (`Owner.Events.FOnChange(Self)`).
+fn member_through_path(
+    path: &[&str],
+    cls: Option<&NodeRef>,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+    holds_routine: bool,
+) -> Option<Found> {
+    let last = member_at_path(path, cls, r, ctx)?;
+    let procedural =
+        holds_routine && is_data_kind(last.node.kind) && is_procedural_data(&last.node, ctx);
+    if !is_routine(&last.node) && !procedural {
+        return None;
+    }
+    Some(Found {
+        node: last.node,
+        resolved_by: if last.unit {
+            ResolvedBy::Import
+        } else {
+            ResolvedBy::InstanceMethod
+        },
+        confidence: 0.9,
+    })
+}
+
+/// What a dotted name's last link is declared as. A constructor called on a
+/// class, or `Create` inherited from outside the project, gives an instance of
+/// that class (`TLog.Create.Write('x')`). A dotted unit name is the longest
+/// prefix that names one (`mormot.core.os.GetTickCount64`).
+fn member_at_path(
+    path: &[&str],
+    cls: Option<&NodeRef>,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<AtPath> {
+    let mut head = head_of(path[0], cls, r, ctx);
+    let mut rest_from = 1usize;
+    if head.is_none() {
+        let mut k = path.len().saturating_sub(1);
+        while head.is_none() && k >= 2 {
+            let unit_name = js_lower(&path[..k].join("."));
+            if let Some(unit_file) = unit_file_named(&unit_name, &r.file_path, ctx) {
+                head = Some(Head {
+                    ty: None,
+                    class_ref: false,
+                    unit_file: Some(unit_file),
+                });
+                rest_from = k;
+            }
+            k -= 1;
+        }
+    }
+    let head = head?;
+    let mut ty = head.ty;
+    let mut class_ref = head.class_ref;
+    let mut rest: Vec<&str> = path[rest_from..].to_vec();
+    if let Some(unit_file) = head.unit_file {
+        let decl = unit_declaration(&unit_file, &js_lower(rest[0]), ctx, &r.file_path)?;
+        if rest.len() == 1 {
+            return Some(AtPath {
+                node: decl,
+                unit: true,
+            });
+        }
+        class_ref = is_class_kind(decl.kind);
+        ty = if class_ref {
+            Some(decl)
+        } else {
+            type_of_member(&decl, ctx)
+        };
+        rest = rest[1..].to_vec();
+    }
+    let mut i = 0;
+    while i < rest.len() && ty.is_some() {
+        let lower = js_lower(rest[i]);
+        let member = member_in_hierarchy(ty.as_ref()?, &lower, ctx);
+        if i + 1 == rest.len() {
+            return member.map(|node| AtPath { node, unit: false });
+        }
+        // `TLog.Create` is the instance even when `Create` is inherited.
+        if class_ref
+            && (member
+                .as_ref()
+                .is_some_and(|m| routine_keyword(m, ctx).as_deref() == Some("constructor"))
+                || lower == "create")
+        {
+            class_ref = false;
+            i += 1;
+            continue;
+        }
+        ty = type_of_member(&member?, ctx);
+        class_ref = false;
+        i += 1;
+    }
+    None
+}
+
+/// What a dotted name's first link is: a value of a known class (a local's
+/// declared type, written `:TFoo`), a class itself (`class_ref`), or a unit.
+/// A `:Type` head is returned even when the project declares no such class, so
+/// a chain through an outside type links nothing.
+fn head_of(name: &str, cls: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> Option<Head> {
     if let Some(type_name) = name.strip_prefix(':') {
-        return Some((class_named(type_name, &r.file_path, ctx, 0), None));
+        return Some(Head {
+            ty: class_named(type_name, &r.file_path, ctx, 0),
+            class_ref: false,
+            unit_file: None,
+        });
     }
     let lower = js_lower(name);
     if lower == "self" {
-        return cls.map(|c| (Some(Rc::clone(c)), None));
+        return cls.map(|c| Head {
+            ty: Some(Rc::clone(c)),
+            class_ref: false,
+            unit_file: None,
+        });
     }
     if let Some(c) = cls {
         if let Some(member) = member_in_hierarchy(c, &lower, ctx) {
-            return Some((type_of_member(&member, ctx), None));
+            return Some(Head {
+                ty: type_of_member(&member, ctx),
+                class_ref: false,
+                unit_file: None,
+            });
         }
     }
-    let decl = own_unit_declaration(&r.file_path, &lower, ctx)
-        .or_else(|| used_unit_files(&r.file_path, ctx).iter().rev().find_map(|file| unit_declaration(file, &lower, ctx, &r.file_path)));
+    let decl = own_unit_declaration(&r.file_path, &lower, ctx).or_else(|| {
+        used_unit_files(&r.file_path, ctx)
+            .iter()
+            .rev()
+            .find_map(|file| unit_declaration(file, &lower, ctx, &r.file_path))
+    });
     if let Some(decl) = decl {
-        let ty = if is_class_kind(decl.kind) { Some(decl) } else { type_of_member(&decl, ctx) };
-        return Some((ty, None));
+        if is_class_kind(decl.kind) {
+            return Some(Head {
+                ty: Some(decl),
+                class_ref: true,
+                unit_file: None,
+            });
+        }
+        return Some(Head {
+            ty: type_of_member(&decl, ctx),
+            class_ref: false,
+            unit_file: None,
+        });
     }
     let unit_file = unit_file_named(&lower, &r.file_path, ctx)?;
-    Some((None, Some(unit_file)))
+    Some(Head {
+        ty: None,
+        class_ref: false,
+        unit_file: Some(unit_file),
+    })
+}
+
+/// Whether the target a value is assigned to is declared with a routine type.
+/// None when the declaration, or what its type is, cannot be read.
+fn assigned_routine_type(
+    target: &str,
+    cls: Option<&NodeRef>,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Option<bool> {
+    let links: Vec<&str> = target.split('.').collect();
+    if links.len() == 1 && links[0].starts_with(':') {
+        return routine_type_verdict(&links[0][1..], ctx, 0);
+    }
+    let node = if links.len() == 1 {
+        declaration_in_scope(&js_lower(links[0]), cls, r, ctx).map(|found| found.node)
+    } else {
+        member_at_path(&links, cls, r, ctx).map(|found| found.node)
+    }?;
+    if !is_data_kind(node.kind) || node.kind == NodeKind::EnumMember {
+        return None;
+    }
+    let text = declared_type_text(&node, ctx);
+    if text.is_empty() {
+        None
+    } else {
+        routine_type_verdict(&text, ctx, 0)
+    }
+}
+
+/// Whether a function's result is of a routine type (`function MakeHandler: TNotifyEvent`).
+fn returns_routine_type(routine: &NodeRef, ctx: &Ctx) -> bool {
+    if !is_routine(routine) {
+        return false;
+    }
+    let type_name = routine.return_type.clone().or_else(|| {
+        re!(r":\s*([A-Za-z_][\w.]*)\s*;?\s*$")
+            .captures(routine.signature.as_deref().unwrap_or(""))
+            .and_then(|c| c.text(1).map(str::to_string))
+    });
+    type_name
+        .as_deref()
+        .is_some_and(|t| routine_type_verdict(t, ctx, 0) == Some(true))
 }
 
 // ---------------------------------------------------------------------------
@@ -618,8 +1046,11 @@ fn routine_names(ctx: &Ctx) -> Option<Rc<HashSet<String>>> {
     if let Some(hit) = m.routine_names.borrow().as_ref() {
         return Some(Rc::clone(hit));
     }
-    let names: HashSet<String> =
-        ctx.get_node_names_of_kinds(Language::Pascal, &[NodeKind::Method, NodeKind::Function]).iter().map(|n| js_lower(n)).collect();
+    let names: HashSet<String> = ctx
+        .get_node_names_of_kinds(Language::Pascal, &[NodeKind::Method, NodeKind::Function])
+        .iter()
+        .map(|n| js_lower(n))
+        .collect();
     let names = Rc::new(names);
     *m.routine_names.borrow_mut() = Some(Rc::clone(&names));
     Some(names)
@@ -631,7 +1062,12 @@ fn pascal_named(lower: &str, ctx: &Ctx) -> Rc<Vec<NodeRef>> {
     if let Some(hit) = get(&m.named, lower) {
         return hit;
     }
-    let nodes: Vec<NodeRef> = ctx.get_nodes_by_lower_name(lower).iter().filter(|n| n.language == Language::Pascal).cloned().collect();
+    let nodes: Vec<NodeRef> = ctx
+        .get_nodes_by_lower_name(lower)
+        .iter()
+        .filter(|n| n.language == Language::Pascal)
+        .cloned()
+        .collect();
     let nodes = Rc::new(nodes);
     put(&m.named, lower.to_string(), Rc::clone(&nodes));
     nodes
@@ -658,20 +1094,33 @@ fn class_by_qualified_name(qualified_name: &str, file_path: &str, ctx: &Ctx) -> 
     let lower = js_lower(qualified_name);
     let mut cls = None;
     for file in own_unit_files(file_path, ctx).iter() {
-        let own: Vec<NodeRef> = exact.iter().filter(|n| &n.file_path == file).cloned().collect();
+        let own: Vec<NodeRef> = exact
+            .iter()
+            .filter(|n| &n.file_path == file)
+            .cloned()
+            .collect();
         cls = declaration_of(&own).or_else(|| {
             let outline = outline_of(file, ctx);
-            let same: Vec<NodeRef> =
-                outline.classes.iter().filter(|n| js_lower(&strip_generics(&n.qualified_name)) == lower).cloned().collect();
+            let same: Vec<NodeRef> = outline
+                .classes
+                .iter()
+                .filter(|n| js_lower(&strip_generics(&n.qualified_name)) == lower)
+                .cloned()
+                .collect();
             declaration_of(&same)
         });
         if cls.is_some() {
             break;
         }
     }
-    let cls = cls
-        .or_else(|| declaration_of(&exact))
-        .or_else(|| class_named(qualified_name.rsplit("::").next().unwrap_or(qualified_name), file_path, ctx, 0));
+    let cls = cls.or_else(|| declaration_of(&exact)).or_else(|| {
+        class_named(
+            qualified_name.rsplit("::").next().unwrap_or(qualified_name),
+            file_path,
+            ctx,
+            0,
+        )
+    });
     put(&m.class_by_qn, key, cls.clone());
     cls
 }
@@ -697,13 +1146,24 @@ fn class_of_routine(routine: &NodeRef, ctx: &Ctx) -> Option<NodeRef> {
     if let Some(hit) = get(&m.class_of_routine, &routine.id) {
         return hit;
     }
-    let owner = routine.qualified_name.rfind("::").map_or("", |cut| &routine.qualified_name[..cut]);
+    let owner = routine
+        .qualified_name
+        .rfind("::")
+        .map_or("", |cut| &routine.qualified_name[..cut]);
     let candidates: Vec<NodeRef> = if owner.is_empty() {
         Vec::new()
     } else {
-        ctx.get_nodes_by_qualified_name(owner).iter().filter(|n| n.language == Language::Pascal && is_class_kind(n.kind)).cloned().collect()
+        ctx.get_nodes_by_qualified_name(owner)
+            .iter()
+            .filter(|n| n.language == Language::Pascal && is_class_kind(n.kind))
+            .cloned()
+            .collect()
     };
-    let same_file: Vec<NodeRef> = candidates.iter().filter(|n| n.file_path == routine.file_path).cloned().collect();
+    let same_file: Vec<NodeRef> = candidates
+        .iter()
+        .filter(|n| n.file_path == routine.file_path)
+        .cloned()
+        .collect();
     let cls = declaration_of(&same_file).or_else(|| declaration_of(&candidates));
     put(&m.class_of_routine, routine.id.clone(), cls.clone());
     cls
@@ -742,7 +1202,11 @@ fn ancestors_of(cls: &NodeRef, ctx: &Ctx) -> Rc<Vec<NodeRef>> {
 
 /// The qualified name of what declares a node (`TFoo::Bar` → `tfoo`), lowercased.
 fn owner_of(node: &NodeRef) -> String {
-    js_lower(node.qualified_name.rfind("::").map_or("", |cut| &node.qualified_name[..cut]))
+    js_lower(
+        node.qualified_name
+            .rfind("::")
+            .map_or("", |cut| &node.qualified_name[..cut]),
+    )
 }
 
 /// The member a name reaches in a class or, failing that, in its ancestors, nearest first; a
@@ -754,13 +1218,25 @@ fn member_in_hierarchy(cls: &NodeRef, lower: &str, ctx: &Ctx) -> Option<NodeRef>
         return hit;
     }
     let mut found = None;
-    let candidates: Vec<NodeRef> = pascal_named(lower, ctx).iter().filter(|n| is_member_kind(n.kind)).cloned().collect();
+    let candidates: Vec<NodeRef> = pascal_named(lower, ctx)
+        .iter()
+        .filter(|n| is_member_kind(n.kind))
+        .cloned()
+        .collect();
     if !candidates.is_empty() {
         for c in ancestors_of(cls, ctx).iter() {
             let owner = js_lower(&c.qualified_name);
-            let members: Vec<&NodeRef> = candidates.iter().filter(|n| n.file_path == c.file_path && owner_of(n) == owner).collect();
+            let members: Vec<&NodeRef> = candidates
+                .iter()
+                .filter(|n| n.file_path == c.file_path && owner_of(n) == owner)
+                .collect();
             if !members.is_empty() {
-                found = Some(Rc::clone(members.iter().find(|n| !needs_arguments(n)).unwrap_or(&members[0])));
+                found = Some(Rc::clone(
+                    members
+                        .iter()
+                        .find(|n| !needs_arguments(n))
+                        .unwrap_or(&members[0]),
+                ));
                 break;
             }
         }
@@ -807,13 +1283,30 @@ fn outline_of(file_path: &str, ctx: &Ctx) -> Rc<Outline> {
     if !nodes.iter().any(|n| n.kind == NodeKind::Module) {
         for n in nodes.iter() {
             if n.kind == NodeKind::Function && !n.qualified_name.contains("::") {
-                routine_column = Some(routine_column.map_or(n.start_column, |c| c.min(n.start_column)));
+                routine_column =
+                    Some(routine_column.map_or(n.start_column, |c| c.min(n.start_column)));
             }
         }
     }
-    let mut imports: Vec<NodeRef> = nodes.iter().filter(|n| n.kind == NodeKind::Import && n.language == Language::Pascal).cloned().collect();
-    imports.sort_by(|a, b| a.start_line.cmp(&b.start_line).then(a.start_column.cmp(&b.start_column)));
-    let outline = Rc::new(Outline { classes: nodes.iter().filter(|n| is_class_kind(n.kind)).cloned().collect(), imports, routine_column });
+    let mut imports: Vec<NodeRef> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Import && n.language == Language::Pascal)
+        .cloned()
+        .collect();
+    imports.sort_by(|a, b| {
+        a.start_line
+            .cmp(&b.start_line)
+            .then(a.start_column.cmp(&b.start_column))
+    });
+    let outline = Rc::new(Outline {
+        classes: nodes
+            .iter()
+            .filter(|n| is_class_kind(n.kind))
+            .cloned()
+            .collect(),
+        imports,
+        routine_column,
+    });
     put(&m.outlines, file_path.to_string(), Rc::clone(&outline));
     outline
 }
@@ -841,7 +1334,9 @@ fn used_unit_files(from_file: &str, ctx: &Ctx) -> Rc<Vec<String>> {
 }
 
 fn own_unit_declaration(from_file: &str, lower: &str, ctx: &Ctx) -> Option<NodeRef> {
-    own_unit_files(from_file, ctx).iter().find_map(|file| unit_declaration(file, lower, ctx, file))
+    own_unit_files(from_file, ctx)
+        .iter()
+        .find_map(|file| unit_declaration(file, lower, ctx, file))
 }
 
 /// The files whose declarations are a file's unit's own, the file first.
@@ -923,7 +1418,10 @@ fn includes_of(file_path: &str, ctx: &Ctx) -> Rc<Vec<String>> {
                     name.push_str(".inc");
                 }
                 let pf = project_files(ctx);
-                let inc = nearest(pf.by_name.get(&name).map(Vec::as_slice).unwrap_or(&[]), file_path);
+                let inc = nearest(
+                    pf.by_name.get(&name).map(Vec::as_slice).unwrap_or(&[]),
+                    file_path,
+                );
                 if let Some(inc) = inc {
                     if inc != file_path && !includes.contains(&inc) {
                         includes.push(inc);
@@ -952,14 +1450,29 @@ fn includer_of(inc_file: &str, ctx: &Ctx) -> Option<String> {
         }
         // `f.lastIndexOf('/', n - 1)`: a negative start searches from 0.
         let from = n.saturating_sub(1).min(fu.len().saturating_sub(1));
-        let slash = if fu.is_empty() { -1 } else { (0..=from).rev().find(|&i| fu[i] == b'/' as u16).map_or(-1, |i| i as i64) };
+        let slash = if fu.is_empty() {
+            -1
+        } else {
+            (0..=from)
+                .rev()
+                .find(|&i| fu[i] == b'/' as u16)
+                .map_or(-1, |i| i as i64)
+        };
         slash * 1000 + n as i64
     };
     let pf = project_files(ctx);
-    let mut candidates: Vec<(String, i64)> = pf.pascal.iter().filter(|f| f.as_str() != inc_file).map(|f| (f.clone(), shared(f))).collect();
+    let mut candidates: Vec<(String, i64)> = pf
+        .pascal
+        .iter()
+        .filter(|f| f.as_str() != inc_file)
+        .map(|f| (f.clone(), shared(f)))
+        .collect();
     candidates.sort_by(|a, b| b.1.cmp(&a.1));
     candidates.truncate(40);
-    let includer = candidates.into_iter().map(|(f, _)| f).find(|f| includes_of(f, ctx).iter().any(|i| i == inc_file));
+    let includer = candidates
+        .into_iter()
+        .map(|(f, _)| f)
+        .find(|f| includes_of(f, ctx).iter().any(|i| i == inc_file));
     put(&m.includers, inc_file.to_string(), includer.clone());
     includer
 }
@@ -1002,7 +1515,10 @@ fn unit_file_named(lower: &str, from_file: &str, ctx: &Ctx) -> Option<String> {
                     if n.language != Language::Pascal {
                         continue;
                     }
-                    units.entry(js_lower(&n.name)).or_default().push(n.file_path.clone());
+                    units
+                        .entry(js_lower(&n.name))
+                        .or_default()
+                        .push(n.file_path.clone());
                     headed.insert(n.file_path.clone());
                 }
                 // A unit's file is named after it: one whose `unit` header the parser lost is
@@ -1021,7 +1537,10 @@ fn unit_file_named(lower: &str, from_file: &str, ctx: &Ctx) -> Option<String> {
             }
         }
     };
-    let file = nearest(units.get(lower).map(Vec::as_slice).unwrap_or(&[]), from_file);
+    let file = nearest(
+        units.get(lower).map(Vec::as_slice).unwrap_or(&[]),
+        from_file,
+    );
     put(&m.unit_files, key, file.clone());
     file
 }
@@ -1038,19 +1557,31 @@ fn class_named(type_name: &str, from_file: &str, ctx: &Ctx, depth: u32) -> Optio
     let visible = |want: fn(NodeKind) -> bool| -> Vec<NodeRef> {
         let candidates: Vec<NodeRef> = named.iter().filter(|n| want(n.kind)).cloned().collect();
         for file in own_unit_files(from_file, ctx).iter() {
-            let own: Vec<NodeRef> = candidates.iter().filter(|n| &n.file_path == file).cloned().collect();
+            let own: Vec<NodeRef> = candidates
+                .iter()
+                .filter(|n| &n.file_path == file)
+                .cloned()
+                .collect();
             if !own.is_empty() {
                 return own;
             }
         }
         let used = used_unit_files(from_file, ctx);
         for file in used.iter().rev() {
-            let there: Vec<NodeRef> = candidates.iter().filter(|n| &n.file_path == file).cloned().collect();
+            let there: Vec<NodeRef> = candidates
+                .iter()
+                .filter(|n| &n.file_path == file)
+                .cloned()
+                .collect();
             if !there.is_empty() {
                 return there;
             }
         }
-        if !candidates.is_empty() && candidates.iter().all(|n| n.file_path == candidates[0].file_path) {
+        if !candidates.is_empty()
+            && candidates
+                .iter()
+                .all(|n| n.file_path == candidates[0].file_path)
+        {
             candidates
         } else {
             Vec::new()
@@ -1061,9 +1592,17 @@ fn class_named(type_name: &str, from_file: &str, ctx: &Ctx, depth: u32) -> Optio
         // A type alias names the class it stands for: `TVTAncestor = TVTAncestorVcl;`.
         for alias in visible(|k| k == NodeKind::TypeAlias) {
             let lines = lines_of(ctx, &alias.file_path);
-            let raw = (alias.start_line as usize).checked_sub(1).and_then(|i| lines.get(i)).map(String::as_str).unwrap_or("");
+            let raw = (alias.start_line as usize)
+                .checked_sub(1)
+                .and_then(|i| lines.get(i))
+                .map(String::as_str)
+                .unwrap_or("");
             let line = re!(r"//.*$|\{[^}]*\}", "g").replace_all_str(raw, "");
-            let target = re!(r"=\s*([A-Za-z_][\w.]*)\s*;").captures(&line).and_then(|c| c.text(1).map(str::to_string));
+            // A pointer and a class reference reach the class they name
+            // (`PVirtualNode = ^TVirtualNode`, `TSynLogClass = class of TSynLog`).
+            let target = re!(r"=\s*(?:\^|class\s+of\b)?\s*([A-Za-z_][\w.]*)\s*;", "i")
+                .captures(&line)
+                .and_then(|c| c.text(1).map(str::to_string));
             if let Some(target) = target {
                 cls = class_named(&target, &alias.file_path, ctx, depth + 1);
                 if cls.is_some() {
@@ -1117,9 +1656,13 @@ fn type_of_member(member: &NodeRef, ctx: &Ctx) -> Option<NodeRef> {
         })
     } else {
         let text = declared_type_text(member, ctx);
-        re!(r"^([A-Za-z_][\w.]*)").captures(&text).and_then(|c| c.text(1).map(str::to_string))
+        re!(r"^([A-Za-z_][\w.]*)")
+            .captures(&text)
+            .and_then(|c| c.text(1).map(str::to_string))
     };
-    let ty = type_name.as_deref().and_then(|t| class_named(t, &member.file_path, ctx, 0));
+    let ty = type_name
+        .as_deref()
+        .and_then(|t| class_named(t, &member.file_path, ctx, 0));
     put(&m.member_types, member.id.clone(), ty.clone());
     ty
 }
@@ -1130,9 +1673,15 @@ fn declared_type_text(node: &NodeRef, ctx: &Ctx) -> String {
     let name = escape_regex(&node.name);
     let property = node.kind == NodeKind::Property;
     let re = if property {
-        Re::cached(&format!(r"\bproperty\s+{name}\s*(?:\[[^\]]*\])?\s*:\s*(.*)$"), "i")
+        Re::cached(
+            &format!(r"\bproperty\s+{name}\s*(?:\[[^\]]*\])?\s*:\s*(.*)$"),
+            "i",
+        )
     } else {
-        Re::cached(&format!(r"\b{name}\b(?:\s*,\s*[A-Za-z_]\w*)*\s*,?\s*:(?!=)\s*(.*)$"), "i")
+        Re::cached(
+            &format!(r"\b{name}\b(?:\s*,\s*[A-Za-z_]\w*)*\s*,?\s*:(?!=)\s*(.*)$"),
+            "i",
+        )
     };
     let mut text = String::new();
     let start = node.start_line as usize;
@@ -1165,25 +1714,44 @@ fn is_procedural_data(node: &NodeRef, ctx: &Ctx) -> bool {
 
 /// Whether a written type is a routine's: written out, or named, with the name's declaration
 /// saying so, through an alias to another such name; a name the project doesn't declare when the
-/// RTL's names say so.
+/// RTL's names say so. Unknown names and System value types are not.
 fn is_procedural_type_text(text: &str, ctx: &Ctx, depth: u32) -> bool {
+    routine_type_verdict(text, ctx, depth) == Some(true)
+}
+
+/// Whether a written type is a routine's. `Some(false)` for a System value type
+/// or a project type that is not a routine type. None when nothing says
+/// (`TStringList` the project does not declare, `array of TFoo`).
+fn routine_type_verdict(text: &str, ctx: &Ctx, depth: u32) -> Option<bool> {
     if re!(r"^(?:reference\s+to\s+)?(?:procedure|function)\b", "i").is_match(text) {
-        return true;
+        return Some(true);
     }
-    let Some(type_name) = re!(r"^(?:type\s+)?([A-Za-z_][\w.]*)", "i")
+    let type_name = re!(r"^(?:type\s+)?([A-Za-z_][\w.]*)", "i")
         .captures(text)
-        .and_then(|c| c.text(1).map(|t| js_lower(t.rsplit('.').next().unwrap_or(t))))
-    else {
-        return false;
-    };
+        .and_then(|c| {
+            c.text(1)
+                .map(|t| js_lower(t.rsplit('.').next().unwrap_or(t)))
+        })?;
     if depth > 3 {
-        return false;
+        return None;
     }
     let types = types_named(&type_name, ctx);
     if types.is_empty() {
-        return is_rtl_procedural_type(&type_name) || re!(r"^t\w*(?:event|proc|method|callback)$").is_match(&type_name);
+        if is_rtl_procedural_type(&type_name)
+            || re!(r"^t\w*(?:event|proc|method|callback)$").is_match(&type_name)
+        {
+            return Some(true);
+        }
+        return if is_system_value_type(&type_name) {
+            Some(false)
+        } else {
+            None
+        };
     }
-    types.iter().any(|t| t.kind == NodeKind::TypeAlias && is_procedural_type_text(&aliased_type_text(t, ctx), ctx, depth + 1))
+    Some(types.iter().any(|t| {
+        t.kind == NodeKind::TypeAlias
+            && is_procedural_type_text(&aliased_type_text(t, ctx), ctx, depth + 1)
+    }))
 }
 
 /// The project's Pascal types a name names, generic ones by the name before their parameters.
@@ -1195,15 +1763,25 @@ fn types_named(lower: &str, ctx: &Ctx) -> Vec<NodeRef> {
             Some(g) => g,
             None => {
                 let mut generic: HashMap<String, Vec<NodeRef>> = HashMap::new();
-                let kinds = [NodeKind::TypeAlias, NodeKind::Class, NodeKind::Struct, NodeKind::Interface];
+                let kinds = [
+                    NodeKind::TypeAlias,
+                    NodeKind::Class,
+                    NodeKind::Struct,
+                    NodeKind::Interface,
+                ];
                 let mut seen: HashSet<String> = HashSet::new();
                 for name in ctx.get_node_names_of_kinds(Language::Pascal, &kinds) {
                     if !name.contains('<') || !seen.insert(name.clone()) {
                         continue;
                     }
                     for n in ctx.get_nodes_by_name(&name).iter() {
-                        let Some(open) = n.name.find('<') else { continue };
-                        if n.language != Language::Pascal || open == 0 || !(n.kind == NodeKind::TypeAlias || is_class_kind(n.kind)) {
+                        let Some(open) = n.name.find('<') else {
+                            continue;
+                        };
+                        if n.language != Language::Pascal
+                            || open == 0
+                            || !(n.kind == NodeKind::TypeAlias || is_class_kind(n.kind))
+                        {
                             continue;
                         }
                         let base = js_lower(js_trim(&n.name[..open]));
@@ -1216,8 +1794,11 @@ fn types_named(lower: &str, ctx: &Ctx) -> Vec<NodeRef> {
             }
         }
     };
-    let mut out: Vec<NodeRef> =
-        pascal_named(lower, ctx).iter().filter(|t| t.kind == NodeKind::TypeAlias || is_class_kind(t.kind)).cloned().collect();
+    let mut out: Vec<NodeRef> = pascal_named(lower, ctx)
+        .iter()
+        .filter(|t| t.kind == NodeKind::TypeAlias || is_class_kind(t.kind))
+        .cloned()
+        .collect();
     if let Some(more) = generic.get(lower) {
         out.extend(more.iter().cloned());
     }
@@ -1246,7 +1827,9 @@ fn aliased_type_text(alias: &NodeRef, ctx: &Ctx) -> String {
 
 /// Whether a routine has a parameter without a default value, which a call must pass.
 fn needs_arguments(routine: &NodeRef) -> bool {
-    let Some(signature) = routine.signature.as_deref().map(js_trim) else { return false };
+    let Some(signature) = routine.signature.as_deref().map(js_trim) else {
+        return false;
+    };
     if !signature.starts_with('(') {
         return false;
     }
@@ -1263,15 +1846,24 @@ fn needs_arguments(routine: &NodeRef) -> bool {
             }
         }
     }
-    signature[1..end].split(';').any(|param| !js_trim(param).is_empty() && !param.contains('='))
+    signature[1..end]
+        .split(';')
+        .any(|param| !js_trim(param).is_empty() && !param.contains('='))
 }
 
 /// Whether a routine gives a value — a function or a constructor — rather than a procedure.
 fn yields_value(routine: &NodeRef, ctx: &Ctx) -> bool {
-    if routine.return_type.as_deref().is_some_and(|t| !t.is_empty()) {
+    if routine
+        .return_type
+        .as_deref()
+        .is_some_and(|t| !t.is_empty())
+    {
         return true;
     }
-    matches!(routine_keyword(routine, ctx).as_deref(), Some("function" | "constructor"))
+    matches!(
+        routine_keyword(routine, ctx).as_deref(),
+        Some("function" | "constructor")
+    )
 }
 
 /// The keyword that declares a routine, lowercased, or None.
@@ -1281,9 +1873,17 @@ fn routine_keyword(routine: &NodeRef, ctx: &Ctx) -> Option<String> {
         return hit;
     }
     let lines = lines_of(ctx, &routine.file_path);
-    let line = (routine.start_line as usize).checked_sub(1).and_then(|i| lines.get(i)).map(String::as_str).unwrap_or("");
-    let keyword =
-        re!(r"\b(function|procedure|constructor|destructor|operator)\s", "i").captures(line).and_then(|c| c.text(1).map(js_lower));
+    let line = (routine.start_line as usize)
+        .checked_sub(1)
+        .and_then(|i| lines.get(i))
+        .map(String::as_str)
+        .unwrap_or("");
+    let keyword = re!(
+        r"\b(function|procedure|constructor|destructor|operator)\s",
+        "i"
+    )
+    .captures(line)
+    .and_then(|c| c.text(1).map(js_lower));
     put(&m.keywords, routine.id.clone(), keyword.clone());
     keyword
 }
@@ -1294,7 +1894,19 @@ mod tests {
     use codegraph_types::Node;
 
     fn routine(signature: Option<&str>) -> NodeRef {
-        let mut n = Node::new("id", NodeKind::Function, "F", "F", "a.pas", Language::Pascal, 1, 1, 0, 0, 0);
+        let mut n = Node::new(
+            "id",
+            NodeKind::Function,
+            "F",
+            "F",
+            "a.pas",
+            Language::Pascal,
+            1,
+            1,
+            0,
+            0,
+            0,
+        );
         n.signature = signature.map(str::to_string);
         Rc::new(n)
     }
@@ -1304,21 +1916,46 @@ mod tests {
         assert!(!needs_arguments(&routine(None)));
         assert!(!needs_arguments(&routine(Some(": Integer"))));
         assert!(!needs_arguments(&routine(Some("()"))));
-        assert!(!needs_arguments(&routine(Some("(const A: string = 'x'; B: Integer = 1)"))));
-        assert!(needs_arguments(&routine(Some("(A: Integer; B: Integer = 1)"))));
+        assert!(!needs_arguments(&routine(Some(
+            "(const A: string = 'x'; B: Integer = 1)"
+        ))));
+        assert!(needs_arguments(&routine(Some(
+            "(A: Integer; B: Integer = 1)"
+        ))));
         assert!(needs_arguments(&routine(Some("  (Sender: TObject)"))));
     }
 
     #[test]
     fn parenless_names_and_condition_depths() {
         let c = parenless().captures("{call@TConsumer}.Before").unwrap();
-        assert_eq!((c.text(1), c.text(2), c.text(3)), (Some("call"), Some("TConsumer"), Some("Before")));
+        assert_eq!(
+            (c.text(1), c.text(2), c.text(3), c.text(4)),
+            (Some("call"), None, Some("TConsumer"), Some("Before"))
+        );
         let c = parenless().captures("{read}.:TProvider.Value").unwrap();
-        assert_eq!((c.text(1), c.text(2), c.text(3)), (Some("read"), None, Some(":TProvider.Value")));
+        assert_eq!(
+            (c.text(1), c.text(2), c.text(3), c.text(4)),
+            (Some("read"), None, None, Some(":TProvider.Value"))
+        );
+        let c = parenless()
+            .captures("{read=Callback}.FProvider.Value")
+            .unwrap();
+        assert_eq!(
+            (c.text(1), c.text(2), c.text(3), c.text(4)),
+            (
+                Some("read"),
+                Some("Callback"),
+                None,
+                Some("FProvider.Value")
+            )
+        );
         assert!(parenless().captures("{x}.Name").is_none());
         assert_eq!(condition_depth_after("{$IFDEF A}{$IFNDEF B}", 0), 2);
         assert_eq!(condition_depth_after("{$ENDIF}{$endif}{$IFEND}", 1), 0);
-        assert_eq!(nearest(&["a/x/u.pas".into(), "b/u.pas".into()], "b/c.pas").as_deref(), Some("b/u.pas"));
+        assert_eq!(
+            nearest(&["a/x/u.pas".into(), "b/u.pas".into()], "b/c.pas").as_deref(),
+            Some("b/u.pas")
+        );
         assert_eq!(strip_comments_and_strings("A := 'x'; // c"), "A :=  ;  ");
     }
 }

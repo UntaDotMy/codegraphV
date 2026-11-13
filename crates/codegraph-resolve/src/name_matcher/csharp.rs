@@ -10,7 +10,7 @@ use crate::ctx::Ctx;
 use crate::types::{NodeRef, UnresolvedRef};
 use codegraph_extract::strip_comments::strip_comments_for_regex;
 use codegraph_jsre::{escape_regex, re, Re};
-use codegraph_types::{Language, Node, NodeKind};
+use codegraph_types::{EdgeKind, Language, Node, NodeKind};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -262,6 +262,206 @@ fn csharp_global_usings(dir: &str, ctx: &Ctx) -> Rc<HashSet<String>> {
     })
 }
 
+/// Where `text` goes on past the C# attribute lists that open at `from`.
+fn csharp_past_attributes(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut at = from;
+    loop {
+        loop {
+            while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+                at += 1;
+            }
+            if at + 1 < bytes.len() && bytes[at] == b'/' && bytes[at + 1] == b'/' {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            if at + 1 < bytes.len() && bytes[at] == b'/' && bytes[at + 1] == b'*' {
+                at += 2;
+                while at + 1 < bytes.len() && !(bytes[at] == b'*' && bytes[at + 1] == b'/') {
+                    at += 1;
+                }
+                at = (at + 2).min(bytes.len());
+                continue;
+            }
+            if at < bytes.len() && bytes[at] == b'#' {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            break;
+        }
+        if at >= bytes.len() || bytes[at] != b'[' {
+            return at;
+        }
+        let mut depth = 0i32;
+        while at < bytes.len() {
+            let c = bytes[at];
+            if c == b'"' || c == b'\'' {
+                let quote = c;
+                at += 1;
+                while at < bytes.len() {
+                    if bytes[at] == b'\\' && quote == b'"' {
+                        at += 2;
+                        continue;
+                    }
+                    if bytes[at] == quote {
+                        if quote == b'"' && bytes.get(at + 1) == Some(&b'"') {
+                            at += 2;
+                            continue;
+                        }
+                        at += 1;
+                        break;
+                    }
+                    at += 1;
+                }
+                continue;
+            }
+            if c == b'[' {
+                depth += 1;
+            } else if c == b']' {
+                depth -= 1;
+                if depth == 0 {
+                    at += 1;
+                    break;
+                }
+            }
+            at += 1;
+        }
+        if depth > 0 {
+            return at;
+        }
+    }
+}
+
+/// A C# declaration's source from past its attributes: its node starts at them, so its first
+/// line may be `[MethodImpl(…)]`, and more of them may follow.
+fn csharp_declaration_source(node: &Node, ctx: &Ctx) -> String {
+    let lines = lines_of(ctx, &node.file_path);
+    let source = js_slice(&lines, node.start_line as i64 - 1, node.end_line as i64).join("\n");
+    let at = csharp_past_attributes(&source, 0);
+    source[at..].to_string()
+}
+
+memo_map!(CsharpTypeArityMemo, String, usize);
+
+/// How many type parameters a C# type declares: `class Cache<K, V>` 2, `class List` 0.
+fn csharp_declared_arity(t: &Node, ctx: &Ctx) -> usize {
+    memoized::<CsharpTypeArityMemo>(ctx, t.id.clone(), || {
+        if t.kind == NodeKind::Component {
+            return lines_of(ctx, &t.file_path).iter().filter(|l| re!(r"^\s*@typeparam\b").is_match(l)).count();
+        }
+        // The first `class Name` is the declaration; a later one is a comment or a string.
+        let pattern = format!(
+            r"\b(?:class|struct|interface|record|enum)\s+(?:(?:class|struct)\s+)?{}\b(?:\s*<([^<>]*)>)?",
+            escape_regex(&t.name)
+        );
+        let source = csharp_declaration_source(t, ctx);
+        let params = Re::cached(&pattern, "").captures(&source).and_then(|c| c.text(1));
+        params.map_or(0, |p| p.split(',').count())
+    })
+}
+
+/// How many type arguments the C# type named at `r` is written with: 2 for
+/// `Cache<string, List<int>>`, 0 for none, `None` when the list doesn't close on its line.
+fn csharp_written_arity(r: &UnresolvedRef, ctx: &Ctx) -> Option<usize> {
+    let name = r.reference_name.rsplit('.').next().unwrap_or("");
+    let lines = lines_of(ctx, &r.file_path);
+    let line = lines.get(r.line as usize - 1).cloned().unwrap_or_default();
+    let chars: Vec<char> = line.chars().collect();
+    let name_chars: Vec<char> = name.chars().collect();
+    let start = (r.column as usize).min(chars.len());
+    if name_chars.is_empty() {
+        return Some(0);
+    }
+    let at = (start..=chars.len().saturating_sub(name_chars.len()))
+        .find(|&i| chars[i..i + name_chars.len()] == name_chars[..]);
+    let Some(at) = at else { return Some(0) };
+    let mut i = at + name_chars.len();
+    while chars.get(i) == Some(&' ') {
+        i += 1;
+    }
+    if chars.get(i) != Some(&'<') {
+        return Some(0);
+    }
+    let mut depth = 0i32;
+    let mut args = 1usize;
+    while i < chars.len() {
+        match chars[i] {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(args);
+                }
+            }
+            ',' if depth == 1 => args += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether a C# type can be what `r` names, by type arguments: a name written with them means a
+/// type declaring as many. `new List<CatalogBrand>()` is the BCL's `List<T>`, not the Blazor page
+/// `List` around it, whose namespace would win for a bare `List`.
+pub fn csharp_type_arity_fits(t: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    if !(r.is_kind(EdgeKind::References) || r.is_kind(EdgeKind::Instantiates)) {
+        return true;
+    }
+    if !(is_csharp_type_kind(t.kind) || (t.kind == NodeKind::Component && t.language == Language::Razor)) {
+        return true;
+    }
+    let written = csharp_written_arity(r, ctx);
+    match written {
+        Some(n) if n > 0 => n == csharp_declared_arity(t, ctx),
+        _ => true,
+    }
+}
+
+/// A first parameter past its attributes, written `this`: `this T x`, `ref this int x`.
+const CSHARP_THIS_PARAMETER: &str = r"^(?:(?:ref|in|scoped|readonly)\s+)*this\s";
+
+memo_map!(CsharpExtensionMethodsMemo, String, bool);
+
+/// Whether a C# method is an extension method: its first parameter is written `this T x`. The
+/// list is found from the method's name, since attributes may stand above the name, the return
+/// type may be a tuple, and the list may wrap.
+pub fn is_csharp_extension_method(method: &Node, ctx: &Ctx) -> bool {
+    if method.language != Language::CSharp {
+        return false;
+    }
+    memoized::<CsharpExtensionMethodsMemo>(ctx, method.id.clone(), || {
+        let source = csharp_declaration_source(method, ctx);
+        let pattern = format!(r"\b{}\s*(?:<[^()]*>\s*)?\(", escape_regex(&method.name));
+        let Some(list) = Re::cached(&pattern, "").captures(&source).and_then(|c| c.get(0)) else { return false };
+        let at = csharp_past_attributes(&source, list.start() + list.as_str().len());
+        Re::cached(CSHARP_THIS_PARAMETER, "").is_match(&source[at..])
+    })
+}
+
+/// Whether a C# extension method calls itself on an element a lambda of its body receives:
+/// serilog's `sequence.Elements.Select(e => e.LiteralValue())` inside
+/// `LiteralValue(this LogEventPropertyValue @this)` walks a value's children.
+pub fn is_csharp_extension_element_call(method: &Node, receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    if !is_csharp_extension_method(method, ctx) {
+        return false;
+    }
+    let lines = lines_of(ctx, &r.file_path);
+    let start = (method.start_line as usize).saturating_sub(1).min(lines.len());
+    let end = (r.line as usize).saturating_sub(1).min(lines.len());
+    let mut parts: Vec<String> = lines[start.min(end)..end].to_vec();
+    if let Some(line) = lines.get(end) {
+        parts.push(before_col(line, r.column).to_string());
+    }
+    let before = parts.join("\n");
+    let pattern = format!(r"(?:^|[^\w.])\(?{}\)?\s*=>", escape_regex(receiver));
+    Re::cached(&pattern, "").is_match(&before)
+}
+
 /// A C# type is nameable from a file in its namespace (or below it), or one that `using`s the
 /// namespace; an alias names exactly its target.
 pub fn is_csharp_type_visible(n: &Node, r: &UnresolvedRef, ctx: &Ctx) -> bool {
@@ -286,51 +486,60 @@ pub fn is_csharp_nested_type_in_scope(n: &Node, r: &UnresolvedRef, ctx: &Ctx) ->
     if enclosing.iter().any(|p| p.qualified_name == owner || p.qualified_name.starts_with(&format!("{owner}::"))) {
         return true;
     }
-    enclosing.iter().any(|p| csharp_ancestor_names(&p.qualified_name, ctx, 0).borrow().contains(&owner_type.name))
+    enclosing.iter().any(|p| csharp_ancestor_names(&p.qualified_name, ctx).borrow().contains(&owner_type.name))
 }
 
 /// The simple names of everything the type `qn` derives from, transitively (to a depth).
-fn csharp_ancestor_names(qn: &str, ctx: &Ctx, depth: u32) -> Rc<RefCell<HashSet<String>>> {
+fn csharp_ancestor_names(qn: &str, ctx: &Ctx) -> Rc<RefCell<HashSet<String>>> {
     let memo = ctx.memo::<CsharpAncestorsMemo>();
     if let Some(hit) = memo.lookup(&qn.to_string()) {
         return hit;
     }
-    // A cycle reads what is gathered so far.
-    let names: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
-    memo.store(qn.to_string(), Rc::clone(&names));
-    for decl in ctx.get_nodes_by_qualified_name(qn).iter() {
-        if decl.language != Language::CSharp || !is_csharp_type_kind(decl.kind) {
-            continue;
-        }
-        let lines = lines_of(ctx, &decl.file_path);
-        let mut header = String::new();
-        let mut i = (decl.start_line as usize).saturating_sub(1);
-        while i < lines.len().min(decl.start_line as usize + 6) && !header.contains('{') {
-            header.push_str(&lines[i]);
-            header.push(' ');
-            i += 1;
-        }
-        let before_brace = header.split('{').next().unwrap_or("");
-        let before_brace = re!(r"\bwhere\b[\s\S]*$").replace_first(before_brace, |_| String::new());
-        let list = re!(r":\s*([^{;]*)").captures(&before_brace).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
-        for base in split_cpp_top_level(&list) {
-            if let Some(name) = re!(r"([A-Za-z_]\w*)\s*(?:<.*)?$").captures(base.trim_matches(codegraph_types::jscompat::is_js_space)).and_then(|c| c.text(1).map(String::from)) {
-                names.borrow_mut().insert(name);
-            }
-        }
-    }
-    if depth < 4 {
-        let bases: Vec<String> = names.borrow().iter().cloned().collect();
-        for base in bases {
-            for t in ctx.get_nodes_by_name(&base).iter() {
-                if t.language != Language::CSharp || !is_csharp_type_kind(t.kind) || t.qualified_name == qn {
+    // A walk of its own for every type, memoized only when finished (upstream fab65e9d).
+    let mut names: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::from([qn.to_string()]);
+    let mut level = vec![qn.to_string()];
+    while !level.is_empty() {
+        let mut bases: Vec<String> = Vec::new();
+        for ty in &level {
+            for decl in ctx.get_nodes_by_qualified_name(ty).iter() {
+                if decl.language != Language::CSharp || !is_csharp_type_kind(decl.kind) {
                     continue;
                 }
-                let ups: Vec<String> = csharp_ancestor_names(&t.qualified_name, ctx, depth + 1).borrow().iter().cloned().collect();
-                names.borrow_mut().extend(ups);
+                let lines = lines_of(ctx, &decl.file_path);
+                let mut header = String::new();
+                let mut i = (decl.start_line as usize).saturating_sub(1);
+                while i < lines.len().min(decl.start_line as usize + 6) && !header.contains('{') {
+                    header.push_str(&lines[i]);
+                    header.push(' ');
+                    i += 1;
+                }
+                let before_brace = header.split('{').next().unwrap_or("");
+                let before_brace = re!(r"\bwhere\b[\s\S]*$").replace_first(before_brace, |_| String::new());
+                let list = re!(r":\s*([^{;]*)").captures(&before_brace).and_then(|c| c.text(1).map(String::from)).unwrap_or_default();
+                for base in split_cpp_top_level(&list) {
+                    if let Some(name) = re!(r"([A-Za-z_]\w*)\s*(?:<.*)?$").captures(base.trim_matches(codegraph_types::jscompat::is_js_space)).and_then(|c| c.text(1).map(String::from)) {
+                        if !bases.contains(&name) {
+                            bases.push(name);
+                        }
+                    }
+                }
             }
         }
+        let mut next: Vec<String> = Vec::new();
+        for base in bases {
+            for t in ctx.get_nodes_by_name(&base).iter() {
+                if t.language != Language::CSharp || !is_csharp_type_kind(t.kind) || !seen.insert(t.qualified_name.clone()) {
+                    continue;
+                }
+                next.push(t.qualified_name.clone());
+            }
+            names.insert(base);
+        }
+        level = next;
     }
+    let names = Rc::new(RefCell::new(names));
+    memo.store(qn.to_string(), Rc::clone(&names));
     names
 }
 

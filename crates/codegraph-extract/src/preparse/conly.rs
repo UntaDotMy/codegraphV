@@ -80,6 +80,88 @@ const C_STMT_MACRO_KEYWORDS: &[&str] = &["if", "while", "for", "switch", "return
 // `PG_FOREACH(reg) {` — betaflight); a PascalCase name is left alone (a constructor, if the file is
 // C++).
 static STMT_MACRO_HEAD: LazyLock<Re> = LazyLock::new(|| Re::new(r"^[ \t]+([a-z_][a-z0-9_]*|[A-Z_][A-Z0-9_]*)[ \t]*\("));
+static CONTROL_HEAD: LazyLock<Re> = LazyLock::new(|| Re::new(r"\b(?:if|for|while|switch)\s*$"));
+static ELSE_OR_DO: LazyLock<Re> = LazyLock::new(|| Re::new(r"(?:^|\W)(?:else|do)$"));
+
+/// What an open brace holds. A `(` or `[` is held as its byte offset.
+const C_BLOCK: i64 = -1;
+const C_OTHER_BRACES: i64 = -2;
+
+/// Can a statement follow this code byte, inside a block? After `)`, a macro without its `;`.
+fn c_statement_follows(ch: u8) -> bool {
+    matches!(ch, b';' | b'{' | b'}' | b':' | b')')
+}
+
+/// Which lines start a statement of a function body. `code` is `mask_cpp_code`:
+/// directives and comments are spaces. `= {`, `struct s {` and `enum {` hold no
+/// statements. The unbraced body of `if`, `for`, `else` or `do` is left out: a
+/// `;` there would part the following block from its `else` or `while`. A `#if`
+/// branch that leaves a bracket open costs at most the rest of its block.
+fn c_statement_lines(code: &str) -> Vec<bool> {
+    let bytes = code.as_bytes();
+    let mut statements = Vec::new();
+    let mut open: Vec<i64> = Vec::new();
+    let mut line = 0usize;
+    let mut at_line_start = true;
+    let mut prev: isize = -1;
+    let mut after_control_head = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'\n' {
+            line += 1;
+            at_line_start = true;
+            i += 1;
+            continue;
+        }
+        if ch == b' ' || ch == b'\t' || ch == b'\r' {
+            i += 1;
+            continue;
+        }
+        let top = open.last().copied();
+        if at_line_start {
+            at_line_start = false;
+            if statements.len() <= line {
+                statements.resize(line + 1, false);
+            }
+            let prev_byte = (prev >= 0).then(|| bytes[prev as usize]);
+            statements[line] = top == Some(C_BLOCK) && !after_control_head && prev_byte.is_some_and(c_statement_follows);
+        }
+        after_control_head = false;
+        if ch == b'(' || ch == b'[' {
+            open.push(i as i64);
+        } else if ch == b')' || ch == b']' {
+            if let Some(open_at) = top.filter(|t| *t >= 0) {
+                open.pop();
+                let open_at = open_at as usize;
+                let start = open_at.saturating_sub(10);
+                after_control_head = CONTROL_HEAD.is_match(&code[start..open_at]);
+            }
+        } else if ch == b'{' {
+            let prev_byte = (prev >= 0).then(|| bytes[prev as usize]);
+            let else_or_do = if prev >= 0 {
+                let end = prev as usize;
+                let start = end.saturating_sub(4);
+                ELSE_OR_DO.is_match(&code[start..=end])
+            } else {
+                false
+            };
+            let opens_block = prev_byte == Some(b'(')
+                || (prev_byte == Some(b')') && top.is_none())
+                || (top == Some(C_BLOCK) && (prev_byte.is_some_and(c_statement_follows) || else_or_do));
+            open.push(if opens_block { C_BLOCK } else { C_OTHER_BRACES });
+        } else if ch == b'}' {
+            while let Some(popped) = open.pop() {
+                if popped < 0 {
+                    break;
+                }
+            }
+        }
+        prev = i as isize;
+        i += 1;
+    }
+    statements
+}
 
 /// Scan `line` from `from` for the `)` that balances `depth`, skipping literals.
 /// `Err(())` when a `;`, `{` or `}` shows up (only with `bail_on_stmt`).
@@ -119,6 +201,7 @@ pub(crate) fn blank_c_statement_macro_calls(source: &str) -> String {
     let source = raw.source.as_str();
     let mut lines: Vec<String> = source.split('\n').map(str::to_string).collect();
     let mut changed = false;
+    let mut statement_lines: Option<Vec<bool>> = None;
     let content = |l: &str| -> String { trim(strip_cr(l)).to_string() };
     let mut i = 0;
     while i < lines.len() {
@@ -188,10 +271,21 @@ pub(crate) fn blank_c_statement_macro_calls(source: &str) -> String {
             continue;
         }
         let ident_start = line.find(ident).unwrap();
+        if statement_lines.is_none() {
+            statement_lines = Some(c_statement_lines(&mask_cpp_code(source)));
+        }
+        let keep_name = statement_lines.as_ref().and_then(|rows| rows.get(i).copied()).unwrap_or(false);
+        let kept = if keep_name { format!("{ident};") } else { String::new() };
         if end_line == i {
-            lines[i] = format!("{}{}{}", &line[..ident_start], spaces(close + 1 - ident_start), &line[close + 1..]);
+            let span = close + 1 - ident_start;
+            let mut padded = kept;
+            if padded.len() < span {
+                padded.push_str(&spaces(span - padded.len()));
+            }
+            lines[i] = format!("{}{}{}", &line[..ident_start], padded, &line[close + 1..]);
         } else {
-            lines[i] = format!("{}{}", &line[..ident_start], blank_keep_cr(&line[ident_start..]));
+            let rest = &line[ident_start + kept.len()..];
+            lines[i] = format!("{}{}{}", &line[..ident_start], kept, blank_keep_cr(rest));
             for j in i + 1..end_line {
                 lines[j] = blank_keep_cr(&lines[j]);
             }
@@ -663,4 +757,300 @@ pub(crate) fn pre_parse_c(source: &str) -> String {
     // restore: both are length-preserving, and the collapse must count braces with raw-string
     // bodies still masked.
     raw.restore(&blank_c_unbalanced_conditional_branches(&blank_c_named_variadic_define_dots(&restore_directive_lines(&source, &blanked))))
+}
+
+#[cfg(test)]
+mod tests {
+    //! A function that writes a macro before a block still uses the macro
+    //! (upstream b23c8805, #3172). The name stays as `name;` only when that
+    //! line is a statement of a function body.
+
+    use super::blank_c_statement_macro_calls;
+    use codegraph_types::{EdgeKind, Language, NodeKind, ReferenceKind};
+
+    fn lines(body: &[&str]) -> String {
+        let mut source = body.join("\n");
+        source.push('\n');
+        source
+    }
+
+    fn extracted(source: &str) -> codegraph_types::ExtractionResult {
+        crate::extract_source("t.c", source, Language::C).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn macros_used(source: &str, func: &str) -> Vec<String> {
+        let result = extracted(source);
+        let holder = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Function && n.name == func)
+            .unwrap_or_else(|| panic!("missing {func}: {:?}", result.nodes.iter().map(|n| format!("{} {}", n.kind, n.name)).collect::<Vec<_>>()));
+        let mut names: Vec<String> = result
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::References && e.source == holder.id)
+            .filter_map(|e| result.nodes.iter().find(|n| n.id == e.target).map(|n| n.name.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn calls_from(source: &str, func: &str) -> Vec<String> {
+        let result = extracted(source);
+        let holder = result.nodes.iter().find(|n| n.kind == NodeKind::Function && n.name == func).unwrap();
+        let mut names: Vec<String> = result
+            .unresolved_references
+            .iter()
+            .filter(|r| r.from_node_id == holder.id && r.reference_kind == ReferenceKind::Edge(EdgeKind::Calls))
+            .map(|r| r.reference_name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn assert_parses(source: &str) {
+        let result = extracted(source);
+        let (has_error, _) = crate::stack::parse_notes();
+        assert!(
+            !has_error,
+            "parse error; symbols {:?}",
+            result.nodes.iter().map(|n| format!("{} {}", n.kind, n.name)).collect::<Vec<_>>()
+        );
+    }
+
+    fn kept_prefix(annotation: &str, kept: &str) -> String {
+        let mut rest = String::new();
+        for ch in annotation[kept.len()..].chars() {
+            rest.push(if ch == '\n' || ch == '\r' { ch } else { ' ' });
+        }
+        rest
+    }
+
+    #[test]
+    fn a_function_still_uses_a_macro_written_before_a_block() {
+        let before_block = lines(&[
+            "#define TEST_CONTEXT(context) printf(\"%s\", context);",
+            "int use(const char *s);",
+            "int mstrTest(void) {",
+            "    TEST_CONTEXT(\"Create simple short mstr\") {",
+            "        use(\"foo\");",
+            "    }",
+            "    return 0;",
+            "}",
+        ]);
+        assert_eq!(macros_used(&before_block, "mstrTest"), vec!["TEST_CONTEXT".to_string()]);
+        assert!(calls_from(&before_block, "mstrTest").iter().any(|name| name == "use"));
+
+        let next_statement = lines(&[
+            "#define XXH_ASSERT(c) ((void)0)",
+            "int h(int len) {",
+            "    int a = len;",
+            "    XXH_ASSERT(a != 0)",
+            "    {   int b = a;",
+            "        return b;",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(macros_used(&next_statement, "h"), vec!["XXH_ASSERT".to_string()]);
+
+        let run = lines(&[
+            "#define check_len(c) ((void)0)",
+            "int h(int len) {",
+            "    check_len(len != 0)",
+            "    check_len(len != 1)",
+            "    {",
+            "        return len;",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(blank_c_statement_macro_calls(&run).matches("check_len;").count(), 2);
+        assert_eq!(macros_used(&run, "h"), vec!["check_len".to_string()]);
+    }
+
+    #[test]
+    fn a_name_stays_only_on_a_statement_of_a_function_body() {
+        let over_lines = lines(&[
+            "#define EACH(a, b) for (;;)",
+            "void f(int x, void *head) {",
+            "    EACH(x,",
+            "         head) {",
+            "        x--;",
+            "    }",
+            "}",
+            "void g(int x) {",
+            "    if (x) {",
+            "        EACH(x, 0) {",
+            "            x--;",
+            "        }",
+            "    } else",
+            "        EACH(x, 1) {",
+            "            x++;",
+            "        }",
+            "    do",
+            "        EACH(x, 2) {",
+            "            x++;",
+            "        }",
+            "    while (x);",
+            "out:",
+            "    EACH(x, 3) {",
+            "        x++;",
+            "    }",
+            "}",
+        ]);
+        let over_out = blank_c_statement_macro_calls(&over_lines);
+        assert_eq!(over_out.len(), over_lines.len());
+        assert_eq!(over_out.matches("EACH;").count(), 3);
+        assert_eq!(macros_used(&over_lines, "f"), vec!["EACH".to_string()]);
+        assert_eq!(macros_used(&over_lines, "g"), vec!["EACH".to_string()]);
+        assert_parses(&over_lines);
+
+        let braced = lines(&[
+            "#define EACH(a) for (;;)",
+            "int g(int x) {",
+            "    if (x) {",
+            "        x--;",
+            "    } else {",
+            "        EACH(x) {",
+            "            x--;",
+            "        }",
+            "    }",
+            "    do {",
+            "        EACH(x) {",
+            "            x--;",
+            "        }",
+            "    } while (x);",
+            "    switch (x) {",
+            "    case 1:",
+            "        EACH(x) {",
+            "            x--;",
+            "        }",
+            "        break;",
+            "    }",
+            "    return ({",
+            "        EACH(x) {",
+            "            x--;",
+            "        }",
+            "        x;",
+            "    });",
+            "}",
+        ]);
+        assert_eq!(blank_c_statement_macro_calls(&braced).matches("EACH;").count(), 4);
+        assert_parses(&braced);
+
+        let unbraced = lines(&[
+            "void g(int x) {",
+            "    if (x)",
+            "        EACH(x, 0) {",
+            "            x--;",
+            "        }",
+            "    else",
+            "        EACH(x, 1) {",
+            "            x++;",
+            "        }",
+            "    do",
+            "        EACH(x, 2) {",
+            "            x++;",
+            "        }",
+            "    while (x);",
+            "}",
+        ]);
+        assert!(!blank_c_statement_macro_calls(&unbraced).contains("EACH"));
+        assert_parses(&unbraced);
+
+        let forbidden = ["entry;", "members;", "values;", "inner;", "tail;"];
+        let samples = [
+            lines(&["static const int table[] = {", "    entry(a)", "    entry(b)", "    last", "};"]),
+            lines(&["struct s {", "    members(a)", "    int x;", "};"]),
+            lines(&["enum e {", "    values(a)", "    last", "};"]),
+            lines(&["void f(void) {", "    int t[] = {", "        entry(a)", "        entry(b)", "        last", "    };", "    (void)t;", "}"]),
+            lines(&["void f(void) {", "    OUTER(", "        inner(a)", "        inner(b)", "        last", "    );", "}"]),
+            lines(&["int f(int a, int b) {", "    return a +", "        tail(a)", "        b;", "}"]),
+        ];
+        for sample in samples {
+            let blanked = blank_c_statement_macro_calls(&sample);
+            let parsed = crate::pre_parse("t.c", &sample, Language::C);
+            for name in forbidden {
+                assert!(!blanked.contains(name), "{name} in blank:\n{blanked}");
+                assert!(!parsed.contains(name), "{name} in preparse:\n{parsed}");
+            }
+            assert_eq!(blanked.len(), sample.len());
+            assert_parses(&sample);
+        }
+
+        let crlf = "void f(void) {\r\n    EACH(1) {\r\n    }\r\n    ASSERT(2)\r\n    g();\r\n}\r\n";
+        assert_eq!(
+            blank_c_statement_macro_calls(crlf),
+            "void f(void) {\r\n    EACH;   {\r\n    }\r\n    ASSERT;  \r\n    g();\r\n}\r\n"
+        );
+
+        let broken_if = lines(&[
+            "void f(int a) {",
+            "#ifdef X",
+            "    if (a) {",
+            "#else",
+            "    if (!a) {",
+            "#endif",
+            "        a--;",
+            "    }",
+            "}",
+            "void g(int a) {",
+            "    EACH(a) {",
+            "        a--;",
+            "    }",
+            "}",
+        ]);
+        assert!(blank_c_statement_macro_calls(&broken_if).contains("    EACH;   {"));
+    }
+
+    #[test]
+    fn an_iterator_macro_keeps_its_name_and_a_real_call_stays() {
+        let walk = lines(&[
+            "static void walk(struct list *head) {",
+            "\tlist_for_each_entry(pos, head, member) {",
+            "\t\tuse(pos);",
+            "\t}",
+            "}",
+        ]);
+        let out = blank_c_statement_macro_calls(&walk);
+        assert_eq!(out.len(), walk.len());
+        assert!(out.contains("list_for_each_entry;"), "{out}");
+        assert!(!out.contains("head, member"), "{out}");
+        assert!(out.contains("use(pos);"));
+
+        let call = lines(&["void f(void) {", "\tdo_thing(a, b);", "}"]);
+        assert_eq!(blank_c_statement_macro_calls(&call), call);
+        let kandr = lines(&["main(argc, argv)", "{", "\treturn 0;", "}"]);
+        assert_eq!(blank_c_statement_macro_calls(&kandr), kandr);
+        let ctrl = lines(&["void g(int x) {", "\twhile (x) {", "\t\tx--;", "\t}", "}"]);
+        assert_eq!(blank_c_statement_macro_calls(&ctrl), ctrl);
+
+        let wrapped = lines(&[
+            "static void walk(void *head) {",
+            "\thlist_for_each_entry_rcu(p, head, hlist,",
+            "\t\t\t\t lockdep_is_held(&kprobe_mutex)) {",
+            "\t\tuse(p);",
+            "\t}",
+            "}",
+        ]);
+        let wrapped_out = blank_c_statement_macro_calls(&wrapped);
+        assert_eq!(wrapped_out.len(), wrapped.len());
+        assert!(wrapped_out.contains("hlist_for_each_entry_rcu;"), "{wrapped_out}");
+        assert!(!wrapped_out.contains("lockdep_is_held"), "{wrapped_out}");
+        assert!(wrapped_out.contains("use(p);"));
+        let real = "void f(void) {\n\tdo_thing(a,\n\t\t b);\n}\n";
+        assert_eq!(blank_c_statement_macro_calls(real), real);
+        let cond = "void g(int a) {\n\tif (check(a,\n\t\t  a)) {\n\t\tuse(a);\n\t}\n}\n";
+        assert_eq!(blank_c_statement_macro_calls(cond), cond);
+
+        let head = "void iterate() {\n  ";
+        let tail = " {\n    visit();\n  }\n}\n";
+        let annotation = "for_each_item(R\"TAG(\" ) unbalanced ( \" \\\nUE_DEPRECATED(\n)TAG\")";
+        let kept = "for_each_item;";
+        let source = format!("{head}{annotation}{tail}");
+        assert_eq!(
+            blank_c_statement_macro_calls(&source),
+            format!("{head}{kept}{}{tail}", kept_prefix(annotation, kept))
+        );
+    }
 }

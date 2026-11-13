@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+mod implementations;
 mod migrate;
 mod prompt_hook;
 mod remove_cli;
@@ -60,10 +61,18 @@ enum Command {
         force: bool,
         #[arg(short, long)]
         verbose: bool,
+        /// Accepted for compatibility; `init` never prompts.
         #[arg(short, long)]
         yes: bool,
         #[arg(short, long, hide = true)]
         index: bool,
+        /// Install CodeGraphV's Git sync hooks (post-commit, post-merge, post-checkout).
+        #[arg(long)]
+        git_hooks: bool,
+        /// Keep .codegraphV/ out of git entirely: its .gitignore ignores itself too. Also converts
+        /// an initialized project, without indexing again.
+        #[arg(long)]
+        local_only: bool,
     },
     /// Rebuild the code graph.
     Index {
@@ -83,7 +92,7 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
     },
-    /// Remove this project's index and generated integration files.
+    /// Remove this project's index. Agent configuration is removed separately by uninstall.
     Uninit {
         #[arg(default_value = ".")]
         path: String,
@@ -96,6 +105,10 @@ enum Command {
         path: String,
         #[arg(short, long)]
         json: bool,
+        /// Exit 1 unless the index is finished, up to date, and every language that should yield
+        /// symbols did.
+        #[arg(long)]
+        strict: bool,
     },
     /// Search indexed symbols.
     Query {
@@ -146,7 +159,13 @@ enum Command {
         filter: Option<String>,
         #[arg(long)]
         pattern: Option<String>,
-        #[arg(long,default_value="tree",value_parser=["tree","flat","grouped"])]
+        /// Show only test files.
+        #[arg(long, conflicts_with = "no_tests")]
+        tests: bool,
+        /// Exclude test files.
+        #[arg(long)]
+        no_tests: bool,
+        #[arg(long,default_value="tree",value_parser=["tree","flat","grouped","package"])]
         format: String,
         #[arg(long)]
         max_depth: Option<usize>,
@@ -166,6 +185,20 @@ enum Command {
         file: Option<String>,
         #[arg(short, long, default_value_t = 2)]
         depth: usize,
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// List the types that implement or extend a trait, interface or class.
+    Implementations {
+        symbol: String,
+        #[command(flatten)]
+        project: Project,
+        /// Narrow definitions by file path or suffix (no match: show all with a note).
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Levels of subtypes to list (1: direct implementors only).
+        #[arg(short, long, default_value_t = 1)]
+        depth: u32,
         #[arg(short, long)]
         json: bool,
     },
@@ -206,6 +239,9 @@ enum Command {
         mcp: bool,
         #[arg(long)]
         no_watch: bool,
+        /// Accepted for host compatibility; codegraphV has no telemetry to disable.
+        #[arg(long)]
+        no_telemetry: bool,
     },
     #[command(name = "__daemon", hide = true)]
     DaemonServer {
@@ -253,6 +289,9 @@ enum Command {
         init: bool,
         #[arg(long)]
         no_permissions: bool,
+        /// Claude prompt hook choice; refresh preserves the existing choice by default.
+        #[arg(long, value_parser=["preserve", "on", "off"])]
+        prompt_hook: Option<String>,
         #[arg(long)]
         print_config: Option<String>,
         #[arg(long)]
@@ -353,6 +392,115 @@ fn tool(project: Project, name: &str, args: Value) -> Result<()> {
     println!("{}", result.message());
     Ok(())
 }
+/// `n` with thousands separators, as `status` prints counts.
+fn format_number(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Up to three of `paths`, and how many more there are.
+fn sample_paths(paths: &[String]) -> String {
+    let shown = paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    if paths.len() > 3 { format!("{shown} (+{} more)", format_number(paths.len() as u64 - 3)) } else { shown }
+}
+
+/// `status`'s files-by-language rows, each with how many files yielded symbols when that isn't all
+/// of them, and a warning for a language where none did (upstream 7889da66).
+fn print_language_coverage(cg: &CodeGraph, coverage: &codegraph_core::codegraph::LanguageCoverage) -> Result<()> {
+    let mut rows: Vec<(String, u64)> = cg
+        .get_stats()?
+        .files_by_language
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(l, n)| (l.as_str().to_string(), *n))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("\nFiles by Language:");
+    for (language, count) in &rows {
+        let with_symbols = match coverage.parsed_files_by_language.get(language) {
+            Some(parsed) if parsed != count => format!("  ({} with symbols)", format_number(*parsed)),
+            _ => String::new(),
+        };
+        println!("  {language:<15} {}{with_symbols}", format_number(*count));
+    }
+    // Worded for both causes: a lone config stub with nothing to extract reads exactly like a
+    // parser that isn't working, and the file names are what tell them apart.
+    if !coverage.unparsed_languages.is_empty() {
+        let files = cg.get_files()?;
+        println!();
+        for language in &coverage.unparsed_languages {
+            let paths: Vec<String> = files.iter().filter(|f| f.language.as_str() == language).map(|f| f.path.clone()).collect();
+            println!("Warning: No symbols came from any {language} file — fine if they hold no code, otherwise its parser isn't working: {}", sample_paths(&paths));
+        }
+    }
+    Ok(())
+}
+
+/// `init` on a project whose index is complete and built by this engine: sync the files changed
+/// since, and leave the rest to the watcher and git hooks. Returns false when a full index is
+/// needed instead: no index, an unfinished one, or one an older extraction engine built.
+fn sync_current_index(root: &str) -> Result<bool> {
+    if !directory::is_initialized(root) {
+        return Ok(false);
+    }
+    let mut cg = CodeGraph::open(root, OpenOptions::default())?;
+    let current = cg.get_last_indexed_at()?.is_some()
+        && matches!(cg.get_index_state(), Some(codegraph_core::codegraph::IndexState::Complete))
+        && !cg.is_index_stale();
+    if current {
+        let result = cg.sync(&IndexOptions::default(), None)?;
+        let changed = result.files_added + result.files_modified + result.files_removed;
+        println!("Already indexed; synced {changed} changed file(s). Run \"codegraphV index\" for a full rebuild.");
+    }
+    cg.close();
+    Ok(current)
+}
+
+fn index_project(path: &str, force: bool, verbose: bool, quiet: bool) -> Result<()> {
+    let root = nodepath::resolve(&[path]);
+    if let Some(reason) = codegraph_core::utils::validate_project_path(&root) {
+        return Err(reason.into());
+    }
+    if !force {
+        if let Some(reason) = directory::unsafe_index_root_reason(&root) {
+            return Err(format!("{reason}; pass --force to index this directory.").into());
+        }
+    }
+    let mut cg = if directory::is_initialized(&root) {
+        CodeGraph::open(&root, OpenOptions::default())?
+    } else {
+        CodeGraph::init(&root)?
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal = cancelled.clone();
+    ctrlc::set_handler(move || {
+        signal.store(true, Ordering::SeqCst);
+    })?;
+    let result = cg.index_all(
+        &IndexOptions {
+            verbose,
+            ..Default::default()
+        },
+        None,
+        Some(&cancelled),
+    )?;
+    if !quiet {
+        print_json(&result)?;
+    }
+    cg.close();
+    if !result.success {
+        return Err("Indexing did not complete; see the errors above.".into());
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = match cli.command {
@@ -363,6 +511,7 @@ fn run() -> Result<()> {
             yes: false,
             init: false,
             no_permissions: false,
+            prompt_hook: None,
             print_config: None,
             refresh: false,
         },
@@ -392,52 +541,56 @@ fn run() -> Result<()> {
             path,
             force,
             verbose,
-            ..
-        }
-        | Command::Index {
-            path,
-            force,
-            verbose,
+            git_hooks,
+            local_only,
             ..
         } => {
             let root = nodepath::resolve(&[&path]);
-            if let Some(reason) = codegraph_core::utils::validate_project_path(&root) {
-                return Err(reason.into());
+            // `--local-only` on an initialized project only converts the file (upstream fb71a9f4).
+            if !(local_only && directory::is_initialized(&root)) && !sync_current_index(&root)? {
+                index_project(&path, force, verbose, false)?;
             }
-            if !force {
-                if let Some(reason) = directory::unsafe_index_root_reason(&root) {
-                    return Err(format!("{reason}; pass --force to index this directory.").into());
+            if local_only {
+                let file = format!("{}/.gitignore", std::path::Path::new(&directory::get_code_graph_dir(&root)).file_name().unwrap_or_default().to_string_lossy());
+                match directory::make_gitignore_local_only(&root)? {
+                    directory::LocalOnlyGitignore::Written => println!("{file} now ignores itself, so nothing of CodeGraphV's shows in git."),
+                    directory::LocalOnlyGitignore::Unchanged => println!("{file} already ignores itself."),
+                    directory::LocalOnlyGitignore::Customized => println!("Left {file} as it is because it has your own rules. A lone * in it would keep the whole folder out of git."),
+                    directory::LocalOnlyGitignore::Tracked => println!("Left {file} as it is because it is committed to this repository, so changing it would show up in git."),
                 }
             }
-            let mut cg = if directory::is_initialized(&root) {
-                CodeGraph::open(&root, OpenOptions::default())?
-            } else {
-                CodeGraph::init(&root)?
-            };
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let signal = cancelled.clone();
-            ctrlc::set_handler(move || {
-                signal.store(true, Ordering::SeqCst);
-            })?;
-            let result = cg.index_all(
-                &IndexOptions {
-                    verbose,
-                    ..Default::default()
-                },
-                None,
-                Some(&cancelled),
-            )?;
-            print_json(&result)?;
-            cg.close();
-            if !result.success {
-                return Err("Indexing did not complete; see the errors above.".into());
+            if git_hooks {
+                let root = nodepath::resolve(&[&path]);
+                let result = codegraph_sync::git_hooks::install_git_sync_hook(&root, None)?;
+                if let Some(reason) = &result.skipped {
+                    println!("Git sync hooks skipped: {reason}");
+                } else {
+                    let names: Vec<_> = result.installed.iter().map(|h| h.as_str()).collect();
+                    println!("Installed Git sync hooks: {}", names.join(", "));
+                    if let Some(unsupported) = &result.unsupported {
+                        let names: Vec<_> = unsupported.iter().map(|h| h.as_str()).collect();
+                        println!("Kept existing non-shell hooks unchanged: {}", names.join(", "));
+                    }
+                }
             }
         }
+        Command::Index {
+            path,
+            force,
+            quiet,
+            verbose,
+        } => index_project(&path, force, verbose, quiet)?,
         Command::Sync { path, quiet } => {
             let mut cg = open(&Project { path: Some(path) })?;
             let result = cg.sync(&IndexOptions::default(), None)?;
             if !quiet {
                 print_json(&result)?;
+                // Sync re-reads changed files only, so files left alone keep what an older engine
+                // extracted. Warn and carry on: the git hooks discard this output, so refusing
+                // would quietly stop them after every upgrade (upstream 0603ad9e).
+                if cg.is_index_stale() {
+                    eprintln!("Warning: this index was built by an older CodeGraphV engine, and sync only re-reads changed files. Run \"codegraphV index\" for a full rebuild.");
+                }
             }
             cg.close();
         }
@@ -450,13 +603,40 @@ fn run() -> Result<()> {
             if !force && !confirm(&format!("Remove {}?", directory::get_code_graph_dir(&root)))? {
                 return Ok(());
             }
-            directory::remove_directory(&root)?;
+            // Owned Git hook blocks go first: they only need the project path, and leaving
+            // them behind after removing the index would run `sync` against nothing.
+            match codegraph_sync::git_hooks::remove_git_sync_hook(&root, None) {
+                Ok(result) if !result.installed.is_empty() => {
+                    let names: Vec<_> = result.installed.iter().map(|h| h.as_str()).collect();
+                    println!("Removed Git sync hooks: {}", names.join(", "));
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("Warning: could not remove Git sync hooks: {error}"),
+            }
+            // A live daemon owns the database; stop it and wait for it to release the endpoint
+            // and lock before deleting the directory (A06).
+            if codegraph_mcp::daemon::stop(&root).unwrap_or(false) {
+                let endpoint = std::path::Path::new(&directory::get_code_graph_dir(&root))
+                    .join("native-daemon.json");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while endpoint.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            directory::remove_directory(&root).map_err(|error| {
+                format!(
+                    "Could not remove the index while another CodeGraphV process is using it ({error}). Stop the MCP server or indexer and retry."
+                )
+            })?;
             println!("Removed index: {root}");
         }
         Command::Status {
             path,
             json: as_json,
+            strict,
         } => {
+            // `--strict` (upstream 7889da66): the output is a plain status; only the exit differs.
+            let mut strict_failed = false;
             let absolute = nodepath::resolve(&[&path]);
             if !directory::is_initialized(&absolute)
                 && directory::find_nearest_code_graph_root(&absolute).is_none()
@@ -470,15 +650,37 @@ fn run() -> Result<()> {
                         "Not initialized: {absolute}\nRun `codegraphV init` to index this project."
                     );
                 }
+                // A gate with no index to read has proved nothing.
+                strict_failed = true;
             } else {
                 let cg = open_read_only(&Project { path: Some(path) }, false)?;
                 let status = render::status(&cg)?;
+                let coverage = cg.get_language_coverage()?;
+                if strict {
+                    // A grammar that can't load leaves no row and no zero to count, only files the
+                    // index doesn't have yet, so "up to date" is part of the gate. Parse errors are
+                    // not: one bad fixture shouldn't fail a whole project.
+                    let changes = cg.get_changed_files()?;
+                    let pending = changes.added.len() + changes.modified.len() + changes.removed.len();
+                    strict_failed = status["rebuildInProgress"] == true
+                        || matches!(cg.get_index_state().map(|s| s.as_str()), Some("indexing" | "partial" | "failed"))
+                        || pending > 0
+                        || !cg.get_index_health()?.needs_reindex.is_empty()
+                        || !coverage.unparsed_languages.is_empty();
+                }
                 if as_json {
                     print_json(&status)?;
                 } else {
                     println!("Project: {}\nFiles: {}\nSymbols: {}\nEdges: {}\nBackend: {}\nIndex state: {}",cg.project_root(),status["fileCount"],status["nodeCount"],status["edgeCount"],status["backend"],status["index"]["state"]);
+                    print_language_coverage(&cg, &coverage)?;
                     if status["rebuildInProgress"] == true {
                         println!("\n{REBUILD_NOTE}");
+                    } else if cg.is_index_stale() {
+                        // Sync never advances the extraction stamp, so only a full index helps
+                        // (upstream 0410b310).
+                        let built = cg.get_index_build_info().version.filter(|v| !v.is_empty())
+                            .map_or_else(|| "an earlier version".to_string(), |v| format!("v{}", v.trim_start_matches('v')));
+                        println!("\nIndex was built by {built}; re-index to pick up this engine's improvements.\nRun \"codegraphV index\" for a full rebuild");
                     }
                     if let Some(changes) = cg.get_framework_changes_since_index().filter(|_| status["rebuildInProgress"] != true) {
                         let changed = [("added", &changes.added), ("removed", &changes.removed)]
@@ -492,6 +694,9 @@ fn run() -> Result<()> {
                 }
                 cg.close();
             }
+            if strict && strict_failed {
+                std::process::exit(1);
+            }
         }
         Command::Query {
             search,
@@ -501,10 +706,13 @@ fn run() -> Result<()> {
             json: as_json,
         } => {
             let cg = open_read_only(&project, true)?;
+            // One effective limit drives the query, the sentinel row, the warning and output.
+            // The cap is a hard ceiling; a request above it must not look complete.
+            let effective = limit.clamp(1, 10_000);
             let results = cg.search_nodes(
                 &search,
                 &SearchOptions {
-                    limit: Some(limit.clamp(1, 10000) + 1),
+                    limit: Some(effective + 1),
                     kinds: kind
                         .as_deref()
                         .map(|k| {
@@ -515,14 +723,20 @@ fn run() -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            if results.len() > limit {
-                eprintln!("Results truncated at {limit}; pass --limit to widen.");
+            let truncated = results.len() > effective;
+            if truncated {
+                let requested = if effective != limit {
+                    format!(" (requested {limit}; maximum {effective})")
+                } else {
+                    String::new()
+                };
+                eprintln!("Results truncated at {effective}{requested}; pass --limit to widen.");
             }
             if as_json {
-                print_json(&results.into_iter().take(limit).collect::<Vec<_>>())?;
+                print_json(&results.into_iter().take(effective).collect::<Vec<_>>())?;
             } else {
                 println!("\nSearch Results for \"{search}\":\n");
-                for r in results.into_iter().take(limit) {
+                for r in results.into_iter().take(effective) {
                     println!(
                         "{:<12} {}\n  {}:{}",
                         r.node.kind.as_str(),
@@ -584,15 +798,25 @@ fn run() -> Result<()> {
             project,
             filter,
             pattern,
+            tests,
+            no_tests,
             format,
             max_depth,
             no_metadata,
             json: as_json,
         } => {
-            let args = json!({"path":filter,"pattern":pattern,"format":format,"maxDepth":max_depth,"includeMetadata":!no_metadata});
+            // `--tests` / `--no-tests` filter before any output format (upstream b6ea6179).
+            let only_tests = (tests || no_tests).then_some(tests);
+            let mut args = json!({"path":filter,"pattern":pattern,"format":format,"maxDepth":max_depth,"includeMetadata":!no_metadata});
+            if let Some(only) = only_tests {
+                args["tests"] = json!(only);
+            }
             if as_json {
                 let cg = open_read_only(&project, true)?;
-                let files = wire::files(&cg, filter.as_deref(), pattern.as_deref())?;
+                let mut files = wire::files(&cg, filter.as_deref(), pattern.as_deref())?;
+                if let Some(only) = only_tests {
+                    files.retain(|f| codegraph_search::query_utils::is_test_path(&f.path) == only);
+                }
                 print_json(&wire::file_json(&files))?;
                 cg.close();
             } else {
@@ -601,6 +825,18 @@ fn run() -> Result<()> {
         }
         Command::Callers(s) => symbol_command(s, true)?,
         Command::Callees(s) => symbol_command(s, false)?,
+        Command::Implementations {
+            symbol,
+            project,
+            file,
+            depth,
+            json: as_json,
+        } => {
+            let cg = open_read_only(&project, true)?;
+            let request = implementations::Request { symbol: &symbol, file: file.as_deref(), depth, json: as_json };
+            println!("{}", implementations::run(&cg, &request)?);
+            cg.close();
+        }
         Command::Impact {
             symbol,
             project,
@@ -690,7 +926,9 @@ fn run() -> Result<()> {
             project,
             mcp,
             no_watch,
+            no_telemetry,
         } => {
+            let _ = no_telemetry; // no telemetry is emitted by the native runtime
             if !mcp {
                 return Err(
                     "Pass --mcp to serve the MCP protocol over standard input/output.".into(),
@@ -818,6 +1056,7 @@ fn run() -> Result<()> {
             yes,
             init,
             no_permissions,
+            prompt_hook,
             print_config,
             refresh,
         } => {
@@ -853,7 +1092,9 @@ fn run() -> Result<()> {
             }
             // Claude Code's front-load prompt hook: opt-in, default yes; --yes turns it on and a
             // refresh leaves the earlier choice alone.
-            let prompt_hook = if refresh || !targets.iter().any(|t| t == "claude") {
+            let prompt_hook = if let Some(choice) = prompt_hook.as_deref() {
+                match choice { "on" => Some(true), "off" => Some(false), _ => None }
+            } else if refresh || !targets.iter().any(|t| t == "claude") {
                 None
             } else if yes {
                 Some(true)
@@ -862,17 +1103,21 @@ fn run() -> Result<()> {
                     "Front-load CodeGraphV on \"how / where / trace\" prompts? Auto-injects structural context so answers need fewer steps (adds a moment to those prompts; Claude Code only).",
                 )?)
             };
-            for id in targets {
-                let result = environment.apply(
-                    &id,
-                    loc,
-                    InstallOptions {
-                        auto_allow: !no_permissions,
-                        prompt_hook,
-                        dry_run: false,
-                    },
-                    false,
-                )?;
+            let requests: Vec<_> = targets
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        InstallOptions {
+                            auto_allow: !no_permissions,
+                            preserve_permissions: refresh && !no_permissions,
+                            prompt_hook,
+                            dry_run: false,
+                        },
+                    )
+                })
+                .collect();
+            for (id, result) in environment.apply_many(&requests, loc, false)? {
                 for file in result.files {
                     println!("{id}: {} {}", file.action, file.path.display());
                 }
@@ -904,7 +1149,7 @@ fn run() -> Result<()> {
             yes,
             keep_cli,
         } => {
-            use codegraph_installer::{Environment, InstallOptions, Location};
+            use codegraph_installer::{Environment, Location};
             let environment = Environment::current()?;
             let loc = if location.as_deref() == Some("local") {
                 Location::Local
@@ -920,8 +1165,12 @@ fn run() -> Result<()> {
             {
                 return Ok(());
             }
-            for id in targets {
-                let result = environment.apply(&id, loc, InstallOptions::default(), true)?;
+            for (id, result) in environment.remove_many_as(
+                &codegraph_installer::CODEGRAPHV,
+                &targets,
+                loc,
+                false,
+            )? {
                 for file in result.files {
                     println!("{id}: {} {}", file.action, file.path.display());
                 }
@@ -929,8 +1178,12 @@ fn run() -> Result<()> {
                     println!("{note}");
                 }
             }
-            // Like the original: a global uninstall also removes the CLI unless --keep-cli.
-            if loc == Location::Global && !keep_cli {
+            // A selected integration cannot establish ownership of the shared executable.
+            // Only explicit all-target removal may remove it, and never with known consumers.
+            let remaining = codegraph_installer::TARGETS.iter().any(|id|
+                environment.configured(id, Location::Global)
+                    || environment.supports(id, Location::Local) && environment.configured(id, Location::Local));
+            if loc == Location::Global && !keep_cli && target == "all" && !remaining {
                 let exe = std::env::current_exe()?;
                 let env = |name: &str| std::env::var(name).ok();
                 match codegraph_types::paths::home_dir() {
@@ -940,6 +1193,8 @@ fn run() -> Result<()> {
                     }
                     None => println!("No home directory found; the codegraphV CLI was left installed."),
                 }
+            } else if loc == Location::Global && !keep_cli {
+                println!("CodeGraphV CLI retained: selected integrations or remaining consumers may share it.");
             }
         }
     }

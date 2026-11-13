@@ -441,6 +441,13 @@ fn enclosing_open_paren(source: &str, at: usize) -> Option<usize> {
 
 fn binds_at_sites(source: &str, name: &str, sites: &LocalBindingSites) -> bool {
     let patterns = local_binding_patterns(name, "y");
+    // A destructured parameter (`({ document }: Props)`) binds its members too.
+    let n = escape_regex(name);
+    if Re::cached(&format!(r"\(\s*(?:\{{[^{{}}]*\b{n}\b[^{{}}]*\}}|\[[^\[\]]*\b{n}\b[^\[\]]*\])\s*(?::[^)=]*)?\)"), "m")
+        .is_match(source)
+    {
+        return true;
+    }
     let mut from = 0usize;
     for &at in &sites.var_decls {
         if at < from {

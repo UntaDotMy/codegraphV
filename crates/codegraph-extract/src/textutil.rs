@@ -49,11 +49,184 @@ re!(has_upper_or_underscore, r"[A-Z_]");
 
 pub fn later_exported_names(source: &str) -> HashSet<String> {
     let mut names = HashSet::new();
-    for caps in codegraph_jsre::re!(r"^[ \t]*export\s+(?:default\s+([A-Za-z_$][0-9A-Za-z_$]*)\s*;?[ \t]*$|\{([^}]*)\})", "gm").captures_iter(source) {
+    let masked = mask_js_noncode(source).unwrap_or_else(|| source.to_string());
+    for caps in codegraph_jsre::re!(r"^[ \t]*export\s+(?:default\s+([A-Za-z_$][0-9A-Za-z_$]*)\s*;?[ \t]*$|\{([^}]*)\})", "gm").captures_iter(&masked) {
         if let Some(name) = caps.text(1) { names.insert(name.to_owned()); }
         if let Some(list) = caps.text(2) { names.extend(codegraph_jsre::re!(r"[0-9A-Za-z_$]+", "g").captures_iter(list).map(|c| c.text(0).unwrap().to_owned())); }
     }
     names
+}
+
+fn js_line_terminator(bytes: &[u8], at: usize) -> Option<usize> {
+    match bytes.get(at) {
+        Some(b'\n' | b'\r') => Some(1),
+        Some(0xE2) if bytes.get(at + 1) == Some(&0x80) && matches!(bytes.get(at + 2), Some(&0xA8 | &0xA9)) => Some(3),
+        _ => None,
+    }
+}
+
+fn blank_code(out: &mut [u8], from: usize, to: usize) {
+    let end = to.min(out.len());
+    let mut i = from;
+    while i < end {
+        match js_line_terminator(out, i) {
+            Some(width) => i += width,
+            None => {
+                out[i] = b' ';
+                i += 1;
+            }
+        }
+    }
+}
+
+fn js_regex_allowed(prev: Option<u8>, token: &str) -> bool {
+    matches!(
+        prev,
+        None | Some(b'(' | b'=' | b':' | b',' | b'!' | b'&' | b'|' | b'?' | b'{' | b'}' | b';' | b'+' | b'-' | b'*' | b'%' | b'^' | b'~' | b'<' | b'>' | b'[')
+    ) || matches!(token, "return" | "case" | "throw" | "typeof" | "instanceof" | "in" | "of" | "yield" | "await" | "else" | "do" | "delete" | "void" | "new")
+}
+
+fn skip_js_string(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = bytes[start];
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if js_line_terminator(bytes, i).is_some() {
+            return None;
+        }
+        match bytes[i] {
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b if b == quote => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn skip_js_regex(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    let mut class = false;
+    while i < bytes.len() {
+        if js_line_terminator(bytes, i).is_some() {
+            return None;
+        }
+        match bytes[i] {
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'[' if !class => {
+                class = true;
+                i += 1;
+            }
+            b']' if class => {
+                class = false;
+                i += 1;
+            }
+            b'/' if !class => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Skip a template literal and its `${…}` interpolations (which may contain nested templates,
+/// strings, regexes and braces), blanking everything but the line breaks.
+fn skip_js_template(bytes: &[u8], start: usize, out: &mut [u8]) -> Option<usize> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => {
+                i += 1;
+                blank_code(out, start, i);
+                return Some(i);
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                i = scan_js_code(bytes, i + 2, out, true)?;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Scan JS source from `start`, blanking strings, templates, regexes and comments. With
+/// `in_expression`, stop after the `}` that closes the enclosing `${`; return `None` when a
+/// construct never closes, so the caller can fall back to the raw source (upstream 2968).
+fn scan_js_code(bytes: &[u8], start: usize, out: &mut [u8], in_expression: bool) -> Option<usize> {
+    let mut i = start;
+    let mut depth = if in_expression { 1i32 } else { 0 };
+    let mut prev: Option<u8> = None;
+    let mut token = String::new();
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            // Comments keep their text: the reference's export-list branch deliberately includes
+            // words written in one, and only templates/strings must not name a default.
+            while i < bytes.len() && js_line_terminator(bytes, i).is_none() {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            let from = i;
+            i = skip_js_string(bytes, i)?;
+            blank_code(out, from, i);
+            prev = Some(b'x');
+            token.clear();
+            continue;
+        }
+        if c == b'`' {
+            i = skip_js_template(bytes, i, out)?;
+            prev = Some(b'x');
+            token.clear();
+            continue;
+        }
+        if c == b'/' && js_regex_allowed(prev, &token) {
+            let from = i;
+            i = skip_js_regex(bytes, i)?;
+            blank_code(out, from, i);
+            prev = Some(b'x');
+            token.clear();
+            continue;
+        }
+        if in_expression {
+            match c {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' {
+            token.push(c as char);
+            prev = Some(c);
+        } else if !c.is_ascii_whitespace() {
+            token.clear();
+            prev = Some(c);
+        }
+        i += 1;
+    }
+    (!in_expression).then_some(i)
+}
+
+/// JS source with strings, templates and regex literals blanked, preserving bytes and line
+/// breaks. Comments are skipped but left as text (the reference's export-list branch reads
+/// words in them). `None` when the scan cannot finish (an unterminated construct).
+pub fn mask_js_noncode(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    scan_js_code(bytes, 0, &mut out, false)?;
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// isGeneratedFile (src/extraction/generated-detection.ts) — full pattern list

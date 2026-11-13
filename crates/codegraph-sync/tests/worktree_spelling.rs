@@ -82,7 +82,7 @@ fn lowercase_drive_worktree_is_a_mismatch() {
         assert!(m.worktree_root.eq_ignore_ascii_case(text(&f.linked)), "{m:?} vs {}", text(&f.linked));
         // The index root keeps the caller's spelling for display; only the comparison is spelling-blind.
         assert_eq!(m.index_root, spelled_main, "{m:?}");
-        assert!(worktree_mismatch_warning(&m).contains(&spelled_main));
+        assert!(worktree_mismatch_warning(&m, WorktreeAudience::User).contains(&spelled_main));
     }
 }
 

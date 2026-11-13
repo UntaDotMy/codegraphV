@@ -361,7 +361,11 @@ fn walk_calls(
         for c in &callees[&at.node.id] {
             if !is_flow_edge(c.edge.kind) || on_route(&parent, &key, &c.node.id) { continue; }
             let is_named = named.contains(&c.node.id);
-            let streak = if is_named { 0 } else if c.node.kind == NodeKind::Route { at.streak } else { at.streak + 1 };
+            // A route is a connector, and so is the hop from a const to the function it
+            // holds: `extname` and the `extname` it hands on are one symbol to a reader.
+            let free = c.node.kind == NodeKind::Route
+                || c.edge.metadata.as_ref().and_then(|m| m.get("synthesizedBy")).and_then(|v| v.as_str()) == Some("const-alias");
+            let streak = if is_named { 0 } else if free { at.streak } else { at.streak + 1 };
             if streak > max_bridge { continue; }
             pending.push(WalkStep { prev: Some(key.clone()), edge: Some(c.edge.clone()),
                 node: c.node.clone(), depth: at.depth + 1, streak,

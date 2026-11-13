@@ -4,6 +4,7 @@ mod dfm;
 mod liquid;
 mod mybatis;
 mod razor;
+mod razor_script;
 
 pub use dfm::extract as extract_dfm;
 pub use liquid::extract as extract_liquid;

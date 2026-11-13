@@ -12,13 +12,14 @@ pub mod via_import;
 pub use find_exported::*;
 pub use cpp_include::{clear_cpp_include_dir_cache, load_cpp_include_dirs};
 pub use mappings::{extract_import_mappings, extract_re_exports};
-pub use python::{python_package_importers, python_reopen_scope, python_root_fingerprint};
+pub use python::{python_package_importers, python_reopen_scope, python_root_fingerprint, python_script_module_scope};
 pub use via_import::*;
 
 use crate::ctx::Ctx;
 use crate::path_aliases::{alias_and_base_url_candidates, apply_aliases};
 use crate::types::UnresolvedRef;
 use crate::workspace_packages::{resolve_workspace_import, workspace_import_targets, WorkspaceImportTargets};
+use codegraph_extract::strip_comments::{blank_string_contents, strip_comments_for_regex};
 use codegraph_jsre::re;
 use codegraph_types::{nodepath, EdgeKind, Language, NodeKind};
 use std::cell::RefCell;
@@ -491,6 +492,18 @@ fn resolve_aliased_import(import_path: &str, project_root: &str, language: Langu
     //     as the source it is built from, before a file only a local build left on disk.
     let targets = ctx.get_workspace_packages().and_then(|ws| workspace_import_targets(import_path, &ws, from_file));
     if let Some(targets) = targets {
+        // A file that reads the page takes the entry's `browser` condition.
+        if !targets.browser.is_empty() && from_file.is_some_and(|file| is_browser_code(file, ctx)) {
+            let browser = WorkspaceImportTargets {
+                declared: targets.browser.clone(),
+                browser: Vec::new(),
+                directory: targets.directory.clone(),
+                package_dir: targets.package_dir.clone(),
+            };
+            if let Some(hit) = declared_workspace_entry(&browser, language, ctx) {
+                return Some(hit);
+            }
+        }
         if let Some(declared) = declared_workspace_entry(&targets, language, ctx) {
             return Some(declared);
         }
@@ -545,6 +558,13 @@ fn try_with_extensions(base_path: &str, language: Language, ctx: &Ctx) -> Option
 /// The file a package's declared entry for an import lands on (#2502): the first declared
 /// target, in order, that the index holds, or that is build output the index lacks, read as the
 /// source it is built from. `None` when none holds.
+/// A read of the page a browser gives a script: `document.title`, `window.location`.
+fn is_browser_code(file: &str, ctx: &Ctx) -> bool {
+    let Some(source) = ctx.read_file(file) else { return false };
+    let text = blank_string_contents(&strip_comments_for_regex(&source, "typescript"), None);
+    re!(r"(?<![\w$.])(?:document|window)\s*[.[]").is_match(&text)
+}
+
 fn declared_workspace_entry(targets: &WorkspaceImportTargets, language: Language, ctx: &Ctx) -> Option<String> {
     targets
         .declared

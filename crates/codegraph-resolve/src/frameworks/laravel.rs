@@ -6,7 +6,7 @@ use crate::ctx::Ctx;
 use crate::types::{FrameworkExtractionResult, FrameworkResolver, ResolvedBy, ResolvedRef, UnresolvedRef};
 use codegraph_jsre::re;
 use codegraph_types::jscompat::{js_trim, utf16_len, utf16_prefix};
-use codegraph_types::{EdgeKind, Language, Node, NodeKind};
+use codegraph_types::{nodepath, EdgeKind, Language, Node, NodeKind};
 use indexmap::{IndexMap, IndexSet};
 
 pub struct LaravelResolver;
@@ -471,7 +471,7 @@ fn resolve_php_path(expr: &str, file: &str, ctx: &Ctx) -> Option<String> {
     }
     let normalized = posix::normalize(&rel);
     let target = re!(r"^/+").replace_first(&re!(r"^(\./)+").replace_first(&normalized, |_| String::new()), |_| String::new());
-    if target.starts_with("..") || !target.ends_with(".php") {
+    if nodepath::leaves_root(&target) || !target.ends_with(".php") {
         return None;
     }
     if ctx.file_exists(&target) {

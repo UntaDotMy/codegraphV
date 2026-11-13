@@ -420,6 +420,13 @@ pub fn is_file_level_only_language(language: Language) -> bool {
     matches!(language.as_str(), "yaml" | "twig" | "properties")
 }
 
+/// Whether files of this language are expected to yield symbols, so that a language with none is
+/// news (upstream 7889da66). Not so for the file-level languages, nor for `xml`, where only
+/// MyBatis mappers yield anything.
+pub fn yields_symbols(language: Language) -> bool {
+    !is_file_level_only_language(language) && !matches!(language.as_str(), "xml" | "unknown")
+}
+
 /// Whether a language has a tree-sitter grammar of its own (narrower than
 /// [`is_language_supported`], which also answers true for custom-extractor formats).
 pub fn has_tree_sitter_grammar(language: &str) -> bool {

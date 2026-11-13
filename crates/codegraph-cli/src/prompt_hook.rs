@@ -133,15 +133,30 @@ pub fn run() {
     {
         return;
     }
+    let timeout_ms = std::env::var("CODEGRAPHV_PROMPT_HOOK_TIMEOUT_MS").ok()
+        .and_then(|s| s.parse::<u64>().ok()).unwrap_or(2_000).clamp(100, 5_000);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    // This hidden command owns its process. Returning on timeout ends the process,
+    // including a reader blocked on stdin or a slow read-only query.
+    std::thread::spawn(move || {
+        let _ = sender.send(run_payload());
+    });
+    if let Ok(Some(text)) = receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        print!("{text}");
+    }
+}
+
+fn run_payload() -> Option<String> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        return; // invoked by hand, no piped payload
+        return None; // invoked by hand, no piped payload
     }
     let mut raw = String::new();
-    if stdin.lock().read_to_string(&mut raw).is_err() {
-        return;
+    const MAX_INPUT: u64 = 1_048_576;
+    if stdin.lock().take(MAX_INPUT + 1).read_to_string(&mut raw).is_err() || raw.len() as u64 > MAX_INPUT {
+        return None;
     }
-    let Ok(input) = serde_json::from_str::<Value>(&raw) else { return };
+    let Ok(input) = serde_json::from_str::<Value>(&raw) else { return None };
     let prompt = match &input["prompt"] {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -155,7 +170,5 @@ pub fn run() {
         .unwrap_or_default();
     // Degradable by contract: a panic anywhere below prints nothing, not even its message.
     std::panic::set_hook(Box::new(|_| {}));
-    if let Ok(Some(text)) = std::panic::catch_unwind(|| frontload(&cwd, &prompt)) {
-        print!("{text}");
-    }
+    std::panic::catch_unwind(|| frontload(&cwd, &prompt)).ok().flatten()
 }

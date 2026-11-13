@@ -12,7 +12,7 @@ use crate::ambient_modules::ambient_module_declarations;
 use crate::callback_synthesizer::synthesize_callback_edges;
 use crate::cpp_constructor::{is_cpp_constructor_ref, match_cpp_constructor};
 use crate::cpp_macro_visibility::is_visible_cpp_macro;
-use crate::cpp_supertypes::{is_cpp_supertype_ref, match_cpp_supertype};
+use crate::cpp_supertypes::{is_cpp_declared_type_ref, is_cpp_supertype_ref, match_cpp_declared_type, match_cpp_supertype};
 use crate::pascal_scope::{
     gate_pascal_call, is_pascal_parenless_ref, is_pascal_system_call, match_pascal_nested_call, match_pascal_parenless_ref,
     match_pascal_system_call,
@@ -26,7 +26,7 @@ use crate::import_resolver::{
     resolve_jvm_import, resolve_php_imported_static_call, resolve_php_qualified_class_ref, resolve_ts_qualified_type_ref,
     resolve_via_import,
 };
-use crate::js_builtins::JS_BUILT_INS;
+use crate::js_builtins::{JS_BUILT_INS, JS_HOST_GLOBALS, JS_WINDOW_MEMBERS};
 use crate::name_matcher::*;
 use crate::name_matcher::new_receiver::{is_new_receiver_shape, match_new_receiver_call, new_receiver_class};
 use crate::name_matcher::java::is_guessed_record_accessor;
@@ -731,7 +731,11 @@ impl ReferenceResolver {
         } else {
             self.gate_language(scoped, r)
         };
-        let resolved = prefer_go_build_twin(self.gate_super_self_call(language_gated, r), r, ctx);
+        let resolved = prefer_go_build_twin(
+            self.gate_super_self_call(crate::name_matcher::kotlin_receiver::gate_kotlin_extension(language_gated, r, ctx), r),
+            r,
+            ctx,
+        );
 
         let resolved = resolved?;
         // A Dart declaration naming itself is the declaration, not a reference to it.
@@ -750,6 +754,15 @@ impl ReferenceResolver {
             && is_guessed_record_accessor(&resolved, r, ctx)
         {
             return None;
+        }
+        // A guess by name stops at a monorepo's own edge. Asked of the winner, so a lone
+        // candidate is still an answer until this check declines it.
+        if resolved.by_name || matches!(resolved.resolved_by, ResolvedBy::ExactMatch | ResolvedBy::Fuzzy) {
+            if let Some(target) = self.node_by_id(&resolved.target_node_id) {
+                if crosses_workspace_root(&target, r, ctx) {
+                    return None;
+                }
+            }
         }
         if resolved.resolved_by == ResolvedBy::Import && is_import_shadowed_by_js_binding(&resolved, r, ctx) {
             return None;
@@ -787,11 +800,26 @@ impl ReferenceResolver {
 
     fn resolve_one_inner(&self, r: &UnresolvedRef) -> Option<ResolvedRef> {
         let ctx = &*self.ctx;
+        // A Java/Kotlin import names a declaration by its qualified name, whichever JVM language
+        // declares it. Resolve it before the name pre-filter, which an import of a Kotlin
+        // top-level function (`import p.extOther`, a name under a receiver) would fail.
+        if let Some(jvm_import) = resolve_jvm_import(r, ctx) {
+            return Some(jvm_import);
+        }
         if is_cpp_constructor_ref(r) {
             return match_cpp_constructor(r, ctx);
         }
         if is_cpp_supertype_ref(r) {
             return match_cpp_supertype(r, ctx);
+        }
+        // The type a member or an alias is declared with. Only a type can be named there.
+        if is_cpp_declared_type_ref(r, ctx) {
+            return match_cpp_declared_type(r, ctx);
+        }
+        // In Objective-C it is the type of that name the file can see: a function or variable
+        // is no candidate, and neither is a guess by any other strategy.
+        if is_objc_declared_type_ref(r) {
+            return match_by_exact_name(r, ctx);
         }
         // A Pascal name written without parentheses (#2514) links only to a routine its scope
         // reaches, or through a receiver to a method of the receiver's declared type.
@@ -836,6 +864,20 @@ impl ReferenceResolver {
             return super_call.value();
         }
 
+        // A Java/Kotlin call through an import names a declaration in the imported type, whichever
+        // JVM language declares it (`JUtil.Nested.deep`, `KUtil.INSTANCE.kmake`). Try that before
+        // the Kotlin receiver-chain reading, which types only Kotlin declarations and would give
+        // an imported Java type no edge (#3023).
+        if matches!(r.language, Language::Java | Language::Kotlin) && !r.is_kind(EdgeKind::Imports) {
+            let imports = ctx.get_import_mappings(&r.file_path, r.language);
+            let rooted = imports.iter().any(|m| r.reference_name == m.local_name || r.reference_name.starts_with(&format!("{}.", m.local_name)));
+            if rooted {
+                if let Some(hit) = crate::import_resolver::via_import::resolve_java_imported_reference(r, &imports, ctx) {
+                    return self.gate_language(Some(hit), r);
+                }
+            }
+        }
+
         // A Kotlin call through a receiver chain (`engine.pump.drain()`) resolves on the chain's
         // declared type, or gets no edge when that type is a library one. An untyped chain
         // resolves as the bare method name, the ref the extractor emitted before it kept the
@@ -867,6 +909,17 @@ impl ReferenceResolver {
             } else {
                 None
             };
+        }
+
+        // A Python call on a class (or a receiver named after it) is that class's member or one
+        // it inherits — a base's type argument (`Repo(Base[User])`) is neither, so it must not
+        // fall through to a namesake elsewhere (upstream cd04b21a).
+        if r.language == Language::Python && r.is_kind(EdgeKind::Calls) {
+            match self.python_class_member_call(r) {
+                Tri::Undefined => {}
+                Tri::Null => return None,
+                Tri::Value(resolved) => return self.gate_language(Some(resolved), r),
+            }
         }
 
         if matches!(r.language, Language::Cfml | Language::CfScript)
@@ -978,10 +1031,6 @@ impl ReferenceResolver {
             return self.gate_language(match_function_ref(r, ctx), r);
         }
 
-        if let Some(jvm_import) = resolve_jvm_import(r, ctx) {
-            return Some(jvm_import);
-        }
-
         if r.language == Language::Razor {
             if let Some(razor) = self.resolve_razor_using(r) {
                 return Some(razor);
@@ -1070,7 +1119,10 @@ impl ReferenceResolver {
             && r.is_kind(EdgeKind::Calls)
             && ctx.get_import_mappings(&r.file_path, r.language).iter().any(|m| m.local_name == r.reference_name)
             && is_python_self_call(r, ctx);
-        let import_result = if self_call { None } else { self.gate_language(resolve_via_import(r, ctx), r) };
+        // A parameter/local named like an imported module is not that module (upstream b700a3ee).
+        let shadowed_import = r.language == Language::Python
+            && crate::name_matcher::python::python_import_receiver_shadowed(r, ctx);
+        let import_result = if self_call || shadowed_import { None } else { self.gate_language(resolve_via_import(r, ctx), r) };
         if let Some(import_result) = import_result {
             if import_result.confidence >= 0.9 {
                 return Some(import_result);
@@ -1477,6 +1529,62 @@ impl ReferenceResolver {
         self.persist_deferred_references(&deferred, resolved)
     }
 
+    /// Move each call on a parameter whose class its call sites settle to that class's method,
+    /// and put back through resolution a call whose flow is gone (see `parameter_flow`). The last
+    /// pass on `calls` edges, once every call has an answer. Returns how many calls it changed; a
+    /// failure leaves the graph as resolution left it.
+    pub fn resolve_parameter_flows(&self) -> usize {
+        let started = std::time::Instant::now();
+        match self.apply_parameter_flows() {
+            Ok((changed, stats)) => {
+                if std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty()) {
+                    if let Some(stats) = stats {
+                        eprintln!("[phase-timing] parameter-flow: {}ms {stats:?}", started.elapsed().as_millis());
+                    }
+                }
+                changed
+            }
+            Err(error) => {
+                log_debug("Parameter flows failed", &[("error", error.to_string())]);
+                0
+            }
+        }
+    }
+
+    fn apply_parameter_flows(&self) -> codegraph_db::Result<(usize, Option<crate::parameter_flow::ParameterFlowStats>)> {
+        self.clear_caches();
+        let Some(plan) = crate::parameter_flow::plan_parameter_flows(&self.store, &self.ctx)? else { return Ok((0, None)) };
+        let store = &self.store;
+        let resolved: Vec<ResolvedRef> = plan.retarget.iter().map(|r| r.resolved.clone()).collect();
+        store.pf_retarget_calls(
+            &plan.retarget.iter().filter_map(|r| r.edge_id).collect::<Vec<_>>(),
+            &plan.retarget.iter().filter_map(|r| r.row_id).collect::<Vec<_>>(),
+            &self.create_edges(&resolved),
+        )?;
+        store.pf_replace_edges_with_flow_marked_refs(
+            &plan.drop.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            &plan.drop.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
+        )?;
+        if !plan.retarget.is_empty() || !plan.drop.is_empty() {
+            store.pf_note_parameter_flows()?;
+        }
+        if !plan.restore.is_empty() {
+            store.pf_restore_calls(
+                &plan.restore.iter().filter_map(|(e, _, _)| *e).collect::<Vec<_>>(),
+                &plan.restore.iter().filter_map(|(_, r, _)| *r).collect::<Vec<_>>(),
+                &plan.restore.iter().map(|(_, _, r)| r.clone()).collect::<Vec<_>>(),
+            )?;
+            let mut files: Vec<String> = plan.restore.iter().filter_map(|(_, _, r)| r.file_path.clone()).collect();
+            files.sort();
+            files.dedup();
+            self.clear_caches();
+            let pending = store.get_unresolved_references_by_files(&files)?;
+            self.resolve_and_persist(&pending)?;
+        }
+        self.clear_caches();
+        Ok((plan.retarget.len() + plan.drop.len() + plan.restore.len(), Some(plan.stats)))
+    }
+
     // -- Index run -------------------------------------------------------------------
 
     /// Resolve every pending reference in keyset batches, persisting each batch before the next
@@ -1722,6 +1830,55 @@ impl ReferenceResolver {
         false
     }
 
+    /// A Python call on a class receiver: the member that class declares or inherits, or one its
+    /// descendants declare. `Null` when the class has no such member, so a namesake elsewhere is
+    /// never guessed (upstream cd04b21a); `Undefined` when the receiver names no project class.
+    fn python_class_member_call(&self, r: &UnresolvedRef) -> Tri<ResolvedRef> {
+        let ctx = &*self.ctx;
+        let member = r.reference_name.rsplit('.').next().unwrap_or("");
+        if member.is_empty() {
+            return Tri::Undefined;
+        }
+        // The reference may carry the whole dotted name; the receiver is read from the source.
+        let mut probe = r.clone();
+        probe.reference_name = member.to_string();
+        let Some(bare) = crate::name_matcher::calls::bare_call_receiver(&probe, ctx) else { return Tri::Undefined };
+        let receiver = bare.receiver.trim();
+        if receiver.is_empty() {
+            return Tri::Undefined;
+        }
+        let class = crate::name_matcher::python::python_ref_class(receiver, r, ctx).or_else(|| {
+            ctx.get_nodes_in_file(&r.file_path)
+                .iter()
+                .find(|n| n.kind == NodeKind::Class && n.name.eq_ignore_ascii_case(receiver))
+                .cloned()
+        });
+        let Some(class) = class else { return Tri::Undefined };
+        let members = crate::name_matcher::python::python_members(&class, member, r, ctx, &mut HashSet::new());
+        if !members.is_empty() {
+            let best = crate::name_matcher::util::find_best_match(r, &members, ctx).unwrap_or_else(|| members[0].clone());
+            return Tri::Value(ResolvedRef::new(r, best.id.clone(), 0.9, ResolvedBy::ExactMatch));
+        }
+        let descendants: Vec<NodeRef> = ctx
+            .get_nodes_by_name(member)
+            .iter()
+            .filter(|n| n.kind == NodeKind::Method && n.language == Language::Python)
+            .filter(|n| {
+                let parent = ctx
+                    .get_nodes_in_file(&n.file_path)
+                    .iter()
+                    .find(|c| c.kind == NodeKind::Class && n.qualified_name == format!("{}::{member}", c.qualified_name))
+                    .cloned();
+                parent.is_some_and(|p| crate::name_matcher::python::python_derives_from(&p, &class, r, ctx, &mut HashSet::new()))
+            })
+            .cloned()
+            .collect();
+        match descendants.first() {
+            Some(best) => Tri::Value(ResolvedRef::new(r, best.id.clone(), 0.8, ResolvedBy::ExactMatch)),
+            None => Tri::Null,
+        }
+    }
+
     /// Names that are language built-ins or belong to an external package, which no project
     /// symbol is the target of.
     fn is_built_in_or_external(&self, r: &UnresolvedRef) -> bool {
@@ -1744,6 +1901,32 @@ impl ReferenceResolver {
             && !ctx.get_import_mappings(&r.file_path, r.language).iter().any(|m| m.local_name == name)
         {
             return true;
+        }
+        if is_js_ts {
+            // A bare method name (`close()`) keeps the receiver only in the source line.
+            let receiver = crate::name_matcher::calls::bare_call_receiver(r, ctx);
+            let written = match &receiver {
+                // `this` is the instance, never the browser's unbound `self`.
+                Some(b) if b.instance => "this",
+                Some(b) => b.receiver.as_str(),
+                None => name,
+            };
+            let parts: Vec<&str> = written.split('.').filter(|p| !p.is_empty()).collect();
+            let root = parts.first().copied().unwrap_or(written);
+            let bound = crate::name_matcher::js_scope::is_locally_bound_js_name(root, &r.file_path, ctx)
+                || ctx.get_import_mappings(&r.file_path, r.language).iter().any(|m| m.local_name == root);
+            if JS_HOST_GLOBALS.contains(root) && !bound {
+                let host_member = match root {
+                    "window" | "globalThis" | "global" => {
+                        (parts.len() == 2 && (JS_WINDOW_MEMBERS.contains(parts[1]) || JS_HOST_GLOBALS.contains(parts[1])))
+                            || (parts.len() > 2 && JS_HOST_GLOBALS.contains(parts[1]))
+                    }
+                    _ => true,
+                };
+                if host_member {
+                    return true;
+                }
+            }
         }
         if r.language == Language::ArkTs && (name == "$r" || name == "$rawfile") {
             return true;
@@ -2202,7 +2385,9 @@ impl ReferenceResolver {
                 if t.kind == NodeKind::Import && t.file_path == r.file_path {
                     return None;
                 }
-                if !is_importable_kind(t.kind) {
+                // A Java static import or a Kotlin import of a top-level extension names a method.
+                let jvm_method = matches!(r.language, Language::Java | Language::Kotlin) && t.kind == NodeKind::Method;
+                if !is_importable_kind(t.kind) && !jvm_method {
                     return None;
                 }
             }
@@ -2232,6 +2417,12 @@ impl ReferenceResolver {
             }
         }
         if is_bound_to_out_of_repo_import(r, ctx) {
+            return None;
+        }
+        if r.language == Language::Python
+            && crate::name_matcher::python::is_python_name_from_outside(
+                r.reference_name.split('.').next().unwrap_or(&r.reference_name),
+                &r.file_path, target.as_deref(), ctx) {
             return None;
         }
         if r.language == Language::Go && is_go_unknown_qualified(r, ctx) {

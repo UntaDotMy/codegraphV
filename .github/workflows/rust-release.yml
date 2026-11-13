@@ -3,6 +3,10 @@
 # A push to rust-rewrite tests the workspace on each OS and builds every binary. A tag `v0.*`
 # (or a manual run naming one) does the same, then publishes the archives with SHA256SUMS.
 # It never publishes to npm; the upstream `release.yml` is the TypeScript package's flow.
+#
+# No macOS legs: since 2026-11-10 GitHub assigns no hosted macOS runner to this repository, and a
+# release waits on every leg. rust-pr.yml still tests macOS; once it passes there again, restore
+# the macOS test leg and the macos-arm64 / macos-x64 build rows from this file's history.
 name: Rust release
 
 on:
@@ -17,6 +21,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write      # OIDC token for Sigstore signing
+  attestations: write  # store the GitHub artifact attestations for the archives
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-latest]
+        os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +53,6 @@ jobs:
         include:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x64 }
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, name: linux-x64 }
-          - { os: macos-14, target: aarch64-apple-darwin, name: macos-arm64 }
-          - { os: macos-14, target: x86_64-apple-darwin, name: macos-x64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +104,15 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum codegraphV-* > SHA256SUMS && cat SHA256SUMS
+      - name: Attest build provenance for release archives
+        # SHA256SUMS proves integrity only; the attestation proves the archives were built by
+        # this workflow from this repository. Verify with:
+        #   gh attestation verify <file> -R colbymchenry/codegraph
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/codegraphV-*
+            dist/SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

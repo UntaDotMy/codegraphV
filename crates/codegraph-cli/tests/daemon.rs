@@ -168,6 +168,81 @@ fn idle_daemon_exits_and_leaves_no_state() {
     assert!(!dir.path().join(".codegraphV/native-daemon.lock").exists());
 }
 
+#[test]
+fn ping_status_and_stop_stay_responsive_while_a_query_is_running() {
+    // A hub with 8 000 callers keeps the shared event loop busy long enough to observe.
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = String::from("export function hub(){return 1;}\n");
+    for i in 0..8_000 {
+        source.push_str(&format!("export function caller{i}(){{return hub();}}\n"));
+    }
+    std::fs::write(dir.path().join("app.ts"), source).unwrap();
+    let cg = codegraph_core::CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
+    cg.close();
+    let mut daemon = Daemon {
+        child: Command::new(env!("CARGO_BIN_EXE_codegraphV"))
+            .args(["__daemon", "--path", dir.path().to_str().unwrap(), "--idle-timeout", "20"])
+            .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    };
+    let path = dir.path().join(".codegraphV/native-daemon.json");
+    let begin = Instant::now();
+    let endpoint: Value = loop {
+        if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+            break v;
+        }
+        assert!(begin.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut busy = connect(&endpoint);
+    let mut control = connect(&endpoint);
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+    assert!(send(&mut busy, init.clone()).get("result").is_some());
+    assert!(send(&mut control, init).get("result").is_some());
+
+    let broad = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"codegraphV_callers","arguments":{"symbol":"hub","limit":100}}});
+    writeln!(busy.get_mut(), "{broad}").unwrap();
+    // The event loop must still be inside the broad query, not merely slow to receive it.
+    // Peek leaves any bytes in the socket so the response can still be read below.
+    busy.get_mut().set_read_timeout(Some(Duration::from_millis(1))).unwrap();
+    let mut probe = [0u8; 1];
+    let in_flight = busy.get_ref().peek(&mut probe).is_err();
+    busy.get_mut().set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    assert!(in_flight, "the broad query completed before the fairness probe");
+
+    // Both are served by the connection's own reader thread, never queued behind the query.
+    let started = Instant::now();
+    let ping = send(&mut control, json!({"jsonrpc":"2.0","id":3,"method":"ping"}));
+    assert_eq!(ping["id"], 3, "{ping}");
+    assert!(started.elapsed() < Duration::from_secs(2), "ping waited {:?}", started.elapsed());
+    let status = send(&mut control, json!({"jsonrpc":"2.0","id":4,"method":"daemon/status"}));
+    assert_eq!(status["result"]["pid"], endpoint["pid"], "{status}");
+    assert_eq!(status["result"]["clients"], 2, "{status}");
+
+    let broad_response = {
+        let mut line = String::new();
+        busy.read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    };
+    assert_eq!(broad_response["id"], 2, "{broad_response}");
+    let text = broad_response["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("hub") && broad_response.get("error").is_none(), "{broad_response}");
+
+    let stop = send(&mut control, json!({"jsonrpc":"2.0","id":6,"method":"daemon/stop"}));
+    assert_eq!(stop["result"]["stopped"], true);
+    drop(busy);
+    drop(control);
+    let left = Instant::now();
+    while daemon.child.try_wait().unwrap().is_none() {
+        assert!(left.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// BUG-125: the 3 s auth timeout stayed on the socket clone the daemon reads from (Windows keeps
 /// socket timeouts per handle), so a client idle for 3 s was dropped.
 #[test]

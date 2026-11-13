@@ -66,6 +66,22 @@ impl CodeGraph {
                     );
                 }
                 let engine = engine.as_mut().unwrap();
+                // No paths: the sync thread's re-run for a synthesis a sync held under
+                // CODEGRAPHV_SYNTH_MIN_INTERVAL_MS (upstream 17395382). A failure is logged and
+                // tried again after the interval, never left to end the watcher.
+                if paths.as_ref().is_some_and(|p| p.is_empty()) {
+                    let rerun_after_ms = engine.run_deferred_synthesis().unwrap_or_else(|error| {
+                        codegraph_types::log::log_warn(
+                            "Put-off synthesis failed, trying again after the interval",
+                            &[("error", error.to_string())],
+                        );
+                        Some(crate::codegraph::parse_synth_min_interval(
+                            std::env::var("CODEGRAPHV_SYNTH_MIN_INTERVAL_MS").ok().as_deref(),
+                        )
+                        .map_or(1_000, |d| d.as_millis() as u64))
+                    });
+                    return Ok(WatchSyncResult { files_changed: 0, duration_ms: 0, rerun_after_ms });
+                }
                 let result = engine
                     .sync(
                         &IndexOptions {
@@ -80,6 +96,7 @@ impl CodeGraph {
                         + result.files_modified
                         + result.files_removed,
                     duration_ms: result.duration_ms,
+                    rerun_after_ms: result.synthesis_deferred_ms,
                 })
             }) as codegraph_sync::watcher::SyncCallback
         });

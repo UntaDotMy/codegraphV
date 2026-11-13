@@ -1,7 +1,7 @@
 //! Python scoping the call matchers lean on: pytest fixtures, what a function binds locally,
 //! `from x import y` names, and whether a module lives in the project.
 
-use super::python::{python_binds_locally, python_global_bindings, python_import_keys, PythonBinding};
+use super::python::{python_binds_locally, python_global_bindings, python_import_keys, python_statement_starts, PythonBinding};
 use super::util::*;
 use crate::ctx::Ctx;
 use crate::types::{NodeRef, UnresolvedRef};
@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 memo_map!(PluggedModules, String, Rc<Vec<String>>);
 memo_map!(FixtureTypes, String, Option<String>);
-memo_map!(LocalBinds, String, bool);
+memo_map!(LocalBinds, String, i64);
 memo_map!(FromImports, String, Rc<HashMap<String, String>>);
 memo_map!(ModuleLocal, String, bool);
 memo_map!(OutsideNames, String, bool);
@@ -175,21 +175,20 @@ fn python_local_binding(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
     fns.sort_by_key(|f| f.end_line - f.start_line);
     let func = fns.first().cloned();
     let key = format!(
-        "{}\0{}\0{name}\0{}",
+        "{}\0{}\0{name}",
         r.file_path,
-        func.as_ref().map(|f| f.id.as_str()).unwrap_or(""),
-        if func.is_some() { String::new() } else { r.line.to_string() }
+        func.as_ref().map(|f| f.id.as_str()).unwrap_or("")
     );
-    memoized::<LocalBinds>(ctx, key, || {
+    let below = memoized::<LocalBinds>(ctx, key, || {
         if python_from_imports(&r.file_path, ctx).contains_key(name) {
-            return false;
+            return i64::MAX;
         }
         let lines = comment_free_lines(&r.file_path, ctx);
         let n = escape_regex(name);
         let assigns = Re::cached(&format!(r"^\s*(?:[\w\s,*()\[\]]*,\s*)?\(?\*?{n}\)?\s*(?:,[\w\s,*()\[\]]*)?(?::[^=]+)?=(?!=)"), "");
         let targets = Re::cached(&format!(r"\bfor\s+[\w\s,()]*\b{n}\b[\w\s,()]*\s+in\b|\bas\s+{n}\b"), "");
         let params = Re::cached(&format!(r"[(,]\s*\*{{0,2}}{n}\s*(?:[:=,)]|$)"), "");
-        let mut bound = false;
+        let mut below = i64::MAX;
         if let Some(f) = &func {
             let mut i = f.start_line as usize - 1;
             let mut signature = String::new();
@@ -205,23 +204,29 @@ fn python_local_binding(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
                 Some(p) => &signature[p..],
                 None => "",
             };
-            bound = params.is_match(from_paren);
+            if params.is_match(from_paren) { return -1; }
+            let starts = python_statement_starts(&r.file_path, ctx);
             let mut line = i + 1;
-            while !bound && line + 1 < r.line as usize {
+            while line < f.end_line as usize {
                 let text = lines.get(line).map(|s| s.as_str()).unwrap_or("");
-                bound = assigns.is_match(text) || targets.is_match(text);
+                if (starts.get(line).copied().unwrap_or(true) && assigns.is_match(text)) || targets.is_match(text) {
+                    below = line as i64;
+                    break;
+                }
                 line += 1;
             }
         }
-        if !bound {
+        {
             let module_key = format!("{}\0{n}", r.file_path);
-            bound = memoized::<TopLevelBound>(ctx, module_key, || {
+            let module_bound = memoized::<TopLevelBound>(ctx, module_key, || {
                 let top = Re::cached(&format!(r"^(?:[\w,\s]*,\s*)?{n}\s*(?:,[\w\s,]*)?(?::[^=]+)?=(?!=)"), "");
                 lines.iter().any(|l| top.is_match(l))
             });
+            if module_bound { return -1; }
         }
-        bound
-    })
+        below
+    });
+    below < r.line as i64 - 1
 }
 
 /// `from module import name [as alias]` bindings of a file: bound name → module.

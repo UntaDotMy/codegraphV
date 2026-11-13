@@ -13,6 +13,8 @@ codegraph-jsre.workspace = true
 codegraph-search.workspace = true
 codegraph-text = { path = "../codegraph-text" }
 codegraph-extract = { path = "../codegraph-extract" }
+codegraph-resolve = { path = "../codegraph-resolve" }
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

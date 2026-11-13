@@ -219,6 +219,35 @@ pub fn reopen_references_through_removed_files(store: &Store, reader: &ImportRea
     reopen_edges(store, &bindings, &|e| !gone.contains(e.target_file_path.as_deref().unwrap_or("")))
 }
 
+/// A barrel changed its re-export clauses: reopen its importers, their failed bindings,
+/// and member calls reached through the old imported type (upstream 66449255).
+pub fn reopen_references_through_retargeted_modules(store: &Store, reader: &ImportReader, modules: &[ChangedFile]) -> DbResult<usize> {
+    let barrels: Vec<_> = modules.iter().filter(|m| is_barrel_language(m.language)).cloned().collect();
+    if barrels.is_empty() { return Ok(0); }
+    let bindings = bindings_of(&importers_of(store, &barrels, reader, &[], None)?, reader);
+    let mut failed = Vec::new();
+    let mut bound = HashSet::new();
+    for (file, binding) in &bindings {
+        failed.extend(store.get_failed_references_through(file, &binding.modules, &binding.names)?);
+        if !binding.names.is_empty() {
+            for edge in store.get_resolution_edges_through(file, &binding.names)? {
+                if !edge.edge.target.starts_with("file:") { bound.insert(edge.edge.target); }
+            }
+        }
+    }
+    let mut reopened = reopen_edges(store, &bindings, &|_| true)? + store.reopen_failed_references(&failed)?;
+    if !bound.is_empty() {
+        let members: Vec<_> = store.get_outgoing_edges_from(&bound.into_iter().collect::<Vec<_>>(), &[EdgeKind::Contains])?
+            .into_iter().map(|e| e.target).collect();
+        if !members.is_empty() {
+            let edges: Vec<_> = store.get_resolution_edges_into(&members)?.into_iter()
+                .filter(|e| bindings.contains_key(&e.source_file_path)).collect();
+            reopened += reopen_edge_list(store, &edges)?;
+        }
+    }
+    Ok(reopened)
+}
+
 /// The other half: after a sync's retries, re-open the references the files importing any of
 /// `added` make through those imports — the edges a name lookup made while a module was missing
 /// (only those up to `resolved_up_to_edge_id`: later ones were just resolved with the modules
@@ -565,6 +594,10 @@ fn outranked_imports(
 ) -> DbResult<Vec<OutrankedImport>> {
     let mut out = Vec::new();
     let mut package_imports: HashMap<String, Vec<ResolutionEdge>> = HashMap::new();
+    let mut into_declarations: Option<Vec<ResolutionEdge>> = None;
+    let bare_name = |edge: &ResolutionEdge| {
+        edge.edge.metadata.as_ref().and_then(|m| m.get("refName")).and_then(|v| v.as_str()).is_some_and(|s| !s.starts_with('.') && !s.starts_with('/'))
+    };
     for file in added {
         if !is_binding_language(file.language) {
             continue;
@@ -573,17 +606,18 @@ fn outranked_imports(
         let mut edges = store.get_module_imports_named(&dir, &name)?;
         if let Some(package_dir) = package_dir_of.and_then(|f| f(&file.path)) {
             if !package_imports.contains_key(&package_dir) {
-                let imports: Vec<ResolutionEdge> = store
-                    .get_module_imports_under(&package_dir)?
-                    .into_iter()
-                    .filter(|edge| {
-                        edge.edge.metadata.as_ref().and_then(|m| m.get("refName")).and_then(|v| v.as_str()).is_some_and(|s| !s.starts_with('.') && !s.starts_with('/'))
-                    })
-                    .collect();
+                let imports: Vec<ResolutionEdge> = store.get_module_imports_under(&package_dir)?.into_iter().filter(bare_name).collect();
                 package_imports.insert(package_dir.clone(), imports);
+            }
+            if into_declarations.is_none() {
+                into_declarations = Some(store.get_module_imports_into_declaration_files()?.into_iter().filter(bare_name).collect());
             }
             let seen: HashSet<i64> = edges.iter().map(|e| e.edge_id).collect();
             edges.extend(package_imports[&package_dir].iter().filter(|e| !seen.contains(&e.edge_id)).cloned());
+            let seen: HashSet<i64> = edges.iter().map(|e| e.edge_id).collect();
+            if let Some(decls) = &into_declarations {
+                edges.extend(decls.iter().filter(|e| !seen.contains(&e.edge_id)).cloned());
+            }
         }
         for edge in edges {
             let Some(specifier) = edge.edge.metadata.as_ref().and_then(|m| m.get("refName")).and_then(|v| v.as_str()).map(String::from) else {

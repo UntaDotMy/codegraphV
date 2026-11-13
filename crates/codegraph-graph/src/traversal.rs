@@ -14,6 +14,22 @@ const CALL_KINDS: &[EdgeKind] = &[
     EdgeKind::Navigates,
 ];
 const TYPE_KINDS: &[EdgeKind] = &[EdgeKind::Extends, EdgeKind::Implements];
+/// One node's adjacency is read at most this far; a hub cannot materialize its whole fanout
+/// before the walk's own node/output limit applies (A15/A20).
+const MAX_ADJACENCY: usize = 10_000;
+/// Total edges a single walk examines, across every node it visits.
+const MAX_TRAVERSAL_WORK: usize = 100_000;
+/// Total relationships a caller/callee walk returns before it reports truncation.
+const MAX_CALL_EDGES: usize = 10_000;
+
+/// One caller or callee of a symbol, with every place it calls from (upstream 2909).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallSiteRow {
+    pub node: Node,
+    pub edges: Vec<Edge>,
+    /// The symbol calls itself / is called by itself.
+    pub recursive: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PathStep {
@@ -31,14 +47,35 @@ impl<'a> GraphTraverser<'a> {
         Self { store }
     }
 
-    fn adjacent(&self, id: &str, direction: Direction, kinds: &[EdgeKind]) -> Result<Vec<Edge>> {
+    /// Edges for one node, read through a SQL limit. The bool reports that the node has more
+    /// edges than the budget allowed.
+    fn adjacent(&self, id: &str, direction: Direction, kinds: &[EdgeKind], remaining: usize) -> Result<(Vec<Edge>, bool)> {
+        let limit = remaining.min(MAX_ADJACENCY).saturating_add(1);
         match direction {
-            Direction::Outgoing => self.store.get_outgoing_edges(id, kinds, None),
-            Direction::Incoming => self.store.get_incoming_edges(id, kinds),
+            Direction::Outgoing => {
+                let mut edges = self.store.get_outgoing_edges_limited(id, kinds, None, limit)?;
+                let truncated = edges.len() >= limit;
+                edges.truncate(limit - 1);
+                Ok((edges, truncated))
+            }
+            Direction::Incoming => {
+                let mut edges = self.store.get_incoming_edges_limited(id, kinds, limit)?;
+                let truncated = edges.len() >= limit;
+                edges.truncate(limit - 1);
+                Ok((edges, truncated))
+            }
             Direction::Both => {
-                let mut out = self.store.get_outgoing_edges(id, kinds, None)?;
-                out.extend(self.store.get_incoming_edges(id, kinds)?);
-                Ok(out)
+                let mut out = self.store.get_outgoing_edges_limited(id, kinds, None, limit)?;
+                let outgoing_cut = out.len() >= limit;
+                out.truncate(limit - 1);
+                let left = limit.saturating_sub(out.len()).max(1);
+                let mut incoming = self.store.get_incoming_edges_limited(id, kinds, left)?;
+                let incoming_cut = incoming.len() >= left;
+                incoming.truncate(left - 1);
+                // Outgoing edges first, as the unbounded read returned them: BFS's stable
+                // kind sort keeps that order among equal kinds.
+                out.extend(incoming);
+                Ok((out, outgoing_cut || incoming_cut))
             }
         }
     }
@@ -59,16 +96,26 @@ impl<'a> GraphTraverser<'a> {
             out.nodes.insert(start.id.clone(), start);
         }
         let limit = opts.limit.unwrap_or(1000);
+        let mut work = 0usize;
+        let mut truncated = false;
         while !queue.is_empty() && out.nodes.len() < limit {
             let (node, depth) = queue.pop_front().unwrap();
             if !visited.insert(node.id.clone()) || depth >= opts.max_depth.unwrap_or(u32::MAX) {
                 continue;
             }
-            let mut edges = self.adjacent(
+            let remaining = MAX_TRAVERSAL_WORK.saturating_sub(work);
+            if remaining == 0 {
+                truncated = true;
+                break;
+            }
+            let (mut edges, cut) = self.adjacent(
                 &node.id,
                 opts.direction.unwrap_or(Direction::Outgoing),
                 opts.edge_kinds.as_deref().unwrap_or(&[]),
+                remaining,
             )?;
+            truncated |= cut;
+            work += edges.len();
             edges.sort_by_key(|e| match e.kind {
                 EdgeKind::Contains => 0,
                 EdgeKind::Calls => 1,
@@ -101,6 +148,7 @@ impl<'a> GraphTraverser<'a> {
                 }
             }
         }
+        out.truncated = truncated.then_some(true);
         Ok(out)
     }
 
@@ -124,6 +172,8 @@ impl<'a> GraphTraverser<'a> {
         let mut stack = vec![Frame::Enter(start, 0)];
         let mut visited = HashSet::new();
         let limit = opts.limit.unwrap_or(1000);
+        let mut work = 0usize;
+        let mut truncated = false;
         while let Some(frame) = stack.pop() {
             match frame {
                 Frame::Add(node, edge, depth) => {
@@ -144,12 +194,20 @@ impl<'a> GraphTraverser<'a> {
                     {
                         continue;
                     }
+                    let remaining = MAX_TRAVERSAL_WORK.saturating_sub(work);
+                    if remaining == 0 {
+                        truncated = true;
+                        break;
+                    }
                     visited.insert(node.id.clone());
-                    let edges = self.adjacent(
+                    let (edges, cut) = self.adjacent(
                         &node.id,
                         opts.direction.unwrap_or(Direction::Outgoing),
                         opts.edge_kinds.as_deref().unwrap_or(&[]),
+                        remaining,
                     )?;
+                    truncated |= cut;
+                    work += edges.len();
                     let want: Vec<_> = edges
                         .iter()
                         .map(|e| other(e, &node.id))
@@ -164,28 +222,89 @@ impl<'a> GraphTraverser<'a> {
                 }
             }
         }
+        out.truncated = truncated.then_some(true);
         Ok(out)
     }
 
     pub fn get_callers(&self, id: &str, max_depth: u32) -> Result<Vec<Ref>> {
-        self.call_walk(id, max_depth, Direction::Incoming)
+        Ok(self.get_callers_bounded(id, max_depth, MAX_CALL_EDGES)?.0)
     }
 
     pub fn get_callees(&self, id: &str, max_depth: u32) -> Result<Vec<Ref>> {
-        self.call_walk(id, max_depth, Direction::Outgoing)
+        Ok(self.get_callees_bounded(id, max_depth, MAX_CALL_EDGES)?.0)
     }
 
-    fn call_walk(&self, id: &str, max_depth: u32, direction: Direction) -> Result<Vec<Ref>> {
+    /// The same walk with an explicit relationship budget; the bool is truncation.
+    pub fn get_callers_bounded(&self, id: &str, max_depth: u32, max_edges: usize) -> Result<(Vec<Ref>, bool)> {
+        self.call_walk(id, max_depth, Direction::Incoming, max_edges)
+    }
+
+    pub fn get_callees_bounded(&self, id: &str, max_depth: u32, max_edges: usize) -> Result<(Vec<Ref>, bool)> {
+        self.call_walk(id, max_depth, Direction::Outgoing, max_edges)
+    }
+
+    /// One row per caller/callee, each holding every site it calls from. Unlike
+    /// [`GraphTraverser::get_callers`], the symbol itself is included when it calls itself, and
+    /// no edge is lost to the first-edge-only walk (upstream 2909).
+    pub fn get_call_sites(&self, id: &str, incoming: bool, max_sites: usize) -> Result<(Vec<CallSiteRow>, bool)> {
+        if self.store.get_node_by_id(id)?.is_none() {
+            return Ok((Vec::new(), false));
+        }
+        let mut edges = if incoming {
+            self.store.get_incoming_edges(id, CALL_KINDS)?
+        } else {
+            self.store.get_outgoing_edges(id, CALL_KINDS, None)?
+        };
+        let truncated = edges.len() > max_sites;
+        edges.truncate(max_sites);
+        let peers: Vec<String> = edges.iter().map(|e| if incoming { e.source.clone() } else { e.target.clone() }).collect();
+        let nodes = self.store.get_nodes_by_ids(&peers)?;
+        let mut rows: Vec<CallSiteRow> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        for edge in edges {
+            let peer = if incoming { &edge.source } else { &edge.target };
+            let Some(node) = nodes.get(peer) else { continue };
+            let at = match index.get(peer) {
+                Some(&at) => at,
+                None => {
+                    let at = rows.len();
+                    index.insert(peer.clone(), at);
+                    rows.push(CallSiteRow { node: node.clone(), edges: Vec::new(), recursive: peer == id });
+                    at
+                }
+            };
+            rows[at].edges.push(edge);
+        }
+        for row in &mut rows {
+            row.edges.sort_by(|a, b| {
+                (a.line, a.column, a.source.as_str(), a.target.as_str())
+                    .cmp(&(b.line, b.column, b.source.as_str(), b.target.as_str()))
+            });
+        }
+        rows.sort_by(|a, b| {
+            (a.node.file_path.as_str(), a.node.start_line, a.node.name.as_str(), a.node.id.as_str())
+                .cmp(&(b.node.file_path.as_str(), b.node.start_line, b.node.name.as_str(), b.node.id.as_str()))
+        });
+        Ok((rows, truncated))
+    }
+
+    fn call_walk(&self, id: &str, max_depth: u32, direction: Direction, max_edges: usize) -> Result<(Vec<Ref>, bool)> {
         let mut result = Vec::new();
         let mut visited = HashMap::<String, u32>::new();
         let mut reported = HashSet::from([id.to_owned()]);
         let mut stack = vec![(id.to_owned(), 0, None::<Ref>)];
+        let mut work = 0usize;
+        let mut truncated = false;
         while let Some((id, depth, step)) = stack.pop() {
             if !nearer(&visited, &id, depth) {
                 continue;
             }
             if let Some(step) = step {
                 if reported.insert(step.node.id.clone()) {
+                    if result.len() >= max_edges {
+                        truncated = true;
+                        break;
+                    }
                     result.push(step);
                 }
             }
@@ -193,7 +312,14 @@ impl<'a> GraphTraverser<'a> {
             if depth >= max_depth {
                 continue;
             }
-            let edges = self.adjacent(&id, direction, CALL_KINDS)?;
+            let remaining = MAX_TRAVERSAL_WORK.saturating_sub(work);
+            if remaining == 0 {
+                truncated = true;
+                break;
+            }
+            let (edges, cut) = self.adjacent(&id, direction, CALL_KINDS, remaining)?;
+            truncated |= cut;
+            work += edges.len();
             let ids: Vec<_> = edges.iter().map(|e| other(e, &id)).collect();
             let nodes = self.store.get_nodes_by_ids(&ids)?;
             for edge in edges.into_iter().rev() {
@@ -209,7 +335,7 @@ impl<'a> GraphTraverser<'a> {
                 }
             }
         }
-        Ok(result)
+        Ok((result, truncated))
     }
 
     pub fn get_call_graph(&self, id: &str, depth: u32) -> Result<Subgraph> {
@@ -221,14 +347,20 @@ impl<'a> GraphTraverser<'a> {
             ..Subgraph::default()
         };
         out.nodes.insert(id.to_owned(), focal);
-        for r in self
-            .get_callers(id, depth)?
-            .into_iter()
-            .chain(self.get_callees(id, depth)?)
-        {
+        let mut truncated = false;
+        let (callers, cut) = self.get_callers_bounded(id, depth, MAX_CALL_EDGES)?;
+        truncated |= cut;
+        for r in callers {
             out.nodes.insert(r.node.id.clone(), r.node);
             out.edges.push(r.edge);
         }
+        let (callees, cut) = self.get_callees_bounded(id, depth, MAX_CALL_EDGES)?;
+        truncated |= cut;
+        for r in callees {
+            out.nodes.insert(r.node.id.clone(), r.node);
+            out.edges.push(r.edge);
+        }
+        out.truncated = truncated.then_some(true);
         Ok(out)
     }
 
@@ -243,6 +375,8 @@ impl<'a> GraphTraverser<'a> {
             ..Subgraph::default()
         };
         out.nodes.insert(id.to_owned(), focal);
+        let mut work = 0usize;
+        let mut truncated = false;
         for direction in [Direction::Outgoing, Direction::Incoming] {
             // Each direction keeps its own visited set: the ancestor walk marks the focal node
             // first, and a shared set ended the descendant walk before it read one incoming
@@ -260,7 +394,14 @@ impl<'a> GraphTraverser<'a> {
                 if !visited.insert(id.clone()) {
                     continue;
                 }
-                let edges = self.adjacent(&id, direction, TYPE_KINDS)?;
+                let remaining = MAX_TRAVERSAL_WORK.saturating_sub(work);
+                if remaining == 0 {
+                    truncated = true;
+                    break;
+                }
+                let (edges, cut) = self.adjacent(&id, direction, TYPE_KINDS, remaining)?;
+                truncated |= cut;
+                work += edges.len();
                 let ids: Vec<_> = edges.iter().map(|e| other(e, &id)).collect();
                 let nodes = self.store.get_nodes_by_ids(&ids)?;
                 for edge in edges.into_iter().rev() {
@@ -276,11 +417,12 @@ impl<'a> GraphTraverser<'a> {
                 }
             }
         }
+        out.truncated = truncated.then_some(true);
         Ok(out)
     }
 
     pub fn find_usages(&self, id: &str) -> Result<Vec<Ref>> {
-        let edges = self.store.get_incoming_edges(id, &[])?;
+        let edges = self.store.get_incoming_edges_limited(id, &[], MAX_CALL_EDGES)?;
         self.refs_for_edges(edges, true)
     }
 
@@ -302,6 +444,11 @@ impl<'a> GraphTraverser<'a> {
     }
 
     pub fn get_impact_radius(&self, id: &str, max_depth: u32) -> Result<Subgraph> {
+        self.get_impact_radius_bounded(id, max_depth, 10_000, 50_000, 100_000)
+    }
+
+    /// Explicit limits also bound repeated expansion work when a nearer path is discovered.
+    pub fn get_impact_radius_bounded(&self, id: &str, max_depth: u32, max_nodes: usize, max_edges: usize, max_work: usize) -> Result<Subgraph> {
         let Some(focal) = self.store.get_node_by_id(id)? else {
             return Ok(Subgraph::default());
         };
@@ -312,6 +459,8 @@ impl<'a> GraphTraverser<'a> {
         out.nodes.insert(id.to_owned(), focal);
         let mut visited = HashMap::<String, u32>::new();
         let mut expanded = HashSet::new();
+        let mut work = 0usize;
+        let max_nodes = max_nodes.max(1);
         enum Frame {
             Enter(String, u32),
             Child(Node, Edge, u32),
@@ -336,9 +485,10 @@ impl<'a> GraphTraverser<'a> {
                         .get_node_by_id(&id)?
                         .is_some_and(|n| is_impact_container(n.kind))
                     {
-                        let edges =
-                            self.store
-                                .get_outgoing_edges(&id, &[EdgeKind::Contains], None)?;
+                        let remaining = max_edges.saturating_sub(out.edges.len()).min(max_work.saturating_sub(work));
+                        let mut edges = self.store.impact_edges(&id, false, remaining.saturating_add(1))?;
+                        if edges.len() > remaining { out.truncated = Some(true); edges.truncate(remaining); }
+                        work += edges.len();
                         let ids: Vec<_> = edges.iter().map(|e| &e.target).collect();
                         let nodes = self.store.get_nodes_by_ids(&ids)?;
                         for edge in edges.into_iter().rev() {
@@ -353,18 +503,20 @@ impl<'a> GraphTraverser<'a> {
                         continue;
                     }
                     if !out.nodes.contains_key(&node.id) {
+                        if out.nodes.len() >= max_nodes || out.edges.len() >= max_edges {
+                            out.truncated = Some(true);
+                            continue;
+                        }
                         out.nodes.insert(node.id.clone(), node.clone());
                         out.edges.push(edge);
                     }
                     stack.push(Frame::Enter(node.id, depth));
                 }
                 Frame::Incoming(id, depth, first) => {
-                    let edges: Vec<_> = self
-                        .store
-                        .get_incoming_edges(&id, &[])?
-                        .into_iter()
-                        .filter(|e| e.kind != EdgeKind::Contains)
-                        .collect();
+                    let remaining = max_edges.saturating_sub(out.edges.len()).min(max_work.saturating_sub(work));
+                    let mut edges = self.store.impact_edges(&id, true, remaining.saturating_add(1))?;
+                    if edges.len() > remaining { out.truncated = Some(true); edges.truncate(remaining); }
+                    work += edges.len();
                     let ids: Vec<_> = edges.iter().map(|e| &e.source).collect();
                     let nodes = self.store.get_nodes_by_ids(&ids)?;
                     for edge in edges.into_iter().rev() {
@@ -374,6 +526,11 @@ impl<'a> GraphTraverser<'a> {
                     }
                 }
                 Frame::Dependency(node, edge, depth, first) => {
+                    if (!out.nodes.contains_key(&node.id) && out.nodes.len() >= max_nodes)
+                        || (first && out.edges.len() >= max_edges) {
+                        out.truncated = Some(true);
+                        continue;
+                    }
                     if first {
                         out.edges.push(edge);
                     }

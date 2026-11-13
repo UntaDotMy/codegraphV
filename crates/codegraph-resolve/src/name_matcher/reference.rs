@@ -6,6 +6,7 @@ use super::calls::is_collapsed_non_recursion;
 use super::cpp_text::{cpp_paren_list_after, split_cpp_top_level};
 use super::exact::{match_by_exact_name, match_by_file_path, match_by_qualified_name, match_fuzzy, prefer_call_site_file};
 use super::function_ref::match_function_ref;
+use super::java_overload::java_overloads_fitting;
 use super::gate::gate_language_match;
 use super::js_scope::is_outside_js_local;
 use super::js_store::{is_unresolved_js_member_call, match_store_accessor_chain};
@@ -23,6 +24,7 @@ use crate::ctx::Ctx;
 use crate::swift_type_visibility::{is_swift_type_path_call, resolve_swift_type_path_call};
 use crate::types::{is_inheritance_ref, is_supertype_target, NodeRef, ResolvedBy, ResolvedRef, Tri, UnresolvedRef};
 use codegraph_jsre::{escape_regex, re, Re};
+use codegraph_types::jscompat::utf16_byte_index;
 use codegraph_types::{EdgeKind, Language, Node, NodeKind, ReferenceKind};
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -245,6 +247,98 @@ fn swift_labels_fit(labels: &[String], param_list: &str) -> bool {
     i == labels.len()
 }
 
+/// `isSwiftFunctionParameter`: whether a Swift parameter (`_ body: @escaping (Int) -> Void`)
+/// takes a function. An `@autoclosure` parameter, an array or a generic type is passed a value.
+fn is_swift_function_parameter(param: &str) -> bool {
+    let after = param.find(':').map_or(param, |i| &param[i + 1..]);
+    let ty = after.find('=').map_or(after, |i| &after[..i]);
+    ty.contains("->") && !ty.contains("@autoclosure") && !re!(r"^\s*\[").is_match(ty) && !re!(r"^\s*[A-Za-z_][\w.]*\s*<").is_match(ty)
+}
+
+memo_map!(SwiftParametersMemo, String, Option<Rc<Vec<String>>>);
+
+/// A Swift overload's parameters as written, read once per context; `None` when unreadable.
+fn swift_parameters(id: &str, name: &str, ctx: &Ctx) -> Option<Rc<Vec<String>>> {
+    memoized::<SwiftParametersMemo>(ctx, id.to_string(), || {
+        let decl = ctx.node_by_id(id)?;
+        let list = cpp_paren_list_after(&decl.file_path, decl.start_line, 0, name, ctx)?;
+        Some(Rc::new(if list.trim().is_empty() { Vec::new() } else { split_cpp_top_level(&list) }))
+    })
+}
+
+/// `swiftOverloadForClosure`: of a type's overloads alike in their labels, a closure (trailing or
+/// in the parentheses) goes to the one whose bound parameter takes a function, and any other value
+/// to the one whose parameter doesn't. Alamofire's `didStop.write(true)` is `write(_ value:)`;
+/// `write { $0 = value }` is `write(_ closure:)`. `None` when the overloads don't differ that way
+/// or the arguments can't be read.
+fn swift_overload_for_closure(target: &str, set: &OverloadSet, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
+    let overloads: Vec<&str> = std::iter::once(target).chain(set.siblings.iter().map(|(id, _)| id.as_str())).collect();
+    if !overloads.iter().any(|id| swift_parameters(id, &set.name, ctx).is_some_and(|ps| ps.iter().any(|p| is_swift_function_parameter(p)))) {
+        return None;
+    }
+    let lines = lines_of(ctx, &r.file_path);
+    let start = (r.line as usize).saturating_sub(1).min(lines.len());
+    let end = (r.line as usize + 11).min(lines.len());
+    let text = if start < end { lines[start..end].join("\n") } else { String::new() };
+    let from = utf16_byte_index(&text, r.column as usize);
+    let named = Re::cached(&format!(r"\b{}\s*(?:<[^<>()]*>)?\s*(?=[({{])", escape_regex(&set.name)), "").find(&text[from..])?;
+    let after = from + named.end();
+    let bytes = text.as_bytes();
+    let mut close = after as isize - 1;
+    if bytes.get(after) == Some(&b'(') {
+        let mut depth = 0i64;
+        let mut found = None;
+        for (i, &b) in bytes.iter().enumerate().skip(after) {
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    found = Some(i);
+                    break;
+                }
+            }
+        }
+        close = found? as isize;
+    }
+    let written = if close as usize > after { &text[after + 1..close as usize] } else { "" };
+    let args: Vec<String> = if written.trim().is_empty() { Vec::new() } else { split_cpp_top_level(written) };
+    let label_of = |a: &str| re!(r"^\s*([A-Za-z_]\w*)\s*:(?!:)").captures(a).and_then(|c| c.text(1).map(|s| s.to_string())).unwrap_or_else(|| "_".to_string());
+    // The `{` after a condition is the statement's own: Swift takes no trailing closure there.
+    let rest = &text[(close + 1) as usize..];
+    let line = lines.get(start).map(|s| s.as_str()).unwrap_or("");
+    let trailing = re!(r"^\s*\{").is_match(rest) && !re!(r"^\s*(?:\}\s*else\s+)?(?:if|guard|while|for|switch)\b").is_match(line);
+    if !trailing && args.is_empty() {
+        return None;
+    }
+    let closure = trailing || re!(r"^\s*[A-Za-z_]\w*\s*:(?!:)").replace_all_str(&args[args.len() - 1], "").trim().starts_with('{');
+    let labels: Vec<String> = args.iter().map(|a| label_of(a)).collect();
+    // Whether the parameter the last argument binds to takes a function; `None` when the call
+    // doesn't fit the declaration.
+    let takes_function = |id: &str| -> Option<bool> {
+        let params = swift_parameters(id, &set.name, ctx)?;
+        let mut next = 0usize;
+        let mut bound: Option<&str> = None;
+        let mut trailed = !trailing;
+        for p in params.iter() {
+            if next < labels.len() && swift_labels_fit(std::slice::from_ref(&labels[next]), p) {
+                next += 1;
+                if next == labels.len() && !trailing {
+                    bound = Some(p);
+                }
+            } else if !trailed && next == labels.len() && is_swift_function_parameter(p) {
+                trailed = true;
+                bound = Some(p);
+            } else if !swift_labels_fit(&[], p) {
+                return None;
+            }
+        }
+        if next == labels.len() { bound.map(is_swift_function_parameter) } else { None }
+    };
+    let chosen: Vec<&str> = overloads.iter().copied().filter(|id| takes_function(id) == Some(closure)).collect();
+    (chosen.len() == 1).then(|| chosen[0].to_string())
+}
+
 /// A call that resolved to one overload may belong to a sibling that takes its argument count
 /// (or, in Swift, its argument labels).
 pub(crate) fn retarget_self_overload(result: ResolvedRef, r: &UnresolvedRef, ctx: &Ctx) -> ResolvedRef {
@@ -257,7 +351,32 @@ pub(crate) fn retarget_self_overload(result: ResolvedRef, r: &UnresolvedRef, ctx
     let set = memoized::<OverloadSetMemo>(ctx, result.target_node_id.clone(), || overload_set_of(&result.target_node_id, ctx));
     let Some(set) = set else { return result };
     let Some(own) = &set.own else { return result };
+    if r.language == Language::Swift {
+        if let Some(by_closure) = swift_overload_for_closure(&result.target_node_id, &set, r, ctx) {
+            let mut moved = result;
+            moved.target_node_id = by_closure;
+            return moved;
+        }
+    }
     let Some(args) = cpp_paren_list_after(&r.file_path, r.line, r.column, &set.name, ctx) else { return result };
+    // Java picks by the arguments' types as well as their count.
+    if r.language == Language::Java {
+        let overloads: Vec<NodeRef> = std::iter::once(&result.target_node_id).chain(set.siblings.iter().map(|(id, _)| id)).filter_map(|id| ctx.node_by_id(id)).collect();
+        if let Some(fitting) = java_overloads_fitting(&overloads, &args, r, ctx) {
+            if fitting.iter().any(|n| n.id == result.target_node_id) {
+                return result;
+            }
+            // A private overload of another file can't be the call, but when the arguments don't say
+            // which of the rest is, it stays that, unresolved, and not a guess.
+            let target = ctx.node_by_id(&result.target_node_id);
+            if fitting.len() > 1 && target.is_some_and(|t| t.visibility == Some(codegraph_types::Visibility::Private) && t.file_path != r.file_path) {
+                return result;
+            }
+            let mut moved = result;
+            moved.target_node_id = fitting[0].id.clone();
+            return moved;
+        }
+    }
     if r.language == Language::Swift {
         let labels: Vec<String> = if args.trim().is_empty() {
             Vec::new()
@@ -538,6 +657,12 @@ fn match_reference_inner(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
     }
     if let Some(result) = match_by_file_path(r, ctx) {
         return Some(result);
+    }
+    // A dotted Java, Kotlin or C# supertype (`extends Outer.Inner`) is a nested
+    // type's path: the type the file can name, or nothing.
+    let dotted = super::exact::match_dotted_supertype(r, ctx);
+    if !dotted.is_undefined() {
+        return dotted.value();
     }
     if let Some(result) = match_by_qualified_name(r, ctx) {
         return Some(result);

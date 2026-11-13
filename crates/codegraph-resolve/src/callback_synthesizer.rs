@@ -6,6 +6,8 @@
 
 mod angular_template;
 mod c_fnptr;
+mod const_alias;
+pub use const_alias::alias_may_name;
 mod channels;
 mod common;
 mod dispatch;
@@ -18,6 +20,7 @@ pub use jsx::is_jsx_child_candidate;
 mod native;
 mod routers;
 mod stores;
+mod tauri;
 mod tier;
 
 use crate::ctx::Ctx;
@@ -40,6 +43,7 @@ struct SynthPass {
 
 const JS: [&str; 4] = ["typescript", "javascript", "tsx", "jsx"];
 const VUE_AND_JS: [&str; 5] = ["vue", "typescript", "javascript", "tsx", "jsx"];
+const VUE_SVELTE_AND_JS: [&str; 6] = ["vue", "svelte", "typescript", "javascript", "tsx", "jsx"];
 const IFACE_LANGUAGES: [&str; 12] =
     ["java", "kotlin", "csharp", "swift", "scala", "go", "rust", "arkts", "typescript", "javascript", "tsx", "jsx"];
 
@@ -59,6 +63,8 @@ fn synth_passes() -> Vec<SynthPass> {
         // its consumer, a bus / socket event onto its handler. Before the in-process emitter
         // pass: the same (source, target) pair keeps the more specific edge.
         p("tierEdges", |has| has(&JS), tier::cross_tier_edges),
+        // A Tauri frontend's `invoke('x')` onto the Rust command, and events across that seam.
+        p("tauriEdges", |has| has(&["rust"]) && has(&VUE_SVELTE_AND_JS), tauri::tauri_edges),
         // A Spring / Laravel test's request onto the route it reaches.
         p("testRequestEdges", |has| has(&["java", "kotlin", "php"]), tier::test_request_edges),
         p("emitterEdges", always, channels::event_emitter_edges),
@@ -85,6 +91,8 @@ fn synth_passes() -> Vec<SynthPass> {
         p("mybatisEdges", |has| has(&["java", "kotlin"]) && has(&["xml"]), native::mybatis_java_xml_edges),
         p("ginEdges", |has| has(&["go"]), native::gin_middleware_chain_edges),
         p("thunkEdges", |has| has(&JS), stores::redux_thunk_edges),
+        // `export const extname = isWin ? win32.extname : posix.extname` onto each function it can hold.
+        p("constAliasEdges", |has| has(&JS), const_alias::const_alias_edges),
         p("registryEdges", always, stores::object_registry_edges),
         p("rtkEdges", |has| has(&JS), stores::rtk_query_edges),
         p("piniaEdges", |has| has(&VUE_AND_JS), stores::pinia_store_edges),
@@ -104,6 +112,8 @@ fn synth_passes() -> Vec<SynthPass> {
         p("expoRouterReturnEdges", |has| has(&JS), routers::expo_router_return_edges),
         // `<Link href="/x">` / an internal `<a href>` — markup, not a call; the component navigates.
         p("nextLinkEdges", |has| has(&JS), routers::next_link_edges),
+        // `proxy.ts` / `middleware.ts` — every route its `config.matcher` accepts runs it first.
+        p("nextProxyEdges", |has| has(&JS), routers::next_proxy_edges),
         p("reactRouterLinkEdges", |has| has(&JS), routers::react_router_link_edges),
         p("tanstackLinkEdges", |has| has(&JS), routers::tanstack_link_edges),
         p("vueRouterLinkEdges", |has| has(&VUE_AND_JS), routers::vue_router_link_edges),
@@ -286,6 +296,11 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
     if re!(r"\.(?:vue|svelte|dfm|fmx|nix|xml)$").is_match(file_path) {
         return true;
     }
+    // A Next proxy and the routes its matcher covers are joined by path and config, not by any line
+    // of code.
+    if crate::frameworks::next_proxy::is_next_proxy_file(file_path) || crate::frameworks::nextjs::next_route_for_file(file_path).is_some() {
+        return true;
+    }
     if re!(r"\.(?:c|h|cc|cpp|cxx|hpp|hh|hxx|cppm|ipp|inl|tcc|def|inc|tbl)$", "i").is_match(file_path)
         && re!(r"\b(?:struct|union|typedef|virtual|override)\b|#\s*(?:include|define|if)|=|->|\[").is_match(content)
     {
@@ -299,7 +314,10 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
     if file_path.ends_with(".go") {
         return true;
     }
-    if tier::has_cross_tier_pattern(content) || tier::has_test_request_pattern(file_path, content) {
+    if tier::has_cross_tier_pattern(content)
+        || tier::has_test_request_pattern(file_path, content)
+        || tauri::has_tauri_pattern(file_path, content)
+    {
         return true;
     }
     if re!(r"\b(?:render|build|setState|defineStore|createStore|createApi|Store|href|sendEvent|sendEventWithName)\b|</|/>")
@@ -309,6 +327,9 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
     }
     // A wrapper renders the component it wraps, in a file with no markup of its own too.
     if re!(r"\b(?:styled|memo|forwardRef)\s*\(\s*[A-Z]").is_match(content) {
+        return true;
+    }
+    if const_alias::has_const_alias_shape(file_path, content) {
         return true;
     }
     if re!(r"\.(?:forEach|append|add|push|insert|fire|dispatchEvent|addListener|Use|GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Any|Handle)\s*\(")

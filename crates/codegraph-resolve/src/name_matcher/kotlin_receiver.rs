@@ -10,6 +10,8 @@
 //! class) gets no edge instead of a name-only guess, unless the project extends that type.
 
 use super::infer::infer_local_receiver_type;
+use super::members::angle_arguments;
+use super::reach::is_anonymous_class;
 use super::method::resolve_method_on_type;
 use super::same_language_family;
 use crate::ctx::Ctx;
@@ -467,12 +469,35 @@ pub fn kotlin_receiver_declared_type(name: &str, r: &UnresolvedRef, ctx: &Ctx, d
     if local_declared {
         return None;
     }
-    // A property of a superclass: `viewModel` declared in `BaseActivity`.
-    let owner = kotlin_enclosing_class(r, ctx)?;
-    if !kotlin_own_property_type(name, &owner, r, ctx).is_undefined() {
+    // A property of a superclass: `viewModel` declared in `BaseActivity`. In an
+    // object expression, of the class it is written in, unless the object
+    // declares the name itself.
+    let around = kotlin_enclosing_classes(r, ctx);
+    let owner = around.last().cloned()?;
+    if around.iter().any(|c| !kotlin_own_property_type(name, c, r, ctx).is_undefined()) {
         return None;
     }
     kotlin_inherited_property_type(name, &owner, r, ctx)
+}
+
+/// The Kotlin classes enclosing `r`'s line, tightest first, through the first named class.
+fn kotlin_enclosing_classes(r: &UnresolvedRef, ctx: &Ctx) -> Vec<NodeRef> {
+    let mut around: Vec<NodeRef> = ctx
+        .get_nodes_in_file(&r.file_path)
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Interface) && n.language == Language::Kotlin && n.start_line <= r.line && n.end_line >= r.line)
+        .cloned()
+        .collect();
+    around.sort_by_key(|n| std::cmp::Reverse(n.start_line));
+    let mut out = Vec::new();
+    for c in around {
+        let named = !is_anonymous_class(&c);
+        out.push(c);
+        if named {
+            break;
+        }
+    }
+    out
 }
 
 /// The 0-based lines a Kotlin local visible at `r` may be declared on, nearest first: the enclosing
@@ -512,6 +537,43 @@ fn kotlin_local_scan_lines(r: &UnresolvedRef, ctx: &Ctx, line_count: usize) -> V
     out
 }
 
+/// `KOTLIN_VALUE_HOLDERS`: library types whose member is one of their type arguments
+/// (`uiState.value` on a `StateFlow<UiState>` is a `UiState`); the index of that argument.
+fn kotlin_value_holder(ty: &str, member: &str) -> Option<usize> {
+    match (ty, member) {
+        ("StateFlow" | "MutableStateFlow" | "State" | "MutableState" | "LiveData" | "MutableLiveData" | "Lazy", "value") => Some(0),
+        ("Pair" | "Triple", "first") => Some(0),
+        ("Pair" | "Triple", "second") => Some(1),
+        ("Triple", "third") => Some(2),
+        _ => None,
+    }
+}
+
+/// `kotlinHeldType`: what `name.member` is when `name` is declared in `text` as a value holder: the
+/// type argument its declaration writes.
+fn kotlin_held_type(text: &str, name: &str, member: &str) -> Option<String> {
+    let m = Re::cached(&format!(r"\b{}\s*:\s*(?:[a-z_]\w*\.)*([A-Z]\w*)\s*<", escape_regex(name)), "").captures(text)?;
+    let index = kotlin_value_holder(m.text(1)?, member)?;
+    let start = m.get(0)?.start();
+    let arg = angle_arguments(&text[start..]).get(index).cloned().unwrap_or_default();
+    kotlin_type_name(&arg)
+}
+
+/// `kotlinDeclaringText`: the source a chain's value is declared in: `owner`'s lines for a property,
+/// else the enclosing class's and the lines above the call.
+fn kotlin_declaring_text(owner: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> String {
+    let file = owner.map_or(r.file_path.as_str(), |o| o.file_path.as_str());
+    let lines = kotlin_file_lines(file, ctx).unwrap_or_default();
+    let slice = |from: usize, to: usize| lines[from.min(lines.len())..to.min(lines.len()).max(from.min(lines.len()))].join("\n");
+    if let Some(o) = owner {
+        return slice((o.start_line as usize).saturating_sub(1), o.end_line.max(o.start_line) as usize);
+    }
+    match kotlin_enclosing_class(r, ctx) {
+        Some(around) => slice((around.start_line as usize).saturating_sub(1), around.end_line as usize),
+        None => slice(0, r.line as usize),
+    }
+}
+
 /// The declared type of a Kotlin receiver chain `a.b.c` / `this.a.b`: the first value typed as a
 /// single receiver (`this` is the enclosing class, a type name its object or companion), each next
 /// segment as a property or enum entry declared in the class of the type before it, read from that
@@ -536,11 +598,19 @@ fn kotlin_chain_declared_type(receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> O
         }
         owner = Some(classes[0].clone());
     }
-    for segment in &segments[1..] {
+    let mut holder: Option<NodeRef> = None;
+    for i in 1..segments.len() {
+        let segment = &segments[i];
         let current = match owner.take() {
             Some(o) => o,
             None => {
                 let t = ty.clone()?;
+                // A holder's member is its type argument (upstream 41587d38).
+                if t != KOTLIN_EXTERNAL_TYPE && kotlin_value_holder(&t, segment).is_some() && !is_project_type(&t, r, ctx) {
+                    ty = Some(kotlin_held_type(&kotlin_declaring_text(holder.as_ref(), r, ctx), segments[i - 1], segment).unwrap_or_else(|| KOTLIN_EXTERNAL_TYPE.to_string()));
+                    holder = None;
+                    continue;
+                }
                 if t == KOTLIN_EXTERNAL_TYPE || !is_project_type(&t, r, ctx) {
                     return Some(KOTLIN_EXTERNAL_TYPE.to_string());
                 }
@@ -570,6 +640,7 @@ fn kotlin_chain_declared_type(receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> O
             Tri::Null => None,
             Tri::Undefined => kotlin_inherited_property_type(segment, &current, r, ctx),
         };
+        holder = Some(current);
     }
     ty
 }
@@ -584,6 +655,70 @@ pub enum KotlinChain {
     /// before it kept the chain.
     Method(String),
     Resolved(ResolvedRef),
+}
+
+/// The package a Kotlin file declares.
+fn kotlin_package_of(file_path: &str, ctx: &Ctx) -> String {
+    ctx.get_nodes_in_file(file_path)
+        .iter()
+        .find(|n| n.kind == NodeKind::Namespace)
+        .map(|n| n.name.clone())
+        .unwrap_or_default()
+}
+
+/// The receiver of a Kotlin extension function, or `None` for a member of a type declared in the
+/// same file (extension functions are extracted as `Receiver::name`, without the package).
+fn kotlin_extension_receiver(n: &Node, ctx: &Ctx) -> Option<String> {
+    if n.kind != NodeKind::Method || n.language != Language::Kotlin {
+        return None;
+    }
+    let package = kotlin_package_of(&n.file_path, ctx);
+    let prefix = if package.is_empty() { String::new() } else { format!("{package}::") };
+    // Extension functions are qualified `Receiver::name` with NO package; a declaration in a
+    // package is `pkg::Type::name` (a real member) or `pkg::name` (top-level).
+    let prefixed = !prefix.is_empty() && n.qualified_name.starts_with(&prefix);
+    let rest = if prefixed { &n.qualified_name[prefix.len()..] } else { n.qualified_name.as_str() };
+    let receiver = rest.strip_suffix(&format!("::{}", n.name))?;
+    if receiver.is_empty() {
+        return None;
+    }
+    if prefixed || package.is_empty() {
+        let type_name = if package.is_empty() { receiver.to_string() } else { format!("{package}::{receiver}") };
+        let declared_here = ctx.get_nodes_by_qualified_name(&type_name).iter().any(|t| {
+            t.file_path == n.file_path
+                && matches!(t.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Struct | NodeKind::TypeAlias)
+        });
+        if declared_here {
+            return None;
+        }
+    }
+    Some(receiver.to_string())
+}
+
+/// A Kotlin extension declared in another package is in scope only through an import of it or of
+/// its package; importing the receiver type alone does not bring it in (upstream 787eafbf).
+pub fn gate_kotlin_extension(resolved: Option<ResolvedRef>, r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
+    let resolved = resolved?;
+    if r.language != Language::Kotlin || !r.is_kind(codegraph_types::EdgeKind::Calls) {
+        return Some(resolved);
+    }
+    let target = ctx.node_by_id(&resolved.target_node_id)?;
+    if kotlin_extension_receiver(&target, ctx).is_none() {
+        return Some(resolved);
+    }
+    let caller_package = kotlin_package_of(&r.file_path, ctx);
+    let target_package = kotlin_package_of(&target.file_path, ctx);
+    if r.file_path == target.file_path || caller_package == target_package {
+        return Some(resolved);
+    }
+    let package_import = if target_package.is_empty() { "*".to_string() } else { format!("{target_package}.*") };
+    let name_import = if target_package.is_empty() { target.name.clone() } else { format!("{target_package}.{}", target.name) };
+    let scope = super::kotlin::kotlin_file_scope(&r.file_path, ctx);
+    // `kotlin_file_scope` keeps a `pkg.*` import as a star of `pkg`, which the import mappings drop.
+    let imported = scope.imports.contains(&name_import)
+        || scope.imports.contains(&package_import)
+        || scope.stars.contains(&target_package);
+    imported.then_some(resolved)
 }
 
 /// A Kotlin call through a receiver chain (`engine.pump.drain()`), resolved on the chain's declared
