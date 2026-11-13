@@ -28,7 +28,17 @@ mod pcre;
 
 use pcre::{CaptureLocations, Regex};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+
+static COMPILED: AtomicUsize = AtomicUsize::new(0);
+
+/// How many patterns [`Re::cached`] and [`Re::try_cached`] have compiled in this process (each
+/// one a cache miss). A pattern built from a name compiles once per distinct name, with JIT, so
+/// tests read this to keep such patterns off paths every reference takes.
+pub fn compiled_count() -> usize {
+    COMPILED.load(Ordering::Relaxed)
+}
 
 const JIT_STACK_BYTES: usize = 16 << 20;
 const JS_SPACE: &str = r"\t\n\x{0B}\x{0C}\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
@@ -414,11 +424,15 @@ impl Re {
     }
 
     pub fn try_new(source: &str, flags: &str) -> Result<Re, String> {
+        Re::compile(source, flags, true)
+    }
+
+    fn compile(source: &str, flags: &str, jit: bool) -> Result<Re, String> {
         let multiline = flags.contains('m');
         let pcre = js_to_pcre(source, multiline, flags.contains('s'), flags.contains('u'))?;
         let sticky = flags.contains('y');
         let pattern = if sticky { format!(r"\G(?:{pcre})") } else { pcre };
-        let inner = Regex::new(&pattern, flags.contains('i'))?;
+        let inner = Regex::new(&pattern, flags.contains('i'), jit)?;
         let mut names = Vec::new();
         for (idx, name) in inner.capture_names().iter().enumerate() {
             if let Some(name) = name {
@@ -431,18 +445,35 @@ impl Re {
 
     /// A shared compiled regex for a pattern built at run time.
     pub fn cached(source: &str, flags: &str) -> Arc<Re> {
-        static CACHE: LazyLock<Mutex<HashMap<(String, String), Arc<Re>>>> = LazyLock::new(Default::default);
-        let key = (source.to_string(), flags.to_string());
+        Re::cached_as(source, flags, true)
+    }
+
+    /// Like [`Re::cached`], but not JIT-compiled: for a pattern built from a name that is only
+    /// matched at a few given positions (a sticky `y` pattern), where compiling machine code
+    /// costs more than those matches gain.
+    pub fn cached_interpreted(source: &str, flags: &str) -> Arc<Re> {
+        Re::cached_as(source, flags, false)
+    }
+
+    fn cached_as(source: &str, flags: &str, jit: bool) -> Arc<Re> {
+        static CACHE: LazyLock<Mutex<HashMap<(String, String, bool), Arc<Re>>>> = LazyLock::new(Default::default);
+        let key = (source.to_string(), flags.to_string(), jit);
         if let Some(hit) = CACHE.lock().unwrap().get(&key) {
             return Arc::clone(hit);
         }
-        let re = Arc::new(Re::new(source, flags));
+        let re = Arc::new(Re::compile(source, flags, jit).unwrap_or_else(|e| panic!("bad regex /{source}/{flags}: {e}")));
+        COMPILED.fetch_add(1, Ordering::Relaxed);
         let mut cache = CACHE.lock().unwrap();
         if cache.len() > 20_000 {
             cache.clear();
         }
         cache.insert(key, Arc::clone(&re));
         re
+    }
+
+    /// Whether matching runs JIT-compiled machine code (where PCRE2 has a JIT for the platform).
+    pub fn is_jit(&self) -> bool {
+        self.inner.is_jit()
     }
 
     /// Like [`Re::cached`] for data-derived patterns that may be invalid.
@@ -453,6 +484,7 @@ impl Re {
             return hit.clone();
         }
         let re = Re::try_new(source, flags).ok().map(Arc::new);
+        COMPILED.fetch_add(1, Ordering::Relaxed);
         let mut cache = CACHE.lock().unwrap();
         if cache.len() > 20_000 {
             cache.clear();
@@ -823,6 +855,66 @@ mod tests {
     fn escape_regex_matches_the_ts_helper() {
         assert_eq!(escape_regex("a.b*c(d)[e]\\$^|+?{}"), r"a\.b\*c\(d\)\[e\]\\\$\^\|\+\?\{\}");
         assert!(Re::new(&escape_regex("$x"), "").is_match("a$x"));
+    }
+
+    /// BUG-307: an interpreted pattern matches and captures exactly like the JIT-compiled one,
+    /// and the cache keeps the two apart.
+    #[test]
+    fn interpreted_patterns_match_like_jit_ones() {
+        let source = r"\b(?:const|let|var)\s+(?:item(?![\w$])|[{\[][^;=]*?\bitem(?![\w$])[^;=]*?[}\]])\s*(?:=\s*([^;\n]*))?";
+        let text = "let a = 1;\nconst { item, other } = load(x);\nvar item = 2 ;let itemx = 3";
+        let jit_available = Re::new("a", "").is_jit();
+        for flags in ["", "y", "g"] {
+            let jit = Re::cached(source, flags);
+            let interpreted = Re::cached_interpreted(source, flags);
+            assert_eq!(jit.is_jit(), jit_available, "/{flags}");
+            assert!(!interpreted.is_jit(), "/{flags}");
+            let mut matched = 0;
+            for at in 0..=text.len() {
+                let found = |re: &Re| {
+                    re.captures_at(text, at).map(|c| (c.get(0).map(|m| (m.start(), m.end())), c.text(1).map(str::to_string)))
+                };
+                let (a, b) = (found(&jit), found(&interpreted));
+                matched += usize::from(a.is_some());
+                assert_eq!(a, b, "/{flags} at {at}");
+            }
+            assert!(matched > 0, "/{flags} never matched");
+        }
+    }
+
+    /// BUG-305: a match buffer carries no JIT stack of its own; the thread's one serves every
+    /// pattern, so the tens of thousands of patterns built from names allocate none.
+    #[test]
+    fn match_buffers_share_their_threads_jit_stack() {
+        std::thread::spawn(|| {
+            assert!(Re::new("a+", "").is_match("aaa"));
+            let before = pcre::jit_stacks_created_on_this_thread();
+            for i in 0..1000 {
+                assert!(Re::new(&format!("x{i}y+"), "").is_match(&format!("..x{i}yy")));
+            }
+            assert_eq!(pcre::jit_stacks_created_on_this_thread() - before, 0, "JIT stacks created for 1000 new patterns");
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// BUG-305: a match that backtracks deeply gets the full JIT stack on every thread, also
+    /// through a pooled match buffer last used by a thread that has since exited.
+    #[test]
+    fn deep_matches_get_a_full_jit_stack_on_every_thread() {
+        let re = Arc::new(Re::new(r"^(?:(a)|b)*c$", ""));
+        // Far more backtracking state than the 32 KB PCRE2 uses when no stack is assigned.
+        let subject = Arc::new(format!("{}c", "ab".repeat(50_000)));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (re, subject) = (Arc::clone(&re), Arc::clone(&subject));
+                std::thread::spawn(move || (0..20).all(|_| re.is_match(&subject)))
+            })
+            .collect();
+        for thread in threads {
+            assert!(thread.join().unwrap(), "a deep match failed on a worker thread");
+        }
+        assert!(re.is_match(&subject), "a buffer pooled by an exited thread failed here");
     }
 }
 

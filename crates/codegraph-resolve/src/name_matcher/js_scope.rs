@@ -35,6 +35,8 @@ pub struct LocalBindingSites {
     var_decls: Vec<usize>,
     fn_decls: Vec<usize>,
     arrows: Vec<usize>,
+    /// The inside of each destructured parameter list (`({ document }: Props)`, `([a, b])`).
+    destructured: Vec<(usize, usize)>,
 }
 
 // -- Binding patterns -------------------------------------------------------------------------
@@ -63,11 +65,14 @@ fn param_source(n: &str) -> String {
 }
 
 pub fn local_binding_patterns(name: &str, flags: &str) -> LocalBindingPatterns {
+    // A sticky pattern is only tried at the sites the scan picks, a few per name: compiling it to
+    // machine code costs more than those matches gain (BUG-307).
+    let cached = |source: &str| if flags.contains('y') { Re::cached_interpreted(source, flags) } else { Re::cached(source, flags) };
     let n = escape_regex(name);
     LocalBindingPatterns {
-        decl: Re::cached(&format!(r"\b(?:const|let|var)\s+(?:{n}(?![\w$])|[{{\[][^;=]*?\b{n}(?![\w$])[^;=]*?[}}\]])\s*(?:=\s*([^;\n]*))?"), flags),
-        fn_: Re::cached(&format!(r"\b(?:function|class)\s+{n}(?![\w$])"), flags),
-        param: Re::cached(&param_source(&n), flags),
+        decl: cached(&format!(r"\b(?:const|let|var)\s+(?:{n}(?![\w$])|[{{\[][^;=]*?\b{n}(?![\w$])[^;=]*?[}}\]])\s*(?:=\s*([^;\n]*))?")),
+        fn_: cached(&format!(r"\b(?:function|class)\s+{n}(?![\w$])")),
+        param: cached(&param_source(&n)),
     }
 }
 
@@ -407,7 +412,37 @@ fn local_binding_sites(file_path: &str, source: &str, ctx: &Ctx) -> Rc<LocalBind
         let var_decls = re!(r"\b(?:const|let|var)\s", "g").captures_iter(source).filter_map(|c| c.get(0).map(|m| m.start())).collect();
         let fn_decls = re!(r"\b(?:function|class)\s", "g").captures_iter(source).filter_map(|c| c.get(0).map(|m| m.start())).collect();
         let arrows = source.match_indices("=>").map(|(i, _)| i).collect();
-        Rc::new(LocalBindingSites { var_decls, fn_decls, arrows })
+        Rc::new(LocalBindingSites { var_decls, fn_decls, arrows, destructured: destructured_param_spans(source) })
+    })
+}
+
+/// The inside of every `(` + `{…}` or `[…]` + optional `: Type` + `)` in `source`, tried at each
+/// `(` so that overlapping candidates are all found. A name between those brackets is what the
+/// per-name pattern `\(\s*(?:\{[^{}]*\bNAME\b[^{}]*\}|\[[^\[\]]*\bNAME\b[^\[\]]*\])\s*(?::[^)=]*)?\)`
+/// matched; collecting the spans once per file spares compiling that pattern for every name
+/// (BUG-303).
+fn destructured_param_spans(source: &str) -> Vec<(usize, usize)> {
+    let at = re!(r"\(\s*(?:\{([^{}]*)\}|\[([^\[\]]*)\])\s*(?::[^)=]*)?\)", "y");
+    source
+        .match_indices('(')
+        .filter_map(|(i, _)| {
+            let caps = at.captures_at(source, i)?;
+            caps.get(1).or_else(|| caps.get(2)).map(|m| (m.start(), m.end()))
+        })
+        .collect()
+}
+
+/// Does `name` occur in `source[start..end]` where `\bname\b` would find it (JavaScript's ASCII
+/// word characters)? A span is bounded by brackets, so its edges read as non-word on both sides.
+fn has_word_in(source: &str, (start, end): (usize, usize), name: &str) -> bool {
+    let is_word = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+    let bytes = source.as_bytes();
+    let (first, last) = (name.as_bytes().first().copied(), name.as_bytes().last().copied());
+    source[start..end].match_indices(name).any(|(i, _)| {
+        let at = start + i;
+        let before = at.checked_sub(1).map(|j| bytes[j]);
+        let after = bytes.get(at + name.len()).copied();
+        is_word(before) != is_word(first) && is_word(last) != is_word(after)
     })
 }
 
@@ -442,10 +477,7 @@ fn enclosing_open_paren(source: &str, at: usize) -> Option<usize> {
 fn binds_at_sites(source: &str, name: &str, sites: &LocalBindingSites) -> bool {
     let patterns = local_binding_patterns(name, "y");
     // A destructured parameter (`({ document }: Props)`) binds its members too.
-    let n = escape_regex(name);
-    if Re::cached(&format!(r"\(\s*(?:\{{[^{{}}]*\b{n}\b[^{{}}]*\}}|\[[^\[\]]*\b{n}\b[^\[\]]*\])\s*(?::[^)=]*)?\)"), "m")
-        .is_match(source)
-    {
+    if sites.destructured.iter().any(|&span| has_word_in(source, span, name)) {
         return true;
     }
     let mut from = 0usize;
@@ -566,6 +598,59 @@ mod tests {
         assert!(js_body_open_at_end(&open, 0));
     }
 
+    /// BUG-307: a sticky binding pattern is matched only at given positions, so it is not worth
+    /// compiling to machine code; one that searches stays JIT-compiled.
+    #[test]
+    fn sticky_binding_patterns_are_interpreted() {
+        if !Re::new("a", "").is_jit() {
+            return; // No PCRE2 JIT on this platform: nothing to choose.
+        }
+        let sticky = local_binding_patterns("bug307Sticky", "y");
+        assert!(!sticky.decl.is_jit() && !sticky.fn_.is_jit() && !sticky.param.is_jit());
+        let searching = local_binding_patterns("bug307Searching", "");
+        assert!(searching.decl.is_jit() && searching.fn_.is_jit() && searching.param.is_jit());
+        let src = "const x = 1;\nfunction f(a, bug307Sticky) {}\n";
+        assert!(sticky.param.captures_at(src, src.find("(a").unwrap()).is_some());
+        assert!(sticky.param.captures_at(src, 0).is_none());
+    }
+
+    /// BUG-303: the per-file spans answer exactly as v0.0.10's per-name pattern did.
+    #[test]
+    fn destructured_param_check_matches_the_per_name_pattern() {
+        let cases: &[(&str, &[&str])] = &[
+            ("function f({ document }: Props) {}", &["document", "Props", "f"]),
+            ("const g = ({ a, b }) => a;", &["a", "b", "g", "ab"]),
+            ("const h = ([first, second]) => first;", &["first", "second", "irst"]),
+            ("call({ x: 1 })", &["x", "call"]),
+            ("f({ a = 1 }: T = {})", &["a", "T"]),
+            ("f({ ab, cd })", &["a", "ab", "b", "cd", "c"]),
+            ("f({ $a, b$ })", &["$a", "a", "b$", "b"]),
+            ("f({ x$a })", &["$a", "x$a", "x"]),
+            ("f({ a } , b)", &["a", "b"]),
+            ("f(\n  { a }\n)", &["a"]),
+            ("f({ a: { b } })", &["a", "b"]),
+            ("f({ a }: X ({ b })", &["a", "b", "X"]),
+            ("f({ a = g([b]) })", &["a", "b", "g"]),
+            ("f([ x }) more ] )", &["x", "more"]),
+            ("f({ é, a })", &["a", "é"]),
+            ("é({ ok })", &["ok"]),
+            ("f({ a\n}: {\n b })", &["a", "b"]),
+            ("(  [a, [b]] )", &["a", "b"]),
+            ("no parens { a } [ b ]", &["a", "b"]),
+            ("", &["a"]),
+        ];
+        for (source, names) in cases {
+            let spans = destructured_param_spans(source);
+            for name in *names {
+                let n = escape_regex(name);
+                let per_name =
+                    Re::new(&format!(r"\(\s*(?:\{{[^{{}}]*\b{n}\b[^{{}}]*\}}|\[[^\[\]]*\b{n}\b[^\[\]]*\])\s*(?::[^)=]*)?\)"), "m");
+                let spanned = spans.iter().any(|&span| has_word_in(source, span, name));
+                assert_eq!(spanned, per_name.is_match(source), "{name:?} in {source:?}");
+            }
+        }
+    }
+
     #[test]
     fn local_declarations_are_found_by_the_site_scan() {
         let src = "const x = 1;\nfunction g() { const y = require('y'); }";
@@ -573,6 +658,7 @@ mod tests {
             var_decls: re!(r"\b(?:const|let|var)\s", "g").captures_iter(src).filter_map(|c| c.get(0).map(|m| m.start())).collect(),
             fn_decls: re!(r"\b(?:function|class)\s", "g").captures_iter(src).filter_map(|c| c.get(0).map(|m| m.start())).collect(),
             arrows: Vec::new(),
+            destructured: destructured_param_spans(src),
         };
         assert!(binds_at_sites(src, "x", &sites));
         assert!(binds_at_sites(src, "g", &sites));

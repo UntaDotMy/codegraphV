@@ -429,12 +429,14 @@ mod member_path_tests {
     }
 
     impl Sandbox {
+        /// A folder of its own: the process id keeps test processes apart and the counter keeps
+        /// this process's tests apart (a clock reading did not: two tests could start in one tick).
         fn new() -> Self {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let parent = std::env::temp_dir().join(format!("cg-rust-members-{nanos}"));
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let parent = std::env::temp_dir().join(format!("cg-rust-members-{}-{n}", std::process::id()));
+            // A leftover from an earlier process that had the same id.
+            let _ = fs::remove_dir_all(&parent);
             fs::create_dir_all(&parent).unwrap();
             Self { parent }
         }
@@ -459,6 +461,28 @@ mod member_path_tests {
         let inputs = ctx.take_detection_inputs();
         let recorded: Vec<String> = inputs.disk_paths.keys().cloned().collect();
         (map, recorded)
+    }
+
+    /// BUG-311: two tests that start in the same clock tick must not share a sandbox (they did on
+    /// a Windows CI runner: one read the other's crates, and both locked the same index).
+    #[test]
+    fn sandboxes_made_at_the_same_moment_are_distinct() {
+        let threads = 16;
+        let start = std::sync::Arc::new(std::sync::Barrier::new(threads));
+        let sandboxes: Vec<Sandbox> = (0..threads)
+            .map(|_| {
+                let start = std::sync::Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    Sandbox::new()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        let distinct: std::collections::HashSet<_> = sandboxes.iter().map(|s| s.parent.clone()).collect();
+        assert_eq!(distinct.len(), threads, "shared sandbox folders: {:?}", sandboxes.iter().map(|s| &s.parent).collect::<Vec<_>>());
     }
 
     #[test]
