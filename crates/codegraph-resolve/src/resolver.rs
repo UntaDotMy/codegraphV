@@ -1913,9 +1913,12 @@ impl ReferenceResolver {
             };
             let parts: Vec<&str> = written.split('.').filter(|p| !p.is_empty()).collect();
             let root = parts.first().copied().unwrap_or(written);
-            let bound = crate::name_matcher::js_scope::is_locally_bound_js_name(root, &r.file_path, ctx)
-                || ctx.get_import_mappings(&r.file_path, r.language).iter().any(|m| m.local_name == root);
-            if JS_HOST_GLOBALS.contains(root) && !bound {
+            // The set lookup first: the local-binding scan compiles regexes per distinct name and
+            // reads the file, and only a host global's name needs it (BUG-301).
+            if JS_HOST_GLOBALS.contains(root)
+                && !crate::name_matcher::js_scope::is_locally_bound_js_name(root, &r.file_path, ctx)
+                && !ctx.get_import_mappings(&r.file_path, r.language).iter().any(|m| m.local_name == root)
+            {
                 let host_member = match root {
                     "window" | "globalThis" | "global" => {
                         (parts.len() == 2 && (JS_WINDOW_MEMBERS.contains(parts[1]) || JS_HOST_GLOBALS.contains(parts[1])))

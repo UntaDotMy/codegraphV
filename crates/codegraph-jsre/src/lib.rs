@@ -28,7 +28,17 @@ mod pcre;
 
 use pcre::{CaptureLocations, Regex};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+
+static COMPILED: AtomicUsize = AtomicUsize::new(0);
+
+/// How many patterns [`Re::cached`] and [`Re::try_cached`] have compiled in this process (each
+/// one a cache miss). A pattern built from a name compiles once per distinct name, with JIT, so
+/// tests read this to keep such patterns off paths every reference takes.
+pub fn compiled_count() -> usize {
+    COMPILED.load(Ordering::Relaxed)
+}
 
 const JIT_STACK_BYTES: usize = 16 << 20;
 const JS_SPACE: &str = r"\t\n\x{0B}\x{0C}\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
@@ -437,6 +447,7 @@ impl Re {
             return Arc::clone(hit);
         }
         let re = Arc::new(Re::new(source, flags));
+        COMPILED.fetch_add(1, Ordering::Relaxed);
         let mut cache = CACHE.lock().unwrap();
         if cache.len() > 20_000 {
             cache.clear();
@@ -453,6 +464,7 @@ impl Re {
             return hit.clone();
         }
         let re = Re::try_new(source, flags).ok().map(Arc::new);
+        COMPILED.fetch_add(1, Ordering::Relaxed);
         let mut cache = CACHE.lock().unwrap();
         if cache.len() > 20_000 {
             cache.clear();
