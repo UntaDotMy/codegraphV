@@ -110,7 +110,8 @@ fn info_u32(code: *const pcre2_code_8, what: u32) -> u32 {
 }
 
 impl Regex {
-    pub fn new(pattern: &str, caseless: bool) -> Result<Regex, String> {
+    /// Compile `pattern`, JIT-compiled too when `jit` asks for it and PCRE2 has a JIT here.
+    pub fn new(pattern: &str, caseless: bool, jit: bool) -> Result<Regex, String> {
         let mut options = PCRE2_UTF;
         if caseless {
             options |= PCRE2_CASELESS;
@@ -121,10 +122,15 @@ impl Regex {
         if code.is_null() {
             return Err(format!("PCRE2: error compiling pattern at offset {off}: {}", error_message(err)));
         }
-        let jit = unsafe { pcre2_jit_compile_8(code, PCRE2_JIT_COMPLETE) } == 0;
+        let jit = jit && unsafe { pcre2_jit_compile_8(code, PCRE2_JIT_COMPLETE) } == 0;
         let mut re = Regex { code, jit, capture_names: Vec::new() };
         re.capture_names = re.read_capture_names();
         Ok(re)
+    }
+
+    /// Whether matching runs JIT-compiled machine code.
+    pub fn is_jit(&self) -> bool {
+        self.jit
     }
 
     /// One slot per group (0 = the whole match); `Some` for a named group.

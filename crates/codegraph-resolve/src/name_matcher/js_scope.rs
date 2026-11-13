@@ -65,11 +65,14 @@ fn param_source(n: &str) -> String {
 }
 
 pub fn local_binding_patterns(name: &str, flags: &str) -> LocalBindingPatterns {
+    // A sticky pattern is only tried at the sites the scan picks, a few per name: compiling it to
+    // machine code costs more than those matches gain (BUG-307).
+    let cached = |source: &str| if flags.contains('y') { Re::cached_interpreted(source, flags) } else { Re::cached(source, flags) };
     let n = escape_regex(name);
     LocalBindingPatterns {
-        decl: Re::cached(&format!(r"\b(?:const|let|var)\s+(?:{n}(?![\w$])|[{{\[][^;=]*?\b{n}(?![\w$])[^;=]*?[}}\]])\s*(?:=\s*([^;\n]*))?"), flags),
-        fn_: Re::cached(&format!(r"\b(?:function|class)\s+{n}(?![\w$])"), flags),
-        param: Re::cached(&param_source(&n), flags),
+        decl: cached(&format!(r"\b(?:const|let|var)\s+(?:{n}(?![\w$])|[{{\[][^;=]*?\b{n}(?![\w$])[^;=]*?[}}\]])\s*(?:=\s*([^;\n]*))?")),
+        fn_: cached(&format!(r"\b(?:function|class)\s+{n}(?![\w$])")),
+        param: cached(&param_source(&n)),
     }
 }
 
@@ -593,6 +596,22 @@ mod tests {
         assert_eq!(js_body_end(&code, 0), 5);
         let open = units("{ still open");
         assert!(js_body_open_at_end(&open, 0));
+    }
+
+    /// BUG-307: a sticky binding pattern is matched only at given positions, so it is not worth
+    /// compiling to machine code; one that searches stays JIT-compiled.
+    #[test]
+    fn sticky_binding_patterns_are_interpreted() {
+        if !Re::new("a", "").is_jit() {
+            return; // No PCRE2 JIT on this platform: nothing to choose.
+        }
+        let sticky = local_binding_patterns("bug307Sticky", "y");
+        assert!(!sticky.decl.is_jit() && !sticky.fn_.is_jit() && !sticky.param.is_jit());
+        let searching = local_binding_patterns("bug307Searching", "");
+        assert!(searching.decl.is_jit() && searching.fn_.is_jit() && searching.param.is_jit());
+        let src = "const x = 1;\nfunction f(a, bug307Sticky) {}\n";
+        assert!(sticky.param.captures_at(src, src.find("(a").unwrap()).is_some());
+        assert!(sticky.param.captures_at(src, 0).is_none());
     }
 
     /// BUG-303: the per-file spans answer exactly as v0.0.10's per-name pattern did.

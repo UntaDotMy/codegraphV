@@ -424,11 +424,15 @@ impl Re {
     }
 
     pub fn try_new(source: &str, flags: &str) -> Result<Re, String> {
+        Re::compile(source, flags, true)
+    }
+
+    fn compile(source: &str, flags: &str, jit: bool) -> Result<Re, String> {
         let multiline = flags.contains('m');
         let pcre = js_to_pcre(source, multiline, flags.contains('s'), flags.contains('u'))?;
         let sticky = flags.contains('y');
         let pattern = if sticky { format!(r"\G(?:{pcre})") } else { pcre };
-        let inner = Regex::new(&pattern, flags.contains('i'))?;
+        let inner = Regex::new(&pattern, flags.contains('i'), jit)?;
         let mut names = Vec::new();
         for (idx, name) in inner.capture_names().iter().enumerate() {
             if let Some(name) = name {
@@ -441,12 +445,23 @@ impl Re {
 
     /// A shared compiled regex for a pattern built at run time.
     pub fn cached(source: &str, flags: &str) -> Arc<Re> {
-        static CACHE: LazyLock<Mutex<HashMap<(String, String), Arc<Re>>>> = LazyLock::new(Default::default);
-        let key = (source.to_string(), flags.to_string());
+        Re::cached_as(source, flags, true)
+    }
+
+    /// Like [`Re::cached`], but not JIT-compiled: for a pattern built from a name that is only
+    /// matched at a few given positions (a sticky `y` pattern), where compiling machine code
+    /// costs more than those matches gain.
+    pub fn cached_interpreted(source: &str, flags: &str) -> Arc<Re> {
+        Re::cached_as(source, flags, false)
+    }
+
+    fn cached_as(source: &str, flags: &str, jit: bool) -> Arc<Re> {
+        static CACHE: LazyLock<Mutex<HashMap<(String, String, bool), Arc<Re>>>> = LazyLock::new(Default::default);
+        let key = (source.to_string(), flags.to_string(), jit);
         if let Some(hit) = CACHE.lock().unwrap().get(&key) {
             return Arc::clone(hit);
         }
-        let re = Arc::new(Re::new(source, flags));
+        let re = Arc::new(Re::compile(source, flags, jit).unwrap_or_else(|e| panic!("bad regex /{source}/{flags}: {e}")));
         COMPILED.fetch_add(1, Ordering::Relaxed);
         let mut cache = CACHE.lock().unwrap();
         if cache.len() > 20_000 {
@@ -454,6 +469,11 @@ impl Re {
         }
         cache.insert(key, Arc::clone(&re));
         re
+    }
+
+    /// Whether matching runs JIT-compiled machine code (where PCRE2 has a JIT for the platform).
+    pub fn is_jit(&self) -> bool {
+        self.inner.is_jit()
     }
 
     /// Like [`Re::cached`] for data-derived patterns that may be invalid.
@@ -835,6 +855,31 @@ mod tests {
     fn escape_regex_matches_the_ts_helper() {
         assert_eq!(escape_regex("a.b*c(d)[e]\\$^|+?{}"), r"a\.b\*c\(d\)\[e\]\\\$\^\|\+\?\{\}");
         assert!(Re::new(&escape_regex("$x"), "").is_match("a$x"));
+    }
+
+    /// BUG-307: an interpreted pattern matches and captures exactly like the JIT-compiled one,
+    /// and the cache keeps the two apart.
+    #[test]
+    fn interpreted_patterns_match_like_jit_ones() {
+        let source = r"\b(?:const|let|var)\s+(?:item(?![\w$])|[{\[][^;=]*?\bitem(?![\w$])[^;=]*?[}\]])\s*(?:=\s*([^;\n]*))?";
+        let text = "let a = 1;\nconst { item, other } = load(x);\nvar item = 2 ;let itemx = 3";
+        let jit_available = Re::new("a", "").is_jit();
+        for flags in ["", "y", "g"] {
+            let jit = Re::cached(source, flags);
+            let interpreted = Re::cached_interpreted(source, flags);
+            assert_eq!(jit.is_jit(), jit_available, "/{flags}");
+            assert!(!interpreted.is_jit(), "/{flags}");
+            let mut matched = 0;
+            for at in 0..=text.len() {
+                let found = |re: &Re| {
+                    re.captures_at(text, at).map(|c| (c.get(0).map(|m| (m.start(), m.end())), c.text(1).map(str::to_string)))
+                };
+                let (a, b) = (found(&jit), found(&interpreted));
+                matched += usize::from(a.is_some());
+                assert_eq!(a, b, "/{flags} at {at}");
+            }
+            assert!(matched > 0, "/{flags} never matched");
+        }
     }
 
     /// BUG-305: a match buffer carries no JIT stack of its own; the thread's one serves every
