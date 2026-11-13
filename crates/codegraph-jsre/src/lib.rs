@@ -836,6 +836,41 @@ mod tests {
         assert_eq!(escape_regex("a.b*c(d)[e]\\$^|+?{}"), r"a\.b\*c\(d\)\[e\]\\\$\^\|\+\?\{\}");
         assert!(Re::new(&escape_regex("$x"), "").is_match("a$x"));
     }
+
+    /// BUG-305: a match buffer carries no JIT stack of its own; the thread's one serves every
+    /// pattern, so the tens of thousands of patterns built from names allocate none.
+    #[test]
+    fn match_buffers_share_their_threads_jit_stack() {
+        std::thread::spawn(|| {
+            assert!(Re::new("a+", "").is_match("aaa"));
+            let before = pcre::jit_stacks_created_on_this_thread();
+            for i in 0..1000 {
+                assert!(Re::new(&format!("x{i}y+"), "").is_match(&format!("..x{i}yy")));
+            }
+            assert_eq!(pcre::jit_stacks_created_on_this_thread() - before, 0, "JIT stacks created for 1000 new patterns");
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// BUG-305: a match that backtracks deeply gets the full JIT stack on every thread, also
+    /// through a pooled match buffer last used by a thread that has since exited.
+    #[test]
+    fn deep_matches_get_a_full_jit_stack_on_every_thread() {
+        let re = Arc::new(Re::new(r"^(?:(a)|b)*c$", ""));
+        // Far more backtracking state than the 32 KB PCRE2 uses when no stack is assigned.
+        let subject = Arc::new(format!("{}c", "ab".repeat(50_000)));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (re, subject) = (Arc::clone(&re), Arc::clone(&subject));
+                std::thread::spawn(move || (0..20).all(|_| re.is_match(&subject)))
+            })
+            .collect();
+        for thread in threads {
+            assert!(thread.join().unwrap(), "a deep match failed on a worker thread");
+        }
+        assert!(re.is_match(&subject), "a buffer pooled by an exited thread failed here");
+    }
 }
 
 #[cfg(test)]

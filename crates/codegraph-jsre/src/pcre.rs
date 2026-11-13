@@ -8,8 +8,71 @@
 //! match", as the `pcre2` crate's `BADUTFOFFSET` error did.
 
 use pcre2_sys::*;
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
+
+#[cfg(test)]
+thread_local! {
+    static JIT_STACKS_CREATED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many JIT stacks this thread has created.
+#[cfg(test)]
+pub(crate) fn jit_stacks_created_on_this_thread() -> usize {
+    JIT_STACKS_CREATED.with(std::cell::Cell::get)
+}
+
+/// A JIT stack of up to `max` bytes, freed with its owner.
+struct JitStack {
+    stack: *mut pcre2_jit_stack_8,
+    max: usize,
+}
+
+impl JitStack {
+    fn new(max: usize) -> JitStack {
+        let stack = unsafe { pcre2_jit_stack_create_8(max.min(4 << 10), max, ptr::null_mut()) };
+        assert!(!stack.is_null(), "failed to allocate a PCRE2 JIT stack");
+        #[cfg(test)]
+        JIT_STACKS_CREATED.with(|n| n.set(n.get() + 1));
+        JitStack { stack, max }
+    }
+}
+
+impl Drop for JitStack {
+    fn drop(&mut self) {
+        unsafe { pcre2_jit_stack_free_8(self.stack) }
+    }
+}
+
+thread_local! {
+    /// The JIT stack every JIT match on this thread runs on. Matching never re-enters (there are
+    /// no callouts), so one stack per thread serves every pattern, where a stack per match buffer
+    /// cost an allocation for each of the tens of thousands of patterns built from names.
+    static THREAD_JIT_STACK: RefCell<Option<JitStack>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with this thread's JIT stack of at least `max` bytes, or with a stack of its own once
+/// the thread's has been torn down at thread exit.
+fn with_jit_stack<R>(max: usize, f: impl FnOnce(*mut pcre2_jit_stack_8) -> R) -> R {
+    let mut f = Some(f);
+    let on_thread_stack = THREAD_JIT_STACK.try_with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_none_or(|own| own.max < max) {
+            *slot = Some(JitStack::new(max));
+        }
+        let run = f.take().expect("runs once");
+        run(slot.as_ref().expect("just set").stack)
+    });
+    match on_thread_stack {
+        Ok(out) => out,
+        Err(_) => {
+            let own = JitStack::new(max);
+            let run = f.take().expect("runs once");
+            run(own.stack)
+        }
+    }
+}
 
 /// A compiled pattern (`PCRE2_UTF`, optionally `PCRE2_CASELESS`), JIT-compiled when available.
 pub(crate) struct Regex {
@@ -96,7 +159,8 @@ impl Regex {
         self.capture_names.len()
     }
 
-    /// A fresh match buffer; with JIT, it carries a JIT stack of up to `max_jit_stack` bytes.
+    /// A fresh match buffer; a JIT match through it runs on the matching thread's JIT stack of
+    /// up to `max_jit_stack` bytes.
     pub fn capture_locations(&self, max_jit_stack: usize) -> CaptureLocations {
         CaptureLocations::new(self, max_jit_stack)
     }
@@ -111,16 +175,27 @@ impl Regex {
         let ptr = if subject.is_empty() { EMPTY.as_ptr() } else { subject.as_ptr() };
         // SAFETY: `subject` is valid UTF-8 and `start` is a character boundary, which is
         // exactly the contract of PCRE2_NO_UTF_CHECK.
-        let rc = unsafe { pcre2_match_8(self.code, ptr, subject.len(), start, PCRE2_NO_UTF_CHECK, locs.data, locs.ctx) };
+        let run = || unsafe { pcre2_match_8(self.code, ptr, subject.len(), start, PCRE2_NO_UTF_CHECK, locs.data, locs.ctx) };
+        let rc = if self.jit {
+            with_jit_stack(locs.max_jit_stack, |stack| {
+                // SAFETY: the stack outlives this match and no other match uses it meanwhile
+                // (it is this thread's); the context is reassigned before every JIT match, so a
+                // buffer last used on another thread never reaches that thread's stack.
+                unsafe { pcre2_jit_stack_assign_8(locs.ctx, None, stack as *mut c_void) };
+                run()
+            })
+        } else {
+            run()
+        };
         rc > 0
     }
 }
 
-/// A match-data block (the ovector) plus its match context and JIT stack.
+/// A match-data block (the ovector) plus its match context.
 pub(crate) struct CaptureLocations {
     data: *mut pcre2_match_data_8,
     ctx: *mut pcre2_match_context_8,
-    stack: *mut pcre2_jit_stack_8,
+    max_jit_stack: usize,
     ovector: *const usize,
     pairs: usize,
 }
@@ -135,15 +210,9 @@ impl CaptureLocations {
             assert!(!ctx.is_null(), "failed to allocate a PCRE2 match context");
             let data = pcre2_match_data_create_from_pattern_8(re.code, ptr::null_mut());
             assert!(!data.is_null(), "failed to allocate a PCRE2 match data block");
-            let mut stack = ptr::null_mut();
-            if re.jit {
-                stack = pcre2_jit_stack_create_8(max_jit_stack.min(4 << 10), max_jit_stack, ptr::null_mut());
-                assert!(!stack.is_null(), "failed to allocate a PCRE2 JIT stack");
-                pcre2_jit_stack_assign_8(ctx, None, stack as *mut c_void);
-            }
             let ovector = pcre2_get_ovector_pointer_8(data);
             let pairs = pcre2_get_ovector_count_8(data) as usize;
-            CaptureLocations { data, ctx, stack, ovector, pairs }
+            CaptureLocations { data, ctx, max_jit_stack, ovector, pairs }
         }
     }
 
@@ -164,9 +233,6 @@ impl CaptureLocations {
 impl Drop for CaptureLocations {
     fn drop(&mut self) {
         unsafe {
-            if !self.stack.is_null() {
-                pcre2_jit_stack_free_8(self.stack);
-            }
             pcre2_match_context_free_8(self.ctx);
             pcre2_match_data_free_8(self.data);
         }
