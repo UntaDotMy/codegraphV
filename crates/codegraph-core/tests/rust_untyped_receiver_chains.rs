@@ -84,13 +84,14 @@ impl Installer {
 const RENDER: &str = r#"
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub struct Store {
     pub batch: RefCell<HashMap<String, u8>>,
     pub guarded: Mutex<HashMap<String, u8>>,
     pub keyed: RefCell<HashMap<(&'static str, usize), String>>,
     pub shared: Arc<Mutex<HashMap<String, u8>>>,
+    pub rwmap: RwLock<HashMap<String, u8>>,
 }
 
 /// The standard-library entry API behind a RefCell borrow is not Installer::entry.
@@ -112,13 +113,18 @@ pub fn keyed(store: &Store) {
 pub fn shared(store: &Store) {
     store.shared.lock().unwrap().entry("a".to_string());
 }
+
+/// The same behind an RwLock write guard.
+pub fn rw_entry(store: &Store) {
+    store.rwmap.write().unwrap().entry("a".to_string());
+}
 "#;
 
 const CONTROLS: &str = r#"
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub struct Relay;
 
@@ -164,11 +170,14 @@ impl Spare {
 pub struct Ctx {
     pub cache: RefCell<Bounded>,
     pub guarded: Mutex<Bounded>,
+    pub rw: RwLock<Bounded>,
 }
 
 pub struct Wrapped {
     pub rc: Rc<RefCell<Bounded>>,
     pub arc: Arc<Mutex<Bounded>>,
+    pub boxed: Box<RefCell<Bounded>>,
+    pub rcmap: Rc<RefCell<HashMap<String, u8>>>,
 }
 
 pub fn free_fn() -> u8 {
@@ -203,6 +212,42 @@ pub fn arc_locked(w: &Wrapped) -> u8 {
 pub fn local_guard(c: &Ctx) -> u8 {
     let g = c.cache.borrow();
     g.get()
+}
+
+pub fn boxed_pinged(w: &Wrapped) -> u8 {
+    w.boxed.borrow_mut().ping()
+}
+
+pub fn rc_map_get(w: &Wrapped) -> u8 {
+    w.rcmap.borrow().get("a")
+}
+
+pub fn read_locked(c: &Ctx) -> u8 {
+    c.rw.read().unwrap().get()
+}
+
+pub fn write_locked(c: &Ctx) -> u8 {
+    c.rw.write().unwrap().ping()
+}
+
+pub fn try_locked(c: &Ctx) -> u8 {
+    c.guarded.try_lock().unwrap().get()
+}
+
+pub fn try_read_locked(c: &Ctx) -> u8 {
+    c.rw.try_read().unwrap().get()
+}
+
+pub fn try_write_locked(c: &Ctx) -> u8 {
+    c.rw.try_write().unwrap().ping()
+}
+
+pub fn option_unwrap_or(o: Option<Bounded>) -> u8 {
+    o.unwrap_or(Bounded).get()
+}
+
+pub fn option_unwrap_or_default(o: Option<Bounded>) -> u8 {
+    o.unwrap_or_default().ping()
 }
 
 pub trait Bump {
@@ -287,6 +332,76 @@ fn project_type_through_a_local_bound_from_a_guard_still_links() {
     let fx = fixture();
     let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "local_guard");
     assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn std_map_behind_rwlock_write_is_not_a_project_method() {
+    let fx = fixture();
+    let calls = calls_of(&fx.cg, "src/render.rs", "rw_entry");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+#[test]
+fn std_map_behind_rc_refcell_borrow_is_not_a_project_method() {
+    let fx = fixture();
+    let calls = calls_of(&fx.cg, "src/ctl.rs", "rc_map_get");
+    assert!(!calls.iter().any(|c| c.contains("Spare::get") || c.contains("Bounded::get")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_box_and_refcell_borrow_mut_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "boxed_pinged");
+    assert!(calls.iter().any(|c| c.contains("Bounded::ping") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_rwlock_read_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "read_locked");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_rwlock_write_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "write_locked");
+    assert!(calls.iter().any(|c| c.contains("Bounded::ping") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_try_lock_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "try_locked");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_try_read_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "try_read_locked");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_try_write_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "try_write_locked");
+    assert!(calls.iter().any(|c| c.contains("Bounded::ping") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_held_by_option_unwrap_or_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "option_unwrap_or");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_held_by_option_unwrap_or_default_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "option_unwrap_or_default");
+    assert!(calls.iter().any(|c| c.contains("Bounded::ping") && c.ends_with("by=instance-method")), "{calls:?}");
 }
 
 #[test]
