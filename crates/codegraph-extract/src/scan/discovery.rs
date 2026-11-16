@@ -375,7 +375,7 @@ fn relative_to(from: &Path, to: &Path) -> String {
 
 /// The included source files (`codegraph.json` `include`) for a scan root, or an
 /// empty set when nothing is force-included.
-fn collect_included_files_for_root(root_dir: &Path) -> Res<IndexSet<String>> {
+pub fn collect_included_files_for_root(root_dir: &Path) -> Res<IndexSet<String>> {
     let Some(include) = load_include_matcher(root_dir) else {
         return Ok(IndexSet::new());
     };
