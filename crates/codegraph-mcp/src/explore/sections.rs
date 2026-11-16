@@ -17,7 +17,7 @@ use codegraph_graph::type_hierarchy::count_implementers;
 use codegraph_jsre::re;
 use codegraph_search::query_utils::is_test_file;
 use codegraph_types::jscompat::utf16_len;
-use codegraph_types::paths::{validate_path_within_root, ValidateOptions};
+use codegraph_types::paths::{lexical_path_within_root, validate_path_within_root, ValidateOptions};
 use codegraph_types::{Edge, EdgeKind, Node, Provenance, SearchOptions, Subgraph};
 use indexmap::{IndexMap, IndexSet};
 use sha2::{Digest, Sha256};
@@ -903,13 +903,24 @@ pub fn compute_graph_relevance(node_ids: &[String], edges: &[Edge], seed_ids: &I
 /// True when the file on disk differs from what was indexed (its line ranges are untrustworthy).
 pub fn is_file_stale_on_disk(cg: &CodeGraph, rel_path: &str, content: Option<&str>) -> bool {
     let Ok(Some(rec)) = cg.get_file(rel_path) else { return false };
-    let Some(abs) = validate_path_within_root(cg.project_root(), rel_path, ValidateOptions::default()) else {
-        return false;
-    };
-    let Some(st) = stat_of(&abs) else { return false };
+    is_record_stale_on_disk(cg, &rec, content)
+}
+
+/// [`is_file_stale_on_disk`] for a record already in hand (a caller checking many files loads
+/// them in one query).
+pub fn is_record_stale_on_disk(cg: &CodeGraph, rec: &codegraph_types::FileRecord, content: Option<&str>) -> bool {
+    let rel_path = rec.path.as_str();
+    // Size and mtime first, behind the cheap lexical check: an unchanged file (nearly every one)
+    // never pays the symlink-aware validation, which resolves real paths. callers and impact
+    // check every file they name (upstream #3248 measured that per-file cost).
+    let Some(lexical) = lexical_path_within_root(cg.project_root(), rel_path) else { return false };
+    let Some(st) = stat_of(&lexical) else { return false };
     if st.size == rec.size && st.mtime_ms.floor() == (rec.modified_at as f64).floor() {
         return false;
     }
+    let Some(abs) = validate_path_within_root(cg.project_root(), rel_path, ValidateOptions::default()) else {
+        return false;
+    };
     // A read failure is not drift: the TypeScript catch reports "not stale".
     let mut unreadable = false;
     let data = codegraph_core::file_limits::indexed_hash_input(st.size, || match content {

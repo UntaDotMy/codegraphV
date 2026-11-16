@@ -12,7 +12,7 @@ use codegraph_graph::{
 };
 use codegraph_types::*;
 use serde_json::{json, Value};
-use crate::explore::sections::is_file_stale_on_disk;
+use crate::explore::sections::{is_file_stale_on_disk, is_record_stale_on_disk};
 use std::collections::{HashMap, HashSet};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -165,7 +165,13 @@ pub fn drift_notice(cg: &CodeGraph, data: &Value) -> Option<String> {
     }
     let mut files = indexmap::IndexSet::new();
     collect(data, &mut files);
-    let drifted: Vec<&str> = files.into_iter().filter(|f| is_file_stale_on_disk(cg, f, None)).collect();
+    // One query for every record beats one per file once an answer names many files.
+    let drifted: Vec<&str> = if files.len() > 32 {
+        let records: HashMap<String, FileRecord> = cg.get_files().unwrap_or_default().into_iter().map(|r| (r.path.clone(), r)).collect();
+        files.into_iter().filter(|f| records.get(*f).is_some_and(|r| is_record_stale_on_disk(cg, r, None))).collect()
+    } else {
+        files.into_iter().filter(|f| is_file_stale_on_disk(cg, f, None)).collect()
+    };
     (!drifted.is_empty()).then(|| {
         format!(
             "⚠ Changed on disk after the last index sync: {}. Line numbers for {} are as of that sync and may be shifted; `codegraphV sync` updates the index.",
