@@ -23,7 +23,7 @@ jobs:
     steps:
       # Full history: queries.json pins the codegraph corpus to an older rev, and a
       # shallow clone does not contain it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -70,7 +70,7 @@ jobs:
                         f"{statistics.median(r['wall_ms'] for r in rows):.0f} |")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-report
           path: ${{ runner.temp }}/bench-report.json

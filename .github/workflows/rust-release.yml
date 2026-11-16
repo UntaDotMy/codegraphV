@@ -41,7 +41,7 @@ jobs:
         os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - run: rustup toolchain install stable --profile minimal && rustup default stable
@@ -60,7 +60,7 @@ jobs:
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, name: linux-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup target add ${{ matrix.target }}
@@ -87,7 +87,7 @@ jobs:
           else
             tar -czf "$dir.tar.gz" "$dir"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
@@ -100,10 +100,10 @@ jobs:
     if: startsWith(inputs.tag || github.ref_name, 'v')
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
