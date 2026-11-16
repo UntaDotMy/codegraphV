@@ -1403,13 +1403,18 @@ fn apply_unwraps(made: Option<RustWrittenType>, unwraps: u32) -> Option<RustWrit
 }
 
 /// What a method returns when a standard type is its receiver and no project declaration of
-/// that type answers. A `RefCell` hands out the value it holds (`borrow`, `borrow_mut`); a
-/// `Mutex` or `RwLock` lock hands it out inside a result (`lock`, `try_lock`, `read`, `write`,
-/// `try_read`, `try_write`); an `Option` or `Result` `unwrap_or`, `unwrap_or_else` or
-/// `unwrap_or_default` hands out the value it holds. A deref wrapper (any of `RUST_DEREF_WRAPPERS`)
-/// is passed through to the type it holds, so `Rc<RefCell<T>>` reads as `RefCell<T>`.
+/// that type answers. A receiver whose path is rooted at `std`, `core` or `alloc` is read as the
+/// standard type even when a project declares the same name, such as a `Result<T>` alias.
+/// A `RefCell` hands out the value it holds (`borrow`, `borrow_mut`); a `Mutex` or `RwLock`
+/// lock hands it out inside a result (`lock`, `try_lock`, `read`, `write`, `try_read`,
+/// `try_write`); an `Option` or `Result` `unwrap_or`, `unwrap_or_else` or `unwrap_or_default`
+/// hands out the value it holds. A deref wrapper (any of `RUST_DEREF_WRAPPERS`) is passed
+/// through to the type it holds, so `Rc<RefCell<T>>` reads as `RefCell<T>`.
 /// Not modelled: a file that imports `std::borrow::Borrow`, where `borrow` on a pointer is that
-/// trait's method. Undefined for anything else, so every other receiver keeps the lookup it had.
+/// trait's method. A bare project name that shadows a standard one (a `Result<T>` alias declared
+/// anywhere in the project) is left unread. A project module or crate named `core`, `std` or
+/// `alloc`, when written as a path root, is read as the standard one. Undefined for anything
+/// else, so every other receiver keeps the lookup it had.
 fn rust_std_accessor_result(
     read: &RustTypeRead,
     method: &str,
@@ -1419,21 +1424,27 @@ fn rust_std_accessor_result(
     let RustTypeRead::Read(body) = read else {
         return None;
     };
-    let RustReadKind::Named { name, args, .. } = &body.kind else {
+    let RustReadKind::Named { name, args, path } = &body.kind else {
         return None;
     };
     let through_deref_only = body
         .wrappers
         .iter()
         .all(|w| RUST_DEREF_WRAPPERS.contains(&w.as_str()));
-    if !through_deref_only || is_rust_project_named(name, ctx) {
+    // A path rooted at `std`, `core` or `alloc` is taken to be the standard type, so a project
+    // type of the same name (a `Result` alias, say) does not switch the standard accessor off.
+    let std_rooted = path
+        .first()
+        .is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"));
+    if !through_deref_only || (!std_rooted && is_rust_project_named(name, ctx)) {
         return None;
     }
     let held = split_rust_top_level(args, ',').into_iter().next()?;
     let text = match (name.as_str(), method) {
         ("RefCell", "borrow" | "borrow_mut") => held,
+        // Named by its std path, so a project `Result` alias cannot be read in its place.
         ("Mutex", "lock" | "try_lock") | ("RwLock", "read" | "write" | "try_read" | "try_write") => {
-            format!("Result<{held}, _>")
+            format!("std::result::Result<{held}, _>")
         }
         ("Option" | "Result", "unwrap_or" | "unwrap_or_else" | "unwrap_or_default") => held,
         _ => return None,
