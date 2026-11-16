@@ -317,6 +317,8 @@ const TURN_TAKING_WORDS: &[&str] = &[
     "yep", "ok", "okay", "sure", "please", "pls", "thanks", "thank", "you", "do", "it", "next",
     "again", "retry", "lgtm", "sounds", "good", "great", "perfect", "fine", "cool", "alright",
     "and", "now",
+    // Short approvals: "thanks, that looks good", "the plan is ready, go ahead".
+    "that", "is", "the", "looks", "plan", "ready",
 ];
 
 /// A prompt made only of turn-taking words (at most six) is a reply to the agent, not a request
@@ -325,7 +327,8 @@ const TURN_TAKING_WORDS: &[&str] = &[
 /// refund work" is a request.
 pub fn is_turn_taking_reply(prompt: &str) -> bool {
     let words: Vec<String> = prompt
-        .split(|c: char| !c.is_alphanumeric())
+        // `_` stays inside a word, so an identifier such as `is_ready` is one word, not `is` + `ready`.
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
         .collect();
@@ -416,5 +419,8 @@ mod tests {
         assert!(!is_turn_taking_reply("the frontload plan is ready"));
         assert!(!is_turn_taking_reply("fix the frontload bug"));
         assert!(!is_turn_taking_reply("looks good, check the cursor target"));
+        // An identifier is one word: `is_ready` must not split into the two glue words `is` + `ready`.
+        assert!(!is_turn_taking_reply("is_ready"));
+        assert!(!is_turn_taking_reply("do is_ready"));
     }
 }

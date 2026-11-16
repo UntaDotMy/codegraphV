@@ -74,4 +74,6 @@ fn a_turn_taking_prompt_injects_nothing_and_a_request_still_does() {
     assert!(out.contains("refund_"), "{out}");
     let out = hook(project.path(), "how does continue_loop work?");
     assert!(out.contains("continue_loop"), "{out}");
+    let out = hook(project.path(), "do is_ready");
+    assert!(out.contains("is_ready"), "{out}");
 }
