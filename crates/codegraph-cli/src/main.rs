@@ -906,7 +906,12 @@ fn run() -> Result<()> {
             let args = json!({"symbol":symbol,"file":file,"depth":depth});
             let cg = open_read_only(&project, true)?;
             if as_json {
-                print_json(&wire::impact(&cg, &args)?)?;
+                let data = wire::impact(&cg, &args)?;
+                print_json(&data)?;
+                // On stderr, so stdout stays JSON (upstream #3260).
+                if let Some(notice) = render::drift_notice(&cg, &data) {
+                    eprintln!("{notice}");
+                }
             } else {
                 println!("{}", render::impact(&cg, &args)?);
             }
@@ -1263,7 +1268,12 @@ fn symbol_command(s: Symbol, callers: bool) -> Result<()> {
     let cg = open_read_only(&s.project, true)?;
     let args = json!({"symbol":s.symbol,"file":s.file,"limit":s.limit});
     if s.json {
-        print_json(&wire::relations(&cg, &args, callers)?)?;
+        let data = wire::relations(&cg, &args, callers)?;
+        print_json(&data)?;
+        // On stderr, so stdout stays JSON (upstream #3260).
+        if let Some(notice) = render::drift_notice(&cg, &data) {
+            eprintln!("{notice}");
+        }
     } else {
         println!("{}", render::relations(&cg, &args, callers)?);
     }
