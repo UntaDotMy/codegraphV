@@ -2,7 +2,9 @@
 //! field (`store.batch.borrow_mut().entry(..)` with `batch: RefCell<HashMap<..>>`)
 //! is not a call of a project method that happens to share its name.
 //!
-//! The same holds behind a Mutex guard (`self.map.lock().unwrap_or_else(..).entry(..)`).
+//! The same holds behind a Mutex or RwLock guard (`self.map.lock().unwrap_or_else(..).entry(..)`),
+//! and with a project `Result` alias in the crate (`src/errors.rs`): the alias must not switch
+//! the standard lock accessor off.
 //!
 //! The controls must keep linking, and by their type: a project type reached through a
 //! RefCell or a Mutex borrow, a project-typed field, an extension trait implemented on a
@@ -81,6 +83,11 @@ impl Installer {
 }
 "#;
 
+const ERRORS: &str = r#"
+/// The crate's own result alias, as the installer declares it.
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+"#;
+
 const RENDER: &str = r#"
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -117,6 +124,11 @@ pub fn shared(store: &Store) {
 /// The same behind an RwLock write guard.
 pub fn rw_entry(store: &Store) {
     store.rwmap.write().unwrap().entry("a".to_string());
+}
+
+/// The same behind an RwLock write guard, through `unwrap_or_else`.
+pub fn rw_write_guarded(store: &Store) {
+    store.rwmap.write().unwrap_or_else(|e| e.into_inner()).entry("a".to_string());
 }
 "#;
 
@@ -275,7 +287,8 @@ pub fn dynamic(x: &dyn Bump) -> u8 {
 
 fn fixture() -> Fixture {
     index(&[
-        ("src/lib.rs", "pub mod installer;\npub mod render;\npub mod ctl;\n"),
+        ("src/lib.rs", "pub mod errors;\npub mod installer;\npub mod render;\npub mod ctl;\n"),
+        ("src/errors.rs", ERRORS),
         ("src/installer.rs", INSTALLER),
         ("src/render.rs", RENDER),
         ("src/ctl.rs", CONTROLS),
@@ -456,4 +469,11 @@ fn generic_and_dyn_receivers_of_a_project_trait_still_link() {
     assert!(generic.iter().any(|c| c.contains("bump")), "{generic:?}");
     let dynamic = calls_of(&fx.cg, "src/ctl.rs", "dynamic");
     assert!(dynamic.iter().any(|c| c.contains("bump")), "{dynamic:?}");
+}
+
+#[test]
+fn std_map_behind_rwlock_write_unwrap_or_else_is_not_a_project_method() {
+    let fx = fixture();
+    let calls = calls_of(&fx.cg, "src/render.rs", "rw_write_guarded");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
 }
