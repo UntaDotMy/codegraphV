@@ -21,7 +21,11 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
+      # Full history: queries.json pins the codegraph corpus to an older rev, and a
+      # shallow clone does not contain it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install ripgrep and psutil
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep python3-psutil
