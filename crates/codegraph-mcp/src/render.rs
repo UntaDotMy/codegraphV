@@ -12,7 +12,7 @@ use codegraph_graph::{
 };
 use codegraph_types::*;
 use serde_json::{json, Value};
-use crate::explore::sections::{is_file_stale_on_disk, is_record_stale_under};
+use crate::explore::sections::{build_blast_radius_section, is_file_stale_on_disk, is_record_stale_under};
 use std::collections::{HashMap, HashSet};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -1017,6 +1017,20 @@ pub fn explore(
         }
         if omitted_chains > 0 {
             out.push_str(&format!("{omitted_chains} further flow paths omitted; query their endpoints separately.\n\n"));
+        }
+    }
+    // Blast radius (upstream's always-on section): for the named symbols, who calls them and
+    // which tests cover them, so the agent knows what to update before editing. Locations only.
+    if !named.is_empty() {
+        let mut scope = graph.clone();
+        for n in named.values() {
+            scope.nodes.entry(n.id.clone()).or_insert_with(|| n.clone());
+        }
+        let leading: Vec<String> = named.values().map(|n| n.id.clone()).collect();
+        let blast = build_blast_radius_section(cg, &scope, &leading);
+        if !blast.is_empty() {
+            out.push_str(&blast);
+            out.push('\n');
         }
     }
     for anchor in &extracted.line_anchors {
