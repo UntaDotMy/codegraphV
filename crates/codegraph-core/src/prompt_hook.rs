@@ -311,6 +311,27 @@ pub fn is_agent_message(prompt: &str) -> bool {
     RE.is_match(prompt)
 }
 
+/// Words a turn-taking reply is made of: "continue", "ok, go ahead", "yes please proceed".
+const TURN_TAKING_WORDS: &[&str] = &[
+    "continue", "proceed", "resume", "go", "ahead", "on", "carry", "keep", "going", "yes", "yeah",
+    "yep", "ok", "okay", "sure", "please", "pls", "thanks", "thank", "you", "do", "it", "next",
+    "again", "retry", "lgtm", "sounds", "good", "great", "perfect", "fine", "cool", "alright",
+    "and", "now",
+];
+
+/// A prompt made only of turn-taking words (at most six) is a reply to the agent, not a request
+/// about code. The prose tier would match a rare word of it ("continue") against indexed name
+/// segments (`ident_continue`) and inject unrelated symbols. Whole-prompt only: "continue the
+/// refund work" is a request.
+pub fn is_turn_taking_reply(prompt: &str) -> bool {
+    let words: Vec<String> = prompt
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    !words.is_empty() && words.len() <= 6 && words.iter().all(|w| TURN_TAKING_WORDS.contains(&w.as_str()))
+}
+
 /// A message another local Claude Code session sends to this one arrives as a
 /// `<cross-session-message from="…">…</cross-session-message>` prompt, which UserPromptSubmit
 /// hooks also receive (#2635). Same rule as [`is_task_notification`].
