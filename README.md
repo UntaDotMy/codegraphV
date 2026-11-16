@@ -327,6 +327,7 @@ codegraphV index / sync         rebuild / reconcile        codegraphV explore "<
 codegraphV query <name>         search symbols             codegraphV node <symbol>
 codegraphV callers|callees <s>  relations                  codegraphV impact <symbol>
 codegraphV affected <files…>    files affected by a change codegraphV context "<task>"
+codegraphV implementations <t>  types implementing t       codegraphV cycles [path]   circular imports (exit 1)
 codegraphV install / uninstall  agent config               codegraphV upgrade [version] [--check]
 codegraphV serve --mcp          the MCP server agents run  codegraphV daemon [--stop]
 codegraphV migrate              move over from the original codegraph

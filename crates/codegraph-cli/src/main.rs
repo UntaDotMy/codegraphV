@@ -203,6 +203,13 @@ enum Command {
         #[arg(short, long)]
         json: bool,
     },
+    /// List circular imports between files (exits 1 when there are any).
+    Cycles {
+        #[arg(default_value = ".")]
+        path: String,
+        #[arg(short, long)]
+        json: bool,
+    },
     /// Show files affected by changes to source files.
     Affected {
         files: Vec<String>,
@@ -377,6 +384,40 @@ fn open_read_only(project: &Project, announce: bool) -> Result<CodeGraph> {
         eprintln!("{REBUILD_NOTE}");
     }
     Ok(cg)
+}
+/// Files `cycles` prints per group; `--json` lists them all.
+const CYCLE_FILES_SHOWN: usize = 12;
+
+/// The `cycles` report: one numbered group per set of files that import each other.
+fn render_cycles(cycles: &[Vec<String>], as_json: bool) -> Result<String> {
+    if as_json {
+        return Ok(format!("{}
+", serde_json::to_string_pretty(&json!({"count": cycles.len(), "cycles": cycles}))?));
+    }
+    if cycles.is_empty() {
+        return Ok("No circular imports found
+".into());
+    }
+    let files: usize = cycles.iter().map(Vec::len).sum();
+    let mut out = format!("
+Circular imports: {} group{}, {files} files
+
+", cycles.len(), if cycles.len() == 1 { "" } else { "s" });
+    for (i, group) in cycles.iter().enumerate() {
+        out += &format!("{}. {} files
+", i + 1, group.len());
+        for file in group.iter().take(CYCLE_FILES_SHOWN) {
+            out += &format!("   {file}
+");
+        }
+        if group.len() > CYCLE_FILES_SHOWN {
+            out += &format!("   ... and {} more (--json lists them all)
+", group.len() - CYCLE_FILES_SHOWN);
+        }
+        out += "
+";
+    }
+    Ok(out)
 }
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
@@ -831,6 +872,18 @@ fn run() -> Result<()> {
         }
         Command::Callers(s) => symbol_command(s, true)?,
         Command::Callees(s) => symbol_command(s, false)?,
+        Command::Cycles { path, json: as_json } => {
+            let cg = open_read_only(&Project { path: Some(path) }, true)?;
+            let cycles = cg.find_circular_dependencies()?;
+            cg.close();
+            print!("{}", render_cycles(&cycles, as_json)?);
+            // Any cycle fails, so `codegraphV cycles || exit 1` is a CI check.
+            if !cycles.is_empty() {
+                // exit() skips destructors: a piped --json must reach its reader whole.
+                io::Write::flush(&mut io::stdout())?;
+                std::process::exit(1);
+            }
+        }
         Command::Implementations {
             symbol,
             project,
