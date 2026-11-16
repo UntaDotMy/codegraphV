@@ -385,7 +385,7 @@ impl Environment {
     }
     /// Whether the project folder is the home folder, where a local setup's files are the global
     /// ones and its instructions file is the user's own `~/AGENTS.md` (upstream #3234).
-    fn project_is_home(&self) -> bool {
+    pub fn project_is_home(&self) -> bool {
         let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         canonical(&self.project) == canonical(&self.home)
     }
@@ -492,7 +492,8 @@ impl Environment {
         loc: Location,
         remove: bool,
     ) -> Result<Vec<(String, WriteResult)>> {
-        if loc == Location::Local && self.project_is_home() {
+        // Nothing to write (a refresh with nothing configured) is not refused.
+        if loc == Location::Local && !requests.is_empty() && self.project_is_home() {
             return Err(format!(
                 "{} is your home folder: a local setup there would write the global agent settings and your own ~/AGENTS.md. Run this from a project folder, or use --location global.",
                 self.project.display()

@@ -69,6 +69,10 @@ fn loc_name(loc: Location) -> &'static str {
 fn plan_agents(env: &Environment, warnings: &mut Vec<String>) -> Vec<Agent> {
     let mut agents: Vec<Agent> = Vec::new();
     for loc in [Location::Global, Location::Local] {
+        // From the home folder, the "local" files are the global ones, already planned.
+        if loc == Location::Local && env.project_is_home() {
+            continue;
+        }
         for id in TARGETS {
             if !env.supports(id, loc) {
                 continue;
@@ -77,7 +81,6 @@ fn plan_agents(env: &Environment, warnings: &mut Vec<String>) -> Vec<Agent> {
                 Ok(result) => {
                     let files: Vec<PathBuf> =
                         result.files.into_iter().filter(|f| f.action == "removed").map(|f| f.path).collect();
-                    // The project is the home folder: its "local" files are the global ones.
                     let seen = agents.iter().any(|a| a.id == *id && files.iter().all(|f| a.files.contains(f)));
                     if !files.is_empty() && !seen {
                         agents.push(Agent { id: id.to_string(), loc, files });

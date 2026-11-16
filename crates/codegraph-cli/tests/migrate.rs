@@ -356,3 +356,23 @@ fn locked_index() {
     assert!(!cwd.join(".codegraph").exists(), "{again}");
     assert!(ok(sb.cmd(&cwd).args(["files", "--json"]).output().unwrap()).contains("src/app.ts"));
 }
+
+/// Upstream #3234 refuses a local setup whose project is the home folder. Home is the default
+/// terminal folder, so every global command run from there, a local refresh with nothing to
+/// refresh, and `migrate`'s scan of both scopes must still work without a warning.
+#[test]
+fn global_commands_and_migrate_work_from_the_home_folder() {
+    let sb = Sandbox::new();
+    sb.original_agents(&[]);
+    let out = ok(sb.migrate(sb.home(), &["--dry-run"]));
+    assert!(!out.contains("could not read"), "{out}");
+    assert!(out.contains("codex (global)"), "{out}");
+    ok(sb.cmd(sb.home()).args(["install", "--yes", "--target", "codex"]).output().unwrap());
+    ok(sb.cmd(sb.home()).args(["install", "--refresh"]).output().unwrap());
+    ok(sb.cmd(sb.home()).args(["install", "--refresh", "--location", "local"]).output().unwrap());
+    assert!(!sb.home().join("AGENTS.md").exists());
+    ok(sb.cmd(sb.home()).args(["uninstall", "--yes", "--keep-cli", "--target", "codex"]).output().unwrap());
+    let refused = sb.cmd(sb.home()).args(["install", "--yes", "--target", "codex", "--location", "local"]).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("home folder"), "{}", String::from_utf8_lossy(&refused.stderr));
+}
