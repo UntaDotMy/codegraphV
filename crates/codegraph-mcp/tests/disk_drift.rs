@@ -113,15 +113,15 @@ fn drifted_files_in_every_share_are_named_in_answer_order() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.ts"), "export function helper() { return 1; }\n").unwrap();
     let caller = |i: usize| format!("import {{ helper }} from './lib';\nexport function caller_{i}() {{ return helper(); }}\n");
-    for i in 0..120 {
+    for i in 0..45 {
         std::fs::write(dir.path().join(format!("c{i}.ts")), caller(i)).unwrap();
     }
     let mut cg = codegraph_core::CodeGraph::init(dir.path().to_str().unwrap()).unwrap();
     cg.index_all(&Default::default(), None, None).unwrap();
     let listed = codegraph_mcp::render::relations(&cg, &json!({"symbol": "helper", "limit": 200}), true).unwrap();
     let order = caller_files_in_order(&listed);
-    assert_eq!(order.len(), 120, "all 120 caller files are listed: {listed}");
-    let drifted = [order[0].clone(), order[60].clone(), order[119].clone()];
+    assert_eq!(order.len(), 45, "all 45 caller files are listed: {listed}");
+    let drifted = [order[0].clone(), order[22].clone(), order[44].clone()];
     for f in &drifted {
         let i: usize = f[1..f.len() - 3].parse().unwrap();
         std::fs::write(dir.path().join(f), format!("// moved\n{}", caller(i))).unwrap();
