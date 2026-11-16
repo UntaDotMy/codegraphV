@@ -907,6 +907,22 @@ impl Ctx {
         content
     }
 
+    /// An indexed file's text for a walk over all of them, which keeps none (`scanFile`): a file
+    /// the content cache holds is read from it, any other from disk and left out of the cache.
+    pub fn scan_file(&self, file_path: &str) -> Option<Rc<str>> {
+        if let Some(c) = self.file_cache.borrow().get(&file_path.to_string()) {
+            return c;
+        }
+        let full = nodepath::join(&[&self.project_root, file_path]);
+        self.record_path(file_path, &full);
+        let meta = std::fs::metadata(&full).ok()?;
+        if !meta.is_file() || meta.len() > max_source_file_bytes() {
+            return None;
+        }
+        let bytes = std::fs::read(&full).ok()?;
+        Some(Rc::<str>::from(String::from_utf8_lossy(&bytes).as_ref()))
+    }
+
     /// `read_file(f)?.includes(needle)` for an ASCII needle, searched in the raw bytes.
     pub fn file_contains(&self, file_path: &str, needle: &str) -> bool {
         if let Some(c) = self.file_cache.borrow().get(&file_path.to_string()) {

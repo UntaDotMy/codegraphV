@@ -86,7 +86,7 @@ fn visible_from(file: &str, unit: Option<&str>, n: &Node) -> bool {
 }
 
 fn seen_from(site: &CppNameSite, ctx: &Ctx, unit: Option<&str>, n: &Node) -> bool {
-    if !visible_from(&site.file, unit, n) {
+    if !visible_from(&site.file, unit, n) || site.sees.as_ref().is_some_and(|sees| !sees(n)) {
         return false;
     }
     match cpp_function_around(n, ctx) {
@@ -109,6 +109,7 @@ pub fn match_cpp_supertype(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> 
         self_id: Some(derived.id.clone()),
         class_scope: None,
         declared: false,
+        sees: None,
     };
     let found = match cpp_class_written(&written_base(r, ctx), &site, r, ctx) {
         Tri::Value(f) => f,
@@ -137,6 +138,7 @@ pub fn match_cpp_declared_type(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedR
         self_id: None,
         class_scope: None,
         declared: true,
+        sees: None,
     };
     // A macro the file sees can rename the type (`#define sds hisds`), and a type the new
     // name doesn't reach is left as written.
@@ -193,6 +195,9 @@ pub struct CppNameSite {
     pub class_scope: Option<String>,
     /// Find what the name itself declares: an enum counts, and an alias is the answer.
     pub declared: bool,
+    /// Which declarations the file writing the name can see, when that is narrower than a
+    /// header's being anyone's.
+    pub sees: Option<Rc<dyn Fn(&Node) -> bool>>,
 }
 
 #[derive(Debug, Clone)]

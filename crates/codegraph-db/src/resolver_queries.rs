@@ -75,6 +75,40 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+    /// The `#include`s of C and C++ files the graph holds: the file writing each, and the
+    /// indexed file it names (`getCppIncludeEdges`).
+    pub fn get_cpp_include_edges(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT s.file_path, t.file_path FROM edges e
+               JOIN nodes s ON s.id = e.source JOIN nodes t ON t.id = e.target
+              WHERE e.kind = 'imports' AND s.kind = 'file' AND t.kind = 'file' AND s.language IN ('c', 'cpp')",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The failed C++ calls and function values with a qualifier outside `std` (`Txn::Put`,
+    /// `T::T/2`), calls on a variable (`shard.Clear`), and what values are constructed as, which
+    /// may go through a template parameter, of the files named
+    /// (`iterateFailedCppTypeReferences`). (`+status` walks the table: what is left unresolved
+    /// is nearly all of it, and the index on status only adds pages.)
+    pub fn get_failed_cpp_type_references(&self, files: &[String]) -> Result<Vec<UnresolvedReference>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {REF_COLS} FROM unresolved_refs
+              WHERE +status = 'failed' AND language = 'cpp' AND file_path IN (SELECT value FROM json_each(?))
+                AND (reference_kind = 'instantiates'
+                  OR (reference_kind IN ('calls', 'function_ref') AND reference_name GLOB '*::*' AND reference_name NOT GLOB 'std::*')
+                  OR (reference_kind = 'calls' AND reference_name GLOB '*.*' AND reference_name NOT GLOB '*(*'))"
+        ))?;
+        let files = serde_json::to_string(files).unwrap_or_else(|_| "[]".to_string());
+        let rows = stmt.query_map([files], ref_from_row)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        // The walk reads the whole table, which would stay in this connection's page cache
+        // through the end of synthesis, where an index peaks in memory.
+        self.conn().execute_batch("PRAGMA shrink_memory")?;
+        Ok(rows)
+    }
+
     /// Every unresolved reference of these kinds written inside any of `node_ids` — one indexed
     /// probe per chunk (`getUnresolvedReferencesFromNodes`).
     pub fn get_unresolved_references_from_nodes(

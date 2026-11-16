@@ -10,6 +10,7 @@ mod const_alias;
 pub use const_alias::alias_may_name;
 mod channels;
 mod common;
+mod cpp_template;
 mod dispatch;
 mod go;
 mod go_func_field;
@@ -104,6 +105,9 @@ fn synth_passes() -> Vec<SynthPass> {
         p("erlangBehaviourEdges", |has| has(&["erlang"]), dispatch::erlang_behaviour_dispatch_edges),
         p("laravelEdges", |has| has(&["php"]), dispatch::laravel_event_edges),
         p("cFnPtrEdges", |has| has(&["c", "cpp"]), c_fnptr::c_fn_pointer_dispatch_edges),
+        // `Txn::Put(…)` in `template <typename Txn> class Mixin` onto each class the project writes
+        // as `Txn`. After the other C++ passes: a pair one of them bridges keeps its edge.
+        p("cppTemplateEdges", |has| has(&["cpp"]), cpp_template::cpp_template_argument_edges),
         p("goframeEdges", |has| has(&["go"]), routers::goframe_route_edges),
         // `d.refreshf(ctx)` onto the functions put in that func field. After the Go framework
         // passes: a pair one of them bridges keeps its more specific edge.
@@ -302,7 +306,7 @@ pub fn has_synthesis_pattern(file_path: &str, content: &str) -> bool {
         return true;
     }
     if re!(r"\.(?:c|h|cc|cpp|cxx|hpp|hh|hxx|cppm|ipp|inl|tcc|def|inc|tbl)$", "i").is_match(file_path)
-        && re!(r"\b(?:struct|union|typedef|virtual|override)\b|#\s*(?:include|define|if)|=|->|\[").is_match(content)
+        && re!(r"\b(?:struct|union|typedef|virtual|override)\b|#\s*(?:include|define|if)|=|->|\[|<").is_match(content)
     {
         return true;
     }

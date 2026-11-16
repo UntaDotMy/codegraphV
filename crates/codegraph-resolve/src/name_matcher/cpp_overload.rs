@@ -275,6 +275,14 @@ fn cpp_names_object(expr: &str, ty: &str) -> Option<bool> {
     Some(re!(r"&\s*$").is_match(ty))
 }
 
+/// The type `cppArgumentType` reads for an argument, when it reads one as written (not a literal).
+pub(crate) fn cpp_argument_type_text(arg: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
+    match cpp_argument_type(arg, r, ctx)? {
+        ArgType::Type { text, .. } => Some(text),
+        _ => None,
+    }
+}
+
 /// `cppArgumentType`.
 fn cpp_argument_type(arg: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<ArgType> {
     let text = js_trim(arg);
@@ -753,7 +761,7 @@ pub fn cpp_specialization_arguments(n: &Node, ctx: &Ctx) -> Option<Rc<Vec<String
 }
 
 /// `cppCallTemplateArguments`.
-fn cpp_call_template_arguments(r: &UnresolvedRef, ctx: &Ctx) -> Option<Vec<String>> {
+pub(crate) fn cpp_call_template_arguments(r: &UnresolvedRef, ctx: &Ctx) -> Option<Vec<String>> {
     let text = joined_lines(ctx, &r.file_path, (r.line as usize).saturating_sub(1), r.line as usize + 3);
     let name = re!(r"::|\.|->").split(&r.reference_name).into_iter().last().unwrap_or("").to_string();
     cpp_template_arguments_after(&text, &name, utf16_byte_index(&text, r.column as usize))

@@ -40,6 +40,7 @@ pub fn cpp_call_site(caller: &Node, r: &UnresolvedRef, ctx: &Ctx) -> CppNameSite
         self_id: None,
         class_scope: cpp_test_fixture(caller, r, ctx),
         declared: false,
+        sees: None,
     }
 }
 
