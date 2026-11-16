@@ -9,26 +9,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The Windows shell that starts the server in this console and exits at once.
+#[cfg(windows)]
+fn launcher(exe: &str) -> Command {
+    let mut c = Command::new("cmd");
+    // `start /b` runs it in this console with the inherited handles; cmd then exits. A raw
+    // argument: cmd does not understand the `\"` escapes `arg` would add.
+    std::os::windows::process::CommandExt::raw_arg(&mut c, format!("/c start \"\" /b \"{exe}\" serve --mcp"));
+    c
+}
+
+/// The POSIX shell that starts the server as a background job and exits at once.
+#[cfg(not(windows))]
+fn launcher(exe: &str) -> Command {
+    let mut c = Command::new("sh");
+    // A background job's stdin is /dev/null unless redirected from a saved copy. The shell
+    // lives on briefly so the server starts as its child: POSIX signals parent death by
+    // reparenting, so a server that starts already reparented has no change to notice (as
+    // in the TypeScript watchdog, which also must not treat pid 1 itself as orphaning).
+    c.arg("-c").arg(format!("exec 3<&0; '{exe}' serve --mcp <&3 & sleep 2"));
+    c
+}
+
 /// Start `codegraphV serve --mcp` through a shell that exits immediately, so the server's parent
 /// dies while this test still holds both of its pipes.
 fn orphaned_server(home: &Path, project: &Path, daemon: bool) -> (std::process::ChildStdin, mpsc::Receiver<Option<String>>) {
     let exe = env!("CARGO_BIN_EXE_codegraphV");
-    let mut shell = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        // `start /b` runs it in this console with the inherited handles; cmd then exits. A raw
-        // argument: cmd does not understand the `\"` escapes `arg` would add.
-        #[cfg(windows)]
-        std::os::windows::process::CommandExt::raw_arg(&mut c, format!("/c start \"\" /b \"{exe}\" serve --mcp"));
-        c
-    } else {
-        let mut c = Command::new("sh");
-        // A background job's stdin is /dev/null unless redirected from a saved copy. The shell
-        // lives on briefly so the server starts as its child: POSIX signals parent death by
-        // reparenting, so a server that starts already reparented has no change to notice (as
-        // in the TypeScript watchdog, which also must not treat pid 1 itself as orphaning).
-        c.arg("-c").arg(format!("exec 3<&0; '{exe}' serve --mcp <&3 & sleep 2"));
-        c
-    };
+    let mut shell = launcher(exe);
     shell
         .current_dir(project)
         .env("HOME", home)
