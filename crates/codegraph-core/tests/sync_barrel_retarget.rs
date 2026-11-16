@@ -91,7 +91,7 @@ fn inherited_alias_edits_survive_reopening_and_go_module_edits_rebind() {
         ("tsconfig.json", r#"{"extends":"./base.json"}"#),
         ("base.json", r#"{"compilerOptions":{"baseUrl":".","paths":{"@impl":["./a"]}}}"#),
     ] { fs::write(dir.path().join(file), source).unwrap(); }
-    let mut cg = CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
+    let cg = CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
     cg.close();
     fs::write(dir.path().join("base.json"), r#"{"compilerOptions":{"baseUrl":".","paths":{"@impl":["./b"]}}}"#).unwrap();
     let mut cg = CodeGraph::open(dir.path().to_str().unwrap(), Default::default()).unwrap();
