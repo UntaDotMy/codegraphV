@@ -82,6 +82,30 @@ fn an_explicit_range_of_a_drifted_file_is_served_as_current_lines() {
     assert!(out.contains("   604\tfn plain_helper() -> u32 { 7 }"), "{out}");
 }
 
+/// An answer naming many files checks them from one records query: a drifted file among 40
+/// callers is still named.
+#[test]
+fn a_drifted_file_among_many_is_still_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.ts"), "export function helper() { return 1; }\n").unwrap();
+    for i in 0..40 {
+        let source = format!("import {{ helper }} from './lib';\nexport function caller_{i}() {{ return helper(); }}\n");
+        std::fs::write(dir.path().join(format!("c{i}.ts")), source).unwrap();
+    }
+    let mut cg = codegraph_core::CodeGraph::init(dir.path().to_str().unwrap()).unwrap();
+    cg.index_all(&Default::default(), None, None).unwrap();
+    let before = codegraph_mcp::render::relations(&cg, &json!({"symbol": "helper", "limit": 100}), true).unwrap();
+    assert!(before.contains("caller_39"), "all 40 callers are listed: {before}");
+    assert!(!before.contains("⚠"), "{before}");
+    std::fs::write(dir.path().join("c17.ts"), "// moved\nimport { helper } from './lib';\nexport function caller_17() { return helper(); }\n").unwrap();
+    for out in [
+        codegraph_mcp::render::relations(&cg, &json!({"symbol": "helper", "limit": 100}), true).unwrap(),
+        codegraph_mcp::render::impact(&cg, &json!({"symbol": "helper"})).unwrap(),
+    ] {
+        assert!(out.contains("⚠ Changed on disk after the last index sync: c17.ts."), "{out}");
+    }
+}
+
 /// #3260: callers, callees and impact print indexed line numbers; a drifted file in the answer
 /// is named so the reader knows they may be shifted.
 #[test]
