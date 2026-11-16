@@ -14,6 +14,10 @@ pub(crate) const MAX_BUFFER: usize = 50 * 1024 * 1024;
 fn spawn_git(cwd: &Path, args: &[&str]) -> std::io::Result<std::process::Child> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // codegraphV only reads the repository. Without this, `git status` takes `index.lock` to
+    // write back refreshed stat info and holds it through its untracked scan, so the user's own
+    // `git add` or checkout fails meanwhile (upstream #3295).
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -159,5 +163,31 @@ mod tests {
         assert!(run_git(&cwd, &["--version"], Duration::from_secs(10), MAX_BUFFER).unwrap().starts_with("git version"));
         assert!(run_git(&cwd, &["definitely-not-a-command"], Duration::from_secs(10), MAX_BUFFER).is_err());
         assert!(run_git(&cwd, &["--version"], Duration::from_secs(10), 3).is_err());
+    }
+
+    /// Upstream #3295: `git status` with optional locks takes `index.lock` to write back
+    /// refreshed stat info and holds it through the untracked scan, so the user's own `git add`
+    /// or checkout fails meanwhile. codegraphV only reads, so its status never writes the index.
+    #[test]
+    fn status_never_rewrites_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false"]).args(args).current_dir(repo).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "a"]);
+        // Same content, other mtime: the index's stat for a.txt is stale, so a status that may
+        // take optional locks refreshes and writes it back.
+        let file = std::fs::OpenOptions::new().write(true).open(repo.join("a.txt")).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        drop(file);
+        let index = repo.join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        run_git(repo, &["status", "--porcelain", "--no-renames", "-z", "-uall"], Duration::from_secs(10), MAX_BUFFER).unwrap();
+        assert_eq!(std::fs::read(&index).unwrap(), before, "git status rewrote .git/index");
     }
 }

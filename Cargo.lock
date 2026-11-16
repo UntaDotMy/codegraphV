@@ -335,6 +335,7 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2",
+ "tempfile",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
