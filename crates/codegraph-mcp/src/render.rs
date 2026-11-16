@@ -12,7 +12,7 @@ use codegraph_graph::{
 };
 use codegraph_types::*;
 use serde_json::{json, Value};
-use crate::explore::sections::{is_file_stale_on_disk, is_record_stale_on_disk};
+use crate::explore::sections::{is_file_stale_on_disk, is_record_stale_under};
 use std::collections::{HashMap, HashSet};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -165,10 +165,22 @@ pub fn drift_notice(cg: &CodeGraph, data: &Value) -> Option<String> {
     }
     let mut files = indexmap::IndexSet::new();
     collect(data, &mut files);
-    // One query for every record beats one per file once an answer names many files.
+    // One query for every record beats one per file once an answer names many files, and the
+    // stats (nearly all the cost, and slow on Windows) run on every core.
     let drifted: Vec<&str> = if files.len() > 32 {
         let records: HashMap<String, FileRecord> = cg.get_files().unwrap_or_default().into_iter().map(|r| (r.path.clone(), r)).collect();
-        files.into_iter().filter(|f| records.get(*f).is_some_and(|r| is_record_stale_on_disk(cg, r, None))).collect()
+        let named: Vec<(&str, Option<&FileRecord>)> = files.into_iter().map(|f| (f, records.get(f))).collect();
+        let root = cg.project_root();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(named.len());
+        let chunk = named.len().div_ceil(threads);
+        let stale: Vec<bool> = std::thread::scope(|scope| {
+            let workers: Vec<_> = named
+                .chunks(chunk)
+                .map(|part| scope.spawn(move || part.iter().map(|(_, r)| r.is_some_and(|r| is_record_stale_under(root, r, None))).collect::<Vec<bool>>()))
+                .collect();
+            workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|p| std::panic::resume_unwind(p))).collect()
+        });
+        named.iter().zip(stale).filter(|(_, s)| *s).map(|((f, _), _)| *f).collect()
     } else {
         files.into_iter().filter(|f| is_file_stale_on_disk(cg, f, None)).collect()
     };

@@ -909,16 +909,22 @@ pub fn is_file_stale_on_disk(cg: &CodeGraph, rel_path: &str, content: Option<&st
 /// [`is_file_stale_on_disk`] for a record already in hand (a caller checking many files loads
 /// them in one query).
 pub fn is_record_stale_on_disk(cg: &CodeGraph, rec: &codegraph_types::FileRecord, content: Option<&str>) -> bool {
+    is_record_stale_under(cg.project_root(), rec, content)
+}
+
+/// [`is_record_stale_on_disk`] given only the project root, so that many files can be checked on
+/// several threads at once.
+pub fn is_record_stale_under(root: &str, rec: &codegraph_types::FileRecord, content: Option<&str>) -> bool {
     let rel_path = rec.path.as_str();
     // Size and mtime first, behind the cheap lexical check: an unchanged file (nearly every one)
     // never pays the symlink-aware validation, which resolves real paths. callers and impact
     // check every file they name (upstream #3248 measured that per-file cost).
-    let Some(lexical) = lexical_path_within_root(cg.project_root(), rel_path) else { return false };
+    let Some(lexical) = lexical_path_within_root(root, rel_path) else { return false };
     let Some(st) = stat_of(&lexical) else { return false };
     if st.size == rec.size && st.mtime_ms.floor() == (rec.modified_at as f64).floor() {
         return false;
     }
-    let Some(abs) = validate_path_within_root(cg.project_root(), rel_path, ValidateOptions::default()) else {
+    let Some(abs) = validate_path_within_root(root, rel_path, ValidateOptions::default()) else {
         return false;
     };
     // A read failure is not drift: the TypeScript catch reports "not stale".
