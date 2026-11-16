@@ -77,7 +77,7 @@ fn a_file_that_shrinks_under_the_limit_links_its_importers() {
 #[test]
 fn a_file_stored_after_a_parse_failure_relinks_its_importers() {
     let dir = setup("0.001");
-    let mut cg = CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
+    let cg = CodeGraph::init_and_index(dir.path().to_str().unwrap(), None).unwrap();
     // Replace the oversize record with the other node-less shape: a recorded parse failure.
     let mut record = cg.store().get_file_by_path("big.ts").unwrap().unwrap();
     cg.store().delete_file("big.ts").unwrap();

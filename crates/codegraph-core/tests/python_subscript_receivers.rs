@@ -1,7 +1,7 @@
 //! A Python call on an element of a collection links to the project's one method of the name,
 //! in a module the file has in hand (upstream 9191ab66). The collection's name says nothing of
 //! the element's class, so no word scoring and no attribute after the subscript.
-use codegraph_core::{CodeGraph, IndexOptions};
+use codegraph_core::CodeGraph;
 use codegraph_types::{EdgeKind, NodeKind};
 use std::fs;
 use std::path::Path;
