@@ -1365,6 +1365,11 @@ fn read_rust_method_return(
         return None;
     }?;
     let read = rust_read_type(&written, r, ctx);
+    if awaits == 0 {
+        if let Some(held) = rust_std_accessor_result(&read, method, &written, ctx) {
+            return apply_unwraps(Some(held), unwraps);
+        }
+    }
     let result = match super::calls::rust_typed_method_call(&read, method, r, ctx, 0) {
         super::calls::CallRes::Hit(h) => h,
         _ => return None,
@@ -1386,10 +1391,47 @@ fn read_rust_method_return(
     if awaits == 1 && !is_async {
         made = made.and_then(|m| rust_future_output(&m));
     }
+    apply_unwraps(made, unwraps)
+}
+
+/// The `unwraps` a method result takes: through the `Option`/`Result` it holds, that many times.
+fn apply_unwraps(made: Option<RustWrittenType>, unwraps: u32) -> Option<RustWrittenType> {
     match made {
         Some(m) if unwraps > 0 => rust_unwrapped(&m, unwraps),
         other => other,
     }
+}
+
+/// What a method returns when a standard type is its receiver and no project declaration of
+/// that type answers. A `RefCell` hands out the value it holds (`borrow`, `borrow_mut`); a
+/// `Mutex` or `RwLock` lock hands it out inside a `LockResult`; an `Option` or `Result` unwrap
+/// method hands out the value it holds. Undefined for anything else, so every other receiver
+/// keeps the lookup it had.
+fn rust_std_accessor_result(
+    read: &RustTypeRead,
+    method: &str,
+    written: &RustWrittenType,
+    ctx: &Ctx,
+) -> Option<RustWrittenType> {
+    let RustTypeRead::Read(body) = read else {
+        return None;
+    };
+    let RustReadKind::Named { name, args, .. } = &body.kind else {
+        return None;
+    };
+    if !body.wrappers.is_empty() || is_rust_project_named(name, ctx) {
+        return None;
+    }
+    let held = split_rust_top_level(args, ',').into_iter().next()?;
+    let text = match (name.as_str(), method) {
+        ("RefCell", "borrow" | "borrow_mut") => held,
+        ("Mutex", "lock" | "try_lock") | ("RwLock", "read" | "write" | "try_read" | "try_write") => {
+            format!("Result<{held}, _>")
+        }
+        ("Option" | "Result", "unwrap_or" | "unwrap_or_else" | "unwrap_or_default") => held,
+        _ => return None,
+    };
+    Some(RustWrittenType { text, ..written.clone() })
 }
 
 fn identifier_names(text: &str) -> Vec<String> {
