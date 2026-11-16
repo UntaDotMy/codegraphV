@@ -32,7 +32,7 @@ jobs:
 
       - name: Fetch the released Linux binary and verify its checksum
         run: |
-          base=https://github.com/UntaDotMy/codegraphV/releases/download/v0.0.12
+          base=https://github.com/${{ github.repository }}/releases/download/v0.0.12
           asset=codegraphV-v0.0.12-linux-x64.tar.gz
           cd "$RUNNER_TEMP"
           curl -fsSL -o "$asset" "$base/$asset"
