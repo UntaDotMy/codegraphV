@@ -36,7 +36,11 @@ fn a_turn_taking_prompt_injects_nothing_and_a_request_still_does() {
         "pub fn ident_continue(c: char) -> bool { c.is_alphanumeric() }\n\
          pub fn continue_loop(n: u32) -> u32 { n + 1 }\n\
          pub fn refund_order(id: u32) -> u32 { id }\n\
-         pub fn refund_total(id: u32) -> u32 { refund_order(id) }\n",
+         pub fn refund_total(id: u32) -> u32 { refund_order(id) }\n\
+         pub fn looks_like_cpp(text: &str) -> bool { text.is_empty() }\n\
+         pub fn looks_like_objc(text: &str) -> bool { text.is_empty() }\n\
+         pub fn is_ready(flag: bool) -> bool { flag }\n\
+         pub fn ready_flag(flag: bool) -> bool { flag }\n",
     )
     .unwrap();
     let init = Command::new(env!("CARGO_BIN_EXE_codegraphV"))
@@ -48,7 +52,16 @@ fn a_turn_taking_prompt_injects_nothing_and_a_request_still_does() {
         .unwrap();
     assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
 
-    for prompt in ["continue", "Continue.", "ok, continue please", "yes go ahead", "  proceed!\n", "keep going"] {
+    for prompt in [
+        "continue",
+        "Continue.",
+        "ok, continue please",
+        "yes go ahead",
+        "  proceed!\n",
+        "keep going",
+        "thanks, that looks good",
+        "the plan is ready, go ahead",
+    ] {
         let out = hook(project.path(), prompt);
         assert!(out.is_empty(), "{prompt:?} injected: {out}");
     }
@@ -61,4 +74,6 @@ fn a_turn_taking_prompt_injects_nothing_and_a_request_still_does() {
     assert!(out.contains("refund_"), "{out}");
     let out = hook(project.path(), "how does continue_loop work?");
     assert!(out.contains("continue_loop"), "{out}");
+    let out = hook(project.path(), "do is_ready");
+    assert!(out.contains("is_ready"), "{out}");
 }
