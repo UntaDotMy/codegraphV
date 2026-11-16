@@ -687,10 +687,11 @@ pub fn build_blast_radius_section(cg: &CodeGraph, subgraph: &Subgraph, leading_i
         return String::new();
     }
     let mut entries: Vec<String> = Vec::new();
-    // Each caller file's lines, read at most once for the whole section.
-    let mut sources = HashMap::new();
+    // The named symbols' caller walks overlap: each node's callers and each caller file's lines
+    // are read at most once for the whole section.
+    let mut reads = BlastReads::default();
     for root in roots {
-        let callers = cg.get_callers(&root.id, 1).unwrap_or_default();
+        let callers = reads.callers(cg, &root.id);
         let mut seen: HashSet<&str> = HashSet::new();
         let mut uniq: Vec<&Node> = Vec::new();
         for c in &callers {
@@ -703,7 +704,7 @@ pub fn build_blast_radius_section(cg: &CodeGraph, subgraph: &Subgraph, leading_i
         }
         // Per caller, not per file: an inline Rust test module shares its file with production
         // code, and both are listed.
-        let (tests_of, prod_of): (Vec<&Node>, Vec<&Node>) = uniq.iter().partition(|n| is_test_caller(cg, n, &mut sources));
+        let (tests_of, prod_of): (Vec<&Node>, Vec<&Node>) = uniq.iter().partition(|n| is_test_caller(cg, n, &mut reads.sources));
         let test_files: Vec<String> = tests_of.iter().map(|n| rel(&n.file_path)).collect::<IndexSet<_>>().into_iter().collect();
         let non_test: Vec<String> = prod_of.iter().map(|n| rel(&n.file_path)).collect::<IndexSet<_>>().into_iter().collect();
         let test_files: Vec<&String> = test_files.iter().collect();
@@ -716,7 +717,7 @@ pub fn build_blast_radius_section(cg: &CodeGraph, subgraph: &Subgraph, leading_i
             let more = if test_files.len() > FILE_CAP { format!(" +{}", test_files.len() - FILE_CAP) } else { String::new() };
             format!("; tests: {listed}{more}")
         } else {
-            indirect_test_note(cg, &uniq, &mut sources)
+            indirect_test_note(cg, &uniq, &mut reads)
         };
         entries.push(format!(
             "- `{}` ({}:{}) — {} caller{}{where_}{tests}",
@@ -813,8 +814,21 @@ fn is_test_caller(cg: &CodeGraph, n: &Node, sources: &mut HashMap<String, Option
         .any(|l| attr.is_match(l))
 }
 
+/// What the blast-radius section has read: each node's depth-1 callers and each file's lines.
+#[derive(Default)]
+pub struct BlastReads {
+    sources: HashMap<String, Option<Vec<String>>>,
+    callers: HashMap<String, Vec<codegraph_types::Ref>>,
+}
+
+impl BlastReads {
+    fn callers(&mut self, cg: &CodeGraph, id: &str) -> Vec<codegraph_types::Ref> {
+        self.callers.entry(id.to_string()).or_insert_with(|| cg.get_callers(id, 1).unwrap_or_default()).clone()
+    }
+}
+
 /// Test coverage up to two more caller hops for an entry no test calls directly.
-pub fn indirect_test_note(cg: &CodeGraph, direct_callers: &[&Node], sources: &mut HashMap<String, Option<Vec<String>>>) -> String {
+pub fn indirect_test_note(cg: &CodeGraph, direct_callers: &[&Node], reads: &mut BlastReads) -> String {
     const MAX_HOPS: u32 = 3;
     const FILE_CAP: usize = 2;
     let mut budget: i64 = 64;
@@ -830,14 +844,13 @@ pub fn indirect_test_note(cg: &CodeGraph, direct_callers: &[&Node], sources: &mu
             if left <= 0 {
                 break;
             }
-            let Ok(callers) = cg.get_callers(&node.id, 1) else { continue };
-            for c in callers {
+            for c in reads.callers(cg, &node.id) {
                 let n = c.node;
                 if !visited.insert(n.id.clone()) {
                     continue;
                 }
                 let f = n.file_path.replace('\\', "/");
-                if is_test_caller(cg, &n, sources) {
+                if is_test_caller(cg, &n, &mut reads.sources) {
                     found.insert(f);
                 } else {
                     next.push(n);
