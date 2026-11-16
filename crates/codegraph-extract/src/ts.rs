@@ -90,7 +90,7 @@ impl Tree {
 /// is returned is the one the walker uses, and `stack::note_tree_error` is told
 /// whether *it* has errors.
 pub fn parse(grammar: &Language, language: &str, source: &str) -> Result<Tree, String> {
-    with_parser(grammar, language, |parser| parse_with(parser, source))?
+    with_parser(grammar, language, |parser| parse_within(parser, source, codegraph_types::limits::parse_budget(source.len())))?
 }
 
 thread_local! {
@@ -119,8 +119,23 @@ pub fn with_parser<R>(grammar: &Language, language: &str, f: impl FnOnce(&mut tr
     result
 }
 
-fn parse_with(parser: &mut tree_sitter::Parser, source: &str) -> Result<Tree, String> {
-    let utf8 = parser.parse(source, None).ok_or_else(|| "parser returned null tree".to_string())?;
+/// Parse within `budget` (none: no limit), or fail when it runs out: tree-sitter's error recovery
+/// can loop forever on some malformed input (upstream #3274), and one file must not hold up the
+/// index. The UTF-16 retry shares the same deadline.
+fn parse_within(parser: &mut tree_sitter::Parser, source: &str, budget: Option<std::time::Duration>) -> Result<Tree, String> {
+    let deadline = budget.map(|b| std::time::Instant::now() + b);
+    let mut out_of_time = |_: &tree_sitter::ParseState| deadline.is_some_and(|d| std::time::Instant::now() >= d);
+    let gave_up = || format!("parse gave up after {} ms (raise {})", budget.unwrap_or_default().as_millis(), codegraph_types::limits::PARSE_TIMEOUT_MS_ENV);
+    let bytes = source.as_bytes();
+    let utf8 = parser.parse_with_options(
+        &mut |i, _| bytes.get(i..).unwrap_or_default(),
+        None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut out_of_time)),
+    );
+    let Some(utf8) = utf8 else {
+        parser.reset();
+        return Err(if deadline.is_some_and(|d| std::time::Instant::now() >= d) { gave_up() } else { "parser returned null tree".to_string() });
+    };
     if !utf8.root_node().has_error() {
         return Ok(Tree { inner: utf8, offsets: Offsets::Utf8 });
     }
@@ -130,9 +145,17 @@ fn parse_with(parser: &mut tree_sitter::Parser, source: &str) -> Result<Tree, St
     }
     let units: Vec<u16> = source.encode_utf16().collect();
     parser.reset();
-    let (inner, offsets) = match parser.parse_utf16_le(&units, None) {
+    let utf16 = parser.parse_utf16_le_with_options(
+        &mut |i, _| units.get(i..).unwrap_or_default(),
+        None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut out_of_time)),
+    );
+    let (inner, offsets) = match utf16 {
         Some(utf16) => (utf16, Offsets::for_utf16(source)),
-        None => (utf8, Offsets::Utf8),
+        None => {
+            parser.reset();
+            (utf8, Offsets::Utf8)
+        }
     };
     if inner.root_node().has_error() {
         crate::stack::note_tree_error();
@@ -279,6 +302,29 @@ mod tests {
             .filter(|n| n.kind() == "function_definition")
             .map(|n| &src[n.byte_range()])
             .collect()
+    }
+
+    /// Upstream #3274: tree-sitter's error recovery never finishes on this half-typed TSX, so the
+    /// parse gives up at its budget instead of holding the index up forever.
+    #[test]
+    fn a_parse_that_never_ends_gives_up_at_its_budget() {
+        let tsx = crate::langs::grammar_for("tsx").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::stack::with_error_tolerance(true, || {
+                with_parser(&tsx, "tsx", |p| parse_within(p, "<a {{b:>c:d(e f)", Some(std::time::Duration::from_millis(500))))
+            });
+            let _ = tx.send((result.map(|r| r.is_err()), started.elapsed()));
+        });
+        let (gave_up, took) = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the parse never returned");
+        assert_eq!(gave_up, Ok(true));
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        // A file that parses in time still parses.
+        let ok = crate::stack::with_error_tolerance(true, || {
+            with_parser(&grammar(), "c", |p| parse_within(p, "int f(void) { return 1; }\n", Some(std::time::Duration::from_millis(500))))
+        });
+        assert!(ok.unwrap().is_ok());
     }
 
     #[test]

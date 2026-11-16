@@ -366,6 +366,7 @@ come with character pages and a source hash that detects edits between pages.
 | `CODEGRAPHV_DIR` | the per-project folder name (default `.codegraphV`) |
 | `CODEGRAPHV_PARSE_WORKERS` / `CODEGRAPHV_RESOLVE_WORKERS` | thread counts for indexing (default: parsing uses every hardware thread, resolving one per physical core) |
 | `CODEGRAPHV_MAX_FILE_MB` | largest source file indexed, in MB (default 10, `0` = no limit) |
+| `CODEGRAPHV_PARSE_TIMEOUT_MS` | how long one file may parse before it is recorded as a parse error, in ms (default 10000, plus as much again per MiB of source; `0` = no limit) |
 | `CODEGRAPHV_RESOLVER_CACHE_MB` | file text each resolve worker may cache, in MB (default 8) |
 | `CODEGRAPHV_INSTALL_DIR`, `CODEGRAPHV_VERSION` | install-script / upgrade location and version |
 
