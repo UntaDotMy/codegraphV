@@ -325,7 +325,6 @@ version = "0.0.12"
 dependencies = [
  "cc",
  "codegraph-jsre",
- "codegraph-search",
  "codegraph-text",
  "codegraph-types",
  "indexmap",
@@ -489,7 +488,6 @@ dependencies = [
  "codegraph-core",
  "codegraph-db",
  "codegraph-graph",
- "codegraph-mcp",
  "codegraph-search",
  "codegraph-types",
  "indexmap",
