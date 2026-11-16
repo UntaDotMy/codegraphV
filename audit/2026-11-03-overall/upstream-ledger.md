@@ -2,7 +2,7 @@
 
 Inherited classifications from the v0.0.9 audit; live HEAD rechecked in this audit. Pending means not claimed ported, not a reproduced native bug.
 
-Reviewed through `329dd12f7adcf5c6d5e68acb217496ac0123f7ee` (`01a4931` pending); previous port `8bd55fa7`.
+Reviewed through `01a4931` (C++ template arguments, #3196: ported in 96eb9e6d; its edges match upstream exactly on fmt 11.0.2 (235) and abseil 20240722.0 (1,100)); previous port `8bd55fa7`.
 
 ## Native implementation evidence added in this pass
 
