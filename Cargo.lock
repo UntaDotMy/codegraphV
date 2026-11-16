@@ -250,6 +250,7 @@ dependencies = [
  "codegraph-types",
  "codegraph-ui-server",
  "ctrlc",
+ "globset",
  "indexmap",
  "mimalloc",
  "regex",

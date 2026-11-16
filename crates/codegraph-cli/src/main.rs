@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+mod guard_hook;
 mod implementations;
 mod migrate;
 mod prompt_hook;
@@ -312,6 +313,10 @@ enum Command {
     /// {prompt,cwd} JSON on stdin).
     #[command(hide = true)]
     PromptHook,
+    /// Claude PreToolUse hook: deny searches for indexed symbols until codegraphV was asked
+    /// (reads the hook event JSON on stdin).
+    #[command(hide = true)]
+    GuardHook,
     /// Update codegraphV to the latest release, or to the version given.
     Upgrade {
         /// Release to install, for example v0.0.2 (default: the latest)
@@ -531,6 +536,7 @@ fn run() -> Result<()> {
             }
         }
         Command::PromptHook => prompt_hook::run(),
+        Command::GuardHook => guard_hook::run(),
         Command::Upgrade { version, check, force } => {
             let code = upgrade::run(version, check, force);
             if code != 0 {
