@@ -943,7 +943,7 @@ fn member_at_path(
 fn head_of(name: &str, cls: Option<&NodeRef>, r: &UnresolvedRef, ctx: &Ctx) -> Option<Head> {
     if let Some(type_name) = name.strip_prefix(':') {
         return Some(Head {
-            ty: class_named(type_name, &r.file_path, ctx, 0),
+            ty: class_named(type_name, &r.file_path, ctx),
             class_ref: false,
             unit_file: None,
         });
@@ -1118,7 +1118,6 @@ fn class_by_qualified_name(qualified_name: &str, file_path: &str, ctx: &Ctx) -> 
             qualified_name.rsplit("::").next().unwrap_or(qualified_name),
             file_path,
             ctx,
-            0,
         )
     });
     put(&m.class_by_qn, key, cls.clone());
@@ -1187,7 +1186,7 @@ fn ancestors_of(cls: &NodeRef, ctx: &Ctx) -> Rc<Vec<NodeRef>> {
             }
             order.push(Rc::clone(c));
             for name in declared_supertypes(c, ctx).iter() {
-                if let Some(sup) = class_named(name, &c.file_path, ctx, 0) {
+                if let Some(sup) = class_named(name, &c.file_path, ctx) {
                     next.push(sup);
                 }
             }
@@ -1546,13 +1545,58 @@ fn unit_file_named(lower: &str, from_file: &str, ctx: &Ctx) -> Option<String> {
 }
 
 /// A class (or record or interface) a type name names, seen from `from_file`.
-fn class_named(type_name: &str, from_file: &str, ctx: &Ctx, depth: u32) -> Option<NodeRef> {
+fn class_named(type_name: &str, from_file: &str, ctx: &Ctx) -> Option<NodeRef> {
     let simple = js_lower(type_name.rsplit('.').next().unwrap_or(type_name));
     let m = memos(ctx);
     let key = format!("{from_file}|{simple}");
     if let Some(hit) = get(&m.class_by_name, &key) {
         return hit;
     }
+    let cls = class_through_aliases(&simple, from_file, ctx);
+    put(&m.class_by_name, key, cls.clone());
+    cls
+}
+
+/// The steps an alias walk takes at most: well past any real chain. The walk reads no memo, so
+/// where it stops depends on where it started alone (upstream 329dd12).
+const MAX_ALIAS_WALK: usize = 1000;
+
+/// The class `simple` names from `from_file`, through its type aliases: a depth-first walk, since a
+/// name can be an alias several times over (once in each branch of an `{$IFDEF}`), and the first
+/// of them that leads to a class is the answer. `seen` ends a cycle. An explicit stack rather than
+/// recursion, so a chain thousands of aliases long cannot run the stack out.
+fn class_through_aliases(simple: &str, from_file: &str, ctx: &Ctx) -> Option<NodeRef> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::from([format!("{from_file}|{simple}")]);
+    let mut stack: Vec<std::vec::IntoIter<(String, String)>> = Vec::new();
+    match class_or_aliases(simple, from_file, ctx) {
+        Ok(cls) => return Some(cls),
+        Err(targets) => stack.push(targets.into_iter()),
+    }
+    while let Some(top) = stack.last_mut() {
+        let Some((target, file)) = top.next() else {
+            stack.pop();
+            continue;
+        };
+        let key = format!("{file}|{target}");
+        if seen.contains(&key) {
+            continue;
+        }
+        if seen.len() >= MAX_ALIAS_WALK {
+            return None;
+        }
+        seen.insert(key);
+        match class_or_aliases(&target, &file, ctx) {
+            Ok(cls) => return Some(cls),
+            Err(targets) => stack.push(targets.into_iter()),
+        }
+    }
+    None
+}
+
+/// The class `simple` names from `from_file`, or else the (lower-cased simple name, file) each of
+/// its type aliases names, in declaration order.
+fn class_or_aliases(simple: &str, from_file: &str, ctx: &Ctx) -> Result<NodeRef, Vec<(String, String)>> {
+    let simple = simple.to_owned();
     let named = pascal_named(&simple, ctx);
     let visible = |want: fn(NodeKind) -> bool| -> Vec<NodeRef> {
         let candidates: Vec<NodeRef> = named.iter().filter(|n| want(n.kind)).cloned().collect();
@@ -1587,32 +1631,29 @@ fn class_named(type_name: &str, from_file: &str, ctx: &Ctx, depth: u32) -> Optio
             Vec::new()
         }
     };
-    let mut cls = declaration_of(&visible(is_class_kind));
-    if cls.is_none() && depth < 4 {
-        // A type alias names the class it stands for: `TVTAncestor = TVTAncestorVcl;`.
-        for alias in visible(|k| k == NodeKind::TypeAlias) {
-            let lines = lines_of(ctx, &alias.file_path);
-            let raw = (alias.start_line as usize)
-                .checked_sub(1)
-                .and_then(|i| lines.get(i))
-                .map(String::as_str)
-                .unwrap_or("");
-            let line = re!(r"//.*$|\{[^}]*\}", "g").replace_all_str(raw, "");
-            // A pointer and a class reference reach the class they name
-            // (`PVirtualNode = ^TVirtualNode`, `TSynLogClass = class of TSynLog`).
-            let target = re!(r"=\s*(?:\^|class\s+of\b)?\s*([A-Za-z_][\w.]*)\s*;", "i")
-                .captures(&line)
-                .and_then(|c| c.text(1).map(str::to_string));
-            if let Some(target) = target {
-                cls = class_named(&target, &alias.file_path, ctx, depth + 1);
-                if cls.is_some() {
-                    break;
-                }
-            }
+    if let Some(cls) = declaration_of(&visible(is_class_kind)) {
+        return Ok(cls);
+    }
+    // A type alias names the class it stands for: `TVTAncestor = TVTAncestorVcl;`.
+    let mut targets = Vec::new();
+    for alias in visible(|k| k == NodeKind::TypeAlias) {
+        let lines = lines_of(ctx, &alias.file_path);
+        let raw = (alias.start_line as usize)
+            .checked_sub(1)
+            .and_then(|i| lines.get(i))
+            .map(String::as_str)
+            .unwrap_or("");
+        let line = re!(r"//.*$|\{[^}]*\}", "g").replace_all_str(raw, "");
+        // A pointer and a class reference reach the class they name
+        // (`PVirtualNode = ^TVirtualNode`, `TSynLogClass = class of TSynLog`).
+        let target = re!(r"=\s*(?:\^|class\s+of\b)?\s*([A-Za-z_][\w.]*)\s*;", "i")
+            .captures(&line)
+            .and_then(|c| c.text(1).map(str::to_string));
+        if let Some(target) = target {
+            targets.push((js_lower(target.rsplit('.').next().unwrap_or(&target)), alias.file_path.clone()));
         }
     }
-    put(&m.class_by_name, key, cls.clone());
-    cls
+    Err(targets)
 }
 
 /// The file whose path shares the longest directory prefix with `from`.
@@ -1662,7 +1703,7 @@ fn type_of_member(member: &NodeRef, ctx: &Ctx) -> Option<NodeRef> {
     };
     let ty = type_name
         .as_deref()
-        .and_then(|t| class_named(t, &member.file_path, ctx, 0));
+        .and_then(|t| class_named(t, &member.file_path, ctx));
     put(&m.member_types, member.id.clone(), ty.clone());
     ty
 }

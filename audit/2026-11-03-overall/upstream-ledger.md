@@ -2,7 +2,7 @@
 
 Inherited classifications from the v0.0.9 audit; live HEAD rechecked in this audit. Pending means not claimed ported, not a reproduced native bug.
 
-Reviewed through `f72c9d2efb14454ff4f9fd7b8460abd82f19a287`; previous port `8bd55fa7`.
+Reviewed through `329dd12f7adcf5c6d5e68acb217496ac0123f7ee` (`01a4931` pending); previous port `8bd55fa7`.
 
 ## Native implementation evidence added in this pass
 
@@ -194,3 +194,4 @@ All other rows retain their inherited status; they have not been silently promot
 | [47a9c7d6](https://github.com/colbymchenry/codegraph/commit/47a9c7d65d5c39094ef1e45ee9486561a9b298df) | ported (1a5217e5) | fix(python): whether a name is a local goes by the line reading it, not who asked first (#3194) | __tests__/python-local-binding-order.test.ts |
 | [483a0988](https://github.com/colbymchenry/codegraph/commit/483a09884d272a334c2f279c024951e8e0504b66) | ported (c62ad8e7) | fix(ruby): a call on a parameter takes its class from the method's call sites (#3195) | __tests__/parameter-flow.test.ts |
 | [f72c9d2e](https://github.com/colbymchenry/codegraph/commit/f72c9d2efb14454ff4f9fd7b8460abd82f19a287) | ported (1a5217e5) | fix(resolution): what a resolver keeps goes when what it was read from moves (#3214) | __tests__/name-matcher-memo-clears.test.ts<br>__tests__/resolution.test.ts<br>__tests__/sync-memo-lifetime.test.ts<br>__tests__/sync-module-config-change.test.ts<br>__tests__/worker-teardown.test.ts |
+| [329dd12f](https://github.com/colbymchenry/codegraph/commit/329dd12f7adcf5c6d5e68acb217496ac0123f7ee) | ported (v0.0.12: TS alias walk is a memoized loop, Lua member walk an explicit step loop, Pascal alias walk an explicit DFS with no memo reads; C macro renames index headers and `#include`d sources up front, a lone source renames for itself only. `crates/codegraph-core/tests/{alias_chain_length,resolution_order_independence}.rs`; 3 of 4 chain tests and the includer-order test failed before. FIFO addition to `sync-module-config-change`: not validated, since the mkfifo case is Unix-only and was not ported or run on Windows. By reading only: native `read_file` and config fingerprints check for a regular file) | fix(resolution): what a walk answers doesn't depend on who asked first (#3215) | __tests__/alias-chain-length.test.ts<br>__tests__/resolution-order-independence.test.ts<br>__tests__/sync-module-config-change.test.ts |

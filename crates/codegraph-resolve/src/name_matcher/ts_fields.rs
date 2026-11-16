@@ -604,35 +604,48 @@ fn ts_alias_value_name(alias: &Node, ctx: &Ctx) -> Option<String> {
 }
 
 /// The class or interface a type alias in `file` stands for, through an alias of
-/// an alias. Each name is read the way the alias's own file reads it.
-fn ts_aliased_type(name: &str, file: &str, at: &UnresolvedRef, ctx: &Ctx, depth: u32) -> Option<NodeRef> {
-    let key = format!("{file}\0{name}");
-    if let Some(hit) = ctx.memo::<AliasedTypeMemo>().lookup(&key) {
-        return hit;
-    }
-    let alias = ctx.get_nodes_in_file(file).iter().find(|n| n.name == name && n.kind == NodeKind::TypeAlias).cloned();
-    let written = alias.as_ref().filter(|_| depth < 4).and_then(|alias| ts_alias_value_name(alias, ctx));
-    let found = if let (Some(alias), Some(written)) = (&alias, written) {
-        if ts_class_type_parameter(alias, &written, ctx) {
-            None
-        } else {
-            match ts_named_type(&written, &alias.file_path, alias.language, &alias.id, at, ctx) {
-                TsNamed::Node(n) => Some(n),
-                TsNamed::Outside => None,
-                TsNamed::None => {
-                    let mut there = at.clone();
-                    there.file_path = alias.file_path.clone();
-                    there.language = alias.language;
-                    let next_file = ts_imported_type_file(&written, &there, ctx).unwrap_or_else(|| alias.file_path.clone());
-                    let next_name = written.rsplit('.').next().unwrap_or("");
-                    ts_aliased_type(next_name, &next_file, at, ctx, depth + 1)
-                }
+/// an alias. Each name is read the way the alias's own file reads it. An alias names one thing,
+/// so the walk is a loop that follows the chain to its end, however long, and every alias it
+/// passes gets that one answer; a chain that comes back to itself has none (upstream 329dd12).
+fn ts_aliased_type(name: &str, file: &str, at: &UnresolvedRef, ctx: &Ctx) -> Option<NodeRef> {
+    let (mut name, mut file) = (name.to_owned(), file.to_owned());
+    let mut walked: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut found = None;
+    loop {
+        let key = format!("{file}\0{name}");
+        if let Some(hit) = ctx.memo::<AliasedTypeMemo>().lookup(&key) {
+            found = hit;
+            break;
+        }
+        if !seen.insert(key.clone()) {
+            break;
+        }
+        walked.push(key);
+        let Some(alias) = ctx.get_nodes_in_file(&file).iter().find(|n| n.name == name && n.kind == NodeKind::TypeAlias).cloned() else { break };
+        let Some(written) = ts_alias_value_name(&alias, ctx) else { break };
+        // `type Box<T> = T | null` holds whatever its argument is.
+        if ts_class_type_parameter(&alias, &written, ctx) {
+            break;
+        }
+        match ts_named_type(&written, &alias.file_path, alias.language, &alias.id, at, ctx) {
+            TsNamed::Node(n) => {
+                found = Some(n);
+                break;
+            }
+            TsNamed::Outside => break,
+            TsNamed::None => {
+                let mut there = at.clone();
+                there.file_path = alias.file_path.clone();
+                there.language = alias.language;
+                file = ts_imported_type_file(&written, &there, ctx).unwrap_or_else(|| alias.file_path.clone());
+                name = written.rsplit('.').next().unwrap_or("").to_owned();
             }
         }
-    } else {
-        None
-    };
-    ctx.memo::<AliasedTypeMemo>().store(key, found.clone());
+    }
+    for key in walked {
+        ctx.memo::<AliasedTypeMemo>().store(key, found.clone());
+    }
     found
 }
 
@@ -643,7 +656,7 @@ pub fn ts_known_type_call(type_name: &str, file: &str, method_name: &str, r: &Un
     if known.is_none() {
         match ts_named_type(type_name, &at.file_path, at.language, "", at, ctx) {
             TsNamed::Node(n) => known = Some(n),
-            TsNamed::None => known = ts_aliased_type(type_name, file, at, ctx, 0),
+            TsNamed::None => known = ts_aliased_type(type_name, file, at, ctx),
             TsNamed::Outside => {}
         }
     }

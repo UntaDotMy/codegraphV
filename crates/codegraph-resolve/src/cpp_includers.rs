@@ -133,6 +133,27 @@ pub fn cpp_included_headers_beside(file_path: &str, ctx: &Ctx) -> Vec<String> {
     found
 }
 
+/// The indexed files an `#include` names under a source file's name (`#include "impl.c"`,
+/// `"unity.cc"`, `"tables.inc"`), sorted. Each is part of the file including it, which a header
+/// is by nature and these only by this directive. Names with no extension are the standard
+/// library's (`<vector>`).
+pub fn cpp_included_sources(ctx: &Ctx) -> Vec<String> {
+    let memo = ctx.memo::<MemoCell>();
+    let mut found = std::collections::BTreeSet::new();
+    for (name, includes) in includes_by_name(ctx, &memo).iter() {
+        let lower = name.to_ascii_lowercase();
+        if !name.contains('.') || [".h", ".hh", ".hpp", ".hxx"].iter().any(|ext| lower.ends_with(ext)) {
+            continue;
+        }
+        for include in includes {
+            if let Some(file) = included_file(include, ctx, &memo) {
+                found.insert(file);
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
 /// The file an `import` node of C/C++ includes, when the index holds it.
 pub fn cpp_included_file(include: &codegraph_types::Node, ctx: &Ctx) -> Option<String> {
     if include.kind != NodeKind::Import || !is_c_family(include.language) {
