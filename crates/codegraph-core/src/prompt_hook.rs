@@ -400,4 +400,21 @@ mod tests {
         assert_eq!(cap_prompt_hook_injection("abcdef", 3), "abc\n…(truncated; call codegraphV_explore for the rest)");
         assert_eq!(cap_prompt_hook_injection("abc", 3), "abc");
     }
+
+    /// Short approvals that are turn-taking replies, not requests: "thanks, that looks good" and
+    /// "the plan is ready, go ahead" injected `looks_like_cpp` and `is_ready` before this.
+    #[test]
+    fn approval_replies_are_turn_taking() {
+        assert!(is_turn_taking_reply("thanks, that looks good"));
+        assert!(is_turn_taking_reply("the plan is ready, go ahead"));
+    }
+
+    /// Imperatives and content words stay requests, including with an approval word around them.
+    #[test]
+    fn turn_taking_does_not_swallow_requests() {
+        assert!(!is_turn_taking_reply("verify the checksum logic"));
+        assert!(!is_turn_taking_reply("the frontload plan is ready"));
+        assert!(!is_turn_taking_reply("fix the frontload bug"));
+        assert!(!is_turn_taking_reply("looks good, check the cursor target"));
+    }
 }
