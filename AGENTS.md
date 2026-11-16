@@ -38,3 +38,8 @@ Goal: a flow question ("how does X reach Y", trace, impact, callers) resolves in
 - CodeGraphV gives code context, not requirements: ask the user about UX, edge cases and acceptance criteria.
 - Anchor issue/PR reports to a date and version (latest `release-notes/`, `git log -1 origin/main`, current branch) before calling something unfixed.
 - README images carry `?v=N`; bump N whenever the asset bytes change.
+
+## Owner rules
+- Before changing files or calling a diff final, have the plan or diff verified by the session's advisor or reviewer tool. If none exists, ask the owner. Never spawn a subagent for this check.
+- Run tests and builds on GitHub Actions; use the local machine only when needed. This checkout is a fork, so `gh pr create` must pass `--repo` for this repository; to run CI on a branch, open a draft PR into `rust-rewrite`.
+- When a task is finished, delete what it left behind that nothing needs. Never run `git clean -X` at the repo root; it also removes `.codegraphV/`, `node_modules/` and `dist/`.
