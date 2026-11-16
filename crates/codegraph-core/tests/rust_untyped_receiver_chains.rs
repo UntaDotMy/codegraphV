@@ -84,11 +84,13 @@ impl Installer {
 const RENDER: &str = r#"
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct Store {
     pub batch: RefCell<HashMap<String, u8>>,
     pub guarded: Mutex<HashMap<String, u8>>,
+    pub keyed: RefCell<HashMap<(&'static str, usize), String>>,
+    pub shared: Arc<Mutex<HashMap<String, u8>>>,
 }
 
 /// The standard-library entry API behind a RefCell borrow is not Installer::entry.
@@ -100,12 +102,23 @@ pub fn batch(store: &Store) {
 pub fn guarded(store: &Store) {
     store.guarded.lock().unwrap_or_else(|e| e.into_inner()).entry("a".to_string());
 }
+
+/// The same behind a RefCell with a tuple key, as `batch_sql` is declared.
+pub fn keyed(store: &Store) {
+    store.keyed.borrow_mut().entry(("a", 1)).or_default();
+}
+
+/// The same behind an Arc and a Mutex.
+pub fn shared(store: &Store) {
+    store.shared.lock().unwrap().entry("a".to_string());
+}
 "#;
 
 const CONTROLS: &str = r#"
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 pub struct Relay;
 
@@ -153,6 +166,19 @@ pub struct Ctx {
     pub guarded: Mutex<Bounded>,
 }
 
+pub struct Wrapped {
+    pub rc: Rc<RefCell<Bounded>>,
+    pub arc: Arc<Mutex<Bounded>>,
+}
+
+pub fn free_fn() -> u8 {
+    0
+}
+
+pub fn calls_free() -> u8 {
+    free_fn()
+}
+
 pub fn node(c: &Ctx) -> u8 {
     c.cache.borrow().get()
 }
@@ -163,6 +189,14 @@ pub fn locked(c: &Ctx) -> u8 {
 
 pub fn pinged(c: &Ctx) -> u8 {
     c.cache.borrow().ping()
+}
+
+pub fn rc_pinged(w: &Wrapped) -> u8 {
+    w.rc.borrow().ping()
+}
+
+pub fn arc_locked(w: &Wrapped) -> u8 {
+    w.arc.lock().unwrap().get()
 }
 
 pub trait Bump {
@@ -205,6 +239,41 @@ fn std_collection_behind_refcell_is_not_a_project_method() {
         !calls.iter().any(|c| c.contains("Installer::entry")),
         "a HashMap behind a RefCell borrow linked to Installer::entry: {calls:?}"
     );
+}
+
+#[test]
+fn std_collection_behind_refcell_with_a_tuple_key_is_not_a_project_method() {
+    let fx = fixture();
+    let calls = calls_of(&fx.cg, "src/render.rs", "keyed");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+#[test]
+fn std_collection_behind_arc_and_mutex_is_not_a_project_method() {
+    let fx = fixture();
+    let calls = calls_of(&fx.cg, "src/render.rs", "shared");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_rc_and_refcell_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "rc_pinged");
+    assert!(calls.iter().any(|c| c.contains("Bounded::ping") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_behind_arc_and_mutex_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "arc_locked");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn a_plain_call_still_links_by_name() {
+    let fx = fixture();
+    let calls = calls_of(&fx.cg, "src/ctl.rs", "calls_free");
+    assert!(calls.iter().any(|c| c.contains("free_fn")), "{calls:?}");
 }
 
 #[test]
