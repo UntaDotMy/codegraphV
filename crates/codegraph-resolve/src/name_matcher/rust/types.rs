@@ -1404,9 +1404,10 @@ fn apply_unwraps(made: Option<RustWrittenType>, unwraps: u32) -> Option<RustWrit
 
 /// What a method returns when a standard type is its receiver and no project declaration of
 /// that type answers. A `RefCell` hands out the value it holds (`borrow`, `borrow_mut`); a
-/// `Mutex` or `RwLock` lock hands it out inside a `LockResult`; an `Option` or `Result` unwrap
-/// method hands out the value it holds. Undefined for anything else, so every other receiver
-/// keeps the lookup it had.
+/// `Mutex` lock hands it out inside a `LockResult`; an `Option` or `Result` `unwrap_or_else`
+/// hands out the value it holds. Deref wrappers (`Arc<Mutex<T>>`, `Rc<RefCell<T>>`) are
+/// passed through, since they own none of these methods. Undefined for anything else, so every
+/// other receiver keeps the lookup it had.
 fn rust_std_accessor_result(
     read: &RustTypeRead,
     method: &str,
@@ -1419,19 +1420,22 @@ fn rust_std_accessor_result(
     let RustReadKind::Named { name, args, .. } = &body.kind else {
         return None;
     };
-    if !body.wrappers.is_empty() || is_rust_project_named(name, ctx) {
+    let through_deref_only = body
+        .wrappers
+        .iter()
+        .all(|w| RUST_DEREF_WRAPPERS.contains(&w.as_str()) && !rust_wrapper_has_own(w, method));
+    if !through_deref_only || is_rust_project_named(name, ctx) {
         return None;
     }
     let held = split_rust_top_level(args, ',').into_iter().next()?;
     let text = match (name.as_str(), method) {
         ("RefCell", "borrow" | "borrow_mut") => held,
-        ("Mutex", "lock" | "try_lock") | ("RwLock", "read" | "write" | "try_read" | "try_write") => {
-            format!("Result<{held}, _>")
-        }
-        ("Option" | "Result", "unwrap_or" | "unwrap_or_else" | "unwrap_or_default") => held,
+        ("Mutex", "lock") => format!("Result<{held}, _>"),
+        ("Option" | "Result", "unwrap_or_else") => held,
         _ => return None,
     };
-    Some(RustWrittenType { text, ..written.clone() })
+    // The held value is not behind the receiver's wrappers: those were passed through to reach it.
+    Some(RustWrittenType { text, wrappers: None, opaque: None, ..written.clone() })
 }
 
 fn identifier_names(text: &str) -> Vec<String> {

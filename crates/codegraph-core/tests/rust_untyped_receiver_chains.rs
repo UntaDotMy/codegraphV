@@ -199,6 +199,12 @@ pub fn arc_locked(w: &Wrapped) -> u8 {
     w.arc.lock().unwrap().get()
 }
 
+/// A local bound from a guard, then called: the receiver is a binding, not a chain.
+pub fn local_guard(c: &Ctx) -> u8 {
+    let g = c.cache.borrow();
+    g.get()
+}
+
 pub trait Bump {
     fn bump(&self) -> u8;
 }
@@ -274,6 +280,13 @@ fn a_plain_call_still_links_by_name() {
     let fx = fixture();
     let calls = calls_of(&fx.cg, "src/ctl.rs", "calls_free");
     assert!(calls.iter().any(|c| c.contains("free_fn")), "{calls:?}");
+}
+
+#[test]
+fn project_type_through_a_local_bound_from_a_guard_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "local_guard");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
 }
 
 #[test]
