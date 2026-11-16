@@ -38,7 +38,9 @@ fn a_turn_taking_prompt_injects_nothing_and_a_request_still_does() {
          pub fn refund_order(id: u32) -> u32 { id }\n\
          pub fn refund_total(id: u32) -> u32 { refund_order(id) }\n\
          pub fn looks_like_cpp(text: &str) -> bool { text.is_empty() }\n\
-         pub fn is_ready(flag: bool) -> bool { flag }\n",
+         pub fn looks_like_objc(text: &str) -> bool { text.is_empty() }\n\
+         pub fn is_ready(flag: bool) -> bool { flag }\n\
+         pub fn ready_flag(flag: bool) -> bool { flag }\n",
     )
     .unwrap();
     let init = Command::new(env!("CARGO_BIN_EXE_codegraphV"))
