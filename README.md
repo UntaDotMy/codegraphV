@@ -279,14 +279,14 @@ speed).
 
 ### Where Rust is not better
 
-- **Indexing a large repo uses more memory than v0.0.1 did.** On this repo the peak is
-  1.8 GB, against 1.1 GB for v0.0.1 (and 4.0 GB for TypeScript). To trade speed for memory,
+- **Indexing a large repo uses more memory than v0.0.1 did.** On this repo (2,053 files) the peak
+  with v0.0.12 is about 1.6 GB, against 1.1 GB for v0.0.1 (and 4.0 GB for TypeScript). To trade speed for memory,
   set `CODEGRAPHV_RESOLVE_WORKERS` and `CODEGRAPHV_PARSE_WORKERS` to a lower number.
 - **A tree of very large generated sources still needs a lot of memory.** Parsing now holds at
   most about 12 MB of source at a time, but a graph of two million symbols (12 generated 8 MB
   files) peaks near 1.5 GB while the synthesis passes run, and those files parse one after the
   other. Set `CODEGRAPHV_MAX_FILE_MB` lower to skip such files.
-- **The binary is large:** about 74 MB, because tree-sitter grammars for every language are
+- **The binary is large:** about 77 MB on Windows, because tree-sitter grammars for every language are
   compiled in, plus a WebAssembly runtime that loads the original's grammar files for some
   languages. The npm package downloads a full Node.js runtime instead, but that is no
   excuse: shrinking the binary is open work.
