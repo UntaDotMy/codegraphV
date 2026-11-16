@@ -106,6 +106,53 @@ fn a_drifted_file_among_many_is_still_flagged() {
     }
 }
 
+/// The files of a long answer are checked on several threads, each over its share: drifted files
+/// in the first, a middle and the last share are all named, in the order the answer lists them.
+#[test]
+fn drifted_files_in_every_share_are_named_in_answer_order() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.ts"), "export function helper() { return 1; }\n").unwrap();
+    let caller = |i: usize| format!("import {{ helper }} from './lib';\nexport function caller_{i}() {{ return helper(); }}\n");
+    for i in 0..120 {
+        std::fs::write(dir.path().join(format!("c{i}.ts")), caller(i)).unwrap();
+    }
+    let mut cg = codegraph_core::CodeGraph::init(dir.path().to_str().unwrap()).unwrap();
+    cg.index_all(&Default::default(), None, None).unwrap();
+    let listed = codegraph_mcp::render::relations(&cg, &json!({"symbol": "helper", "limit": 200}), true).unwrap();
+    let order = caller_files_in_order(&listed);
+    assert_eq!(order.len(), 120, "all 120 caller files are listed: {listed}");
+    let drifted = [order[0].clone(), order[60].clone(), order[119].clone()];
+    for f in &drifted {
+        let i: usize = f[1..f.len() - 3].parse().unwrap();
+        std::fs::write(dir.path().join(f), format!("// moved\n{}", caller(i))).unwrap();
+    }
+    for out in [
+        codegraph_mcp::render::relations(&cg, &json!({"symbol": "helper", "limit": 200}), true).unwrap(),
+        codegraph_mcp::render::impact(&cg, &json!({"symbol": "helper"})).unwrap(),
+    ] {
+        let named: Vec<String> = caller_files_in_order(&out).into_iter().filter(|f| drifted.contains(f)).collect();
+        assert_eq!(named.len(), 3, "{out}");
+        let expected = format!("⚠ Changed on disk after the last index sync: {}.", named.join(", "));
+        assert!(out.contains(&expected), "expected `{expected}` in {out}");
+    }
+}
+
+/// Each `c<N>.ts` an answer names, first mention first.
+fn caller_files_in_order(out: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for (at, _) in out.match_indices('c') {
+        let Some((n, _)) = out[at + 1..].split_once(".ts") else { continue };
+        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) || (at > 0 && out.as_bytes()[at - 1].is_ascii_alphanumeric()) {
+            continue;
+        }
+        let f = format!("c{n}.ts");
+        if !files.contains(&f) {
+            files.push(f);
+        }
+    }
+    files
+}
+
 /// #3260: callers, callees and impact print indexed line numbers; a drifted file in the answer
 /// is named so the reader knows they may be shifted.
 #[test]
