@@ -2,9 +2,13 @@
 //! field (`store.batch.borrow_mut().entry(..)` with `batch: RefCell<HashMap<..>>`)
 //! is not a call of a project method that happens to share its name.
 //!
-//! The controls must keep linking: a project type reached through a RefCell or a
-//! Mutex borrow, a project-typed field, an extension trait implemented on a foreign
-//! type, and a generic or `dyn` receiver of a project trait.
+//! The same holds behind a Mutex guard (`self.map.lock().unwrap_or_else(..).entry(..)`).
+//!
+//! The controls must keep linking, and by their type: a project type reached through a
+//! RefCell or a Mutex borrow, a project-typed field, an extension trait implemented on a
+//! foreign type, and a generic or `dyn` receiver of a project trait. A same-file namesake
+//! on another type makes the bare name ambiguous, so a control passes only when its
+//! receiver's type is read.
 use codegraph_core::CodeGraph;
 use codegraph_types::{EdgeKind, NodeKind};
 use std::fs;
@@ -30,6 +34,24 @@ fn describe(cg: &CodeGraph, id: &str) -> String {
         Some(n) => format!("{} {} {}:{}", n.kind.as_str(), n.qualified_name, n.file_path, n.start_line),
         None => format!("? {id}"),
     }
+}
+
+/// The targets of the calls the function `name` in `file` makes, described with the
+/// strategy that linked each (`resolvedBy`).
+fn typed_calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
+    let nodes = cg.get_nodes_by_file(file).unwrap();
+    let Some(caller) = nodes.iter().find(|n| n.name == name && n.kind == NodeKind::Function) else {
+        return vec![format!("<no function {name} in {file}>")];
+    };
+    let mut out = Vec::new();
+    for edge in cg.get_outgoing_edges(&caller.id).unwrap() {
+        if edge.kind == EdgeKind::Calls {
+            let by = edge.metadata.as_ref().and_then(|m| m.get("resolvedBy")).and_then(|v| v.as_str()).unwrap_or("?");
+            out.push(format!("{} by={by}", describe(cg, &edge.target)));
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The targets of the calls the function `name` in `file` makes, described.
@@ -62,14 +84,21 @@ impl Installer {
 const RENDER: &str = r#"
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 pub struct Store {
     pub batch: RefCell<HashMap<String, u8>>,
+    pub guarded: Mutex<HashMap<String, u8>>,
 }
 
 /// The standard-library entry API behind a RefCell borrow is not Installer::entry.
 pub fn batch(store: &Store) {
     store.batch.borrow_mut().entry("a".to_string());
+}
+
+/// The same behind a Mutex guard.
+pub fn guarded(store: &Store) {
+    store.guarded.lock().unwrap_or_else(|e| e.into_inner()).entry("a".to_string());
 }
 "#;
 
@@ -100,6 +129,23 @@ impl Bounded {
     pub fn get(&self) -> u8 {
         0
     }
+
+    pub fn ping(&self) -> u8 {
+        0
+    }
+}
+
+/// Same-file namesake on another type: the bare names `get` and `ping` are ambiguous here.
+pub struct Spare;
+
+impl Spare {
+    pub fn get(&self) -> u8 {
+        1
+    }
+
+    pub fn ping(&self) -> u8 {
+        1
+    }
 }
 
 pub struct Ctx {
@@ -113,6 +159,10 @@ pub fn node(c: &Ctx) -> u8 {
 
 pub fn locked(c: &Ctx) -> u8 {
     c.guarded.lock().unwrap().get()
+}
+
+pub fn pinged(c: &Ctx) -> u8 {
+    c.cache.borrow().ping()
 }
 
 pub trait Bump {
@@ -165,17 +215,34 @@ fn project_typed_field_still_links() {
 }
 
 #[test]
+fn std_collection_behind_mutex_lock_is_not_a_project_method() {
+    let fx = fixture();
+    let calls = calls_of(&fx.cg, "src/render.rs", "guarded");
+    assert!(
+        !calls.iter().any(|c| c.contains("Installer::entry")),
+        "a HashMap behind a Mutex lock linked to Installer::entry: {calls:?}"
+    );
+}
+
+#[test]
 fn project_type_behind_refcell_borrow_still_links() {
     let fx = fixture();
-    let calls = calls_of(&fx.cg, "src/ctl.rs", "node");
-    assert!(calls.iter().any(|c| c.contains("Bounded::get")), "{calls:?}");
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "node");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
 }
 
 #[test]
 fn project_type_behind_mutex_lock_still_links() {
     let fx = fixture();
-    let calls = calls_of(&fx.cg, "src/ctl.rs", "locked");
-    assert!(calls.iter().any(|c| c.contains("Bounded::get")), "{calls:?}");
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "locked");
+    assert!(calls.iter().any(|c| c.contains("Bounded::get") && c.ends_with("by=instance-method")), "{calls:?}");
+}
+
+#[test]
+fn project_type_method_behind_refcell_borrow_still_links() {
+    let fx = fixture();
+    let calls = typed_calls_of(&fx.cg, "src/ctl.rs", "pinged");
+    assert!(calls.iter().any(|c| c.contains("Bounded::ping") && c.ends_with("by=instance-method")), "{calls:?}");
 }
 
 #[test]
