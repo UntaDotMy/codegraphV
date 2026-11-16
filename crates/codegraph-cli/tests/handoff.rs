@@ -1,4 +1,6 @@
 //! An agent's MCP connection survives the codegraphV binary being replaced under it (DEV-121).
+mod common;
+
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Write},
@@ -41,15 +43,16 @@ struct Server {
 
 impl Server {
     fn start(exe: &Path, root: &Path) -> Self {
-        let mut child = Command::new(exe)
-            .args(["serve", "--mcp", "--path", root.to_str().unwrap()])
-            .env_remove("CODEGRAPHV_DAEMON")
-            .env_remove("CODEGRAPHV_MCP_TOOLS")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = common::spawn_retrying(
+            Command::new(exe)
+                .args(["serve", "--mcp", "--path", root.to_str().unwrap()])
+                .env_remove("CODEGRAPHV_DAEMON")
+                .env_remove("CODEGRAPHV_MCP_TOOLS")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let stdout = child.stdout.take().unwrap();
         let (sender, lines) = mpsc::channel();
         std::thread::spawn(move || {
