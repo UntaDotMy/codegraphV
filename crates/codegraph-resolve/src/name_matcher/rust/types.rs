@@ -1404,10 +1404,12 @@ fn apply_unwraps(made: Option<RustWrittenType>, unwraps: u32) -> Option<RustWrit
 
 /// What a method returns when a standard type is its receiver and no project declaration of
 /// that type answers. A `RefCell` hands out the value it holds (`borrow`, `borrow_mut`); a
-/// `Mutex` lock hands it out inside a `LockResult`; an `Option` or `Result` `unwrap_or_else`
-/// hands out the value it holds. Deref wrappers (`Arc<Mutex<T>>`, `Rc<RefCell<T>>`) are
-/// passed through, since they own none of these methods. Undefined for anything else, so every
-/// other receiver keeps the lookup it had.
+/// `Mutex` or `RwLock` lock hands it out inside a result (`lock`, `try_lock`, `read`, `write`,
+/// `try_read`, `try_write`); an `Option` or `Result` `unwrap_or`, `unwrap_or_else` or
+/// `unwrap_or_default` hands out the value it holds. A deref wrapper (any of `RUST_DEREF_WRAPPERS`)
+/// is passed through to the type it holds, so `Rc<RefCell<T>>` reads as `RefCell<T>`.
+/// Not modelled: a file that imports `std::borrow::Borrow`, where `borrow` on a pointer is that
+/// trait's method. Undefined for anything else, so every other receiver keeps the lookup it had.
 fn rust_std_accessor_result(
     read: &RustTypeRead,
     method: &str,
@@ -1423,15 +1425,17 @@ fn rust_std_accessor_result(
     let through_deref_only = body
         .wrappers
         .iter()
-        .all(|w| RUST_DEREF_WRAPPERS.contains(&w.as_str()) && !rust_wrapper_has_own(w, method));
+        .all(|w| RUST_DEREF_WRAPPERS.contains(&w.as_str()));
     if !through_deref_only || is_rust_project_named(name, ctx) {
         return None;
     }
     let held = split_rust_top_level(args, ',').into_iter().next()?;
     let text = match (name.as_str(), method) {
         ("RefCell", "borrow" | "borrow_mut") => held,
-        ("Mutex", "lock") => format!("Result<{held}, _>"),
-        ("Option" | "Result", "unwrap_or_else") => held,
+        ("Mutex", "lock" | "try_lock") | ("RwLock", "read" | "write" | "try_read" | "try_write") => {
+            format!("Result<{held}, _>")
+        }
+        ("Option" | "Result", "unwrap_or" | "unwrap_or_else" | "unwrap_or_default") => held,
         _ => return None,
     };
     // The held value is not behind the receiver's wrappers: those were passed through to reach it.
