@@ -20,7 +20,13 @@ older shell-only hosts have not been certified. This avoids shell expansion and
 does not require Git Bash on Windows. Exact legacy shell commands are migrated;
 commands that merely mention CodeGraphV are preserved.
 
-`install --refresh` preserves the existing permission and hook choices.
+`install --refresh` preserves the existing permission and prompt-hook choices.
+The search guard (`PreToolUse`, `args` `["guard-hook"]`, matcher
+`^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$`, timeout 10 s) is written by
+every Claude install and refresh, so `upgrade` brings it to existing setups and
+restores an entry that was deleted by hand; uninstall removes it. Users switch it
+off with `CODEGRAPHV_GUARD=0` in Claude Code's environment. It allows the call on
+any failure.
 `--no-permissions` explicitly removes CodeGraphV permissions.
 `--prompt-hook preserve|on|off` independently controls hook installation. The hook
 accepts at most 1 MiB of input and exits silently after a default two-second

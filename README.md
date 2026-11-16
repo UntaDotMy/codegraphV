@@ -63,6 +63,11 @@ Everything runs on your machine. The rewrite keeps:
   up on edits made while no session was running.
 - **The Claude Code prompt hook,** which adds codegraphV context to "how / where / trace"
   prompts.
+- **The Claude Code search guard** (new in codegraphV): in an indexed project, a Grep, Glob
+  or shell search for an indexed symbol is denied until the agent has asked codegraphV
+  about it this session, and the denial names the exact `codegraphV_explore` call to make.
+  Plain-text searches, pipe filters, reads and edits always pass. `install` and every
+  `upgrade` write it; `CODEGRAPHV_GUARD=0` in Claude Code's environment turns it off.
 - **The update notice and `codegraphV upgrade`.**
 
 ## Install
@@ -353,6 +358,7 @@ come with character pages and a source hash that detects edits between pages.
 |---|---|
 | `CODEGRAPHV_NO_UPDATE_CHECK=1` / `DO_NOT_TRACK=1` | no daily release check |
 | `CODEGRAPHV_NO_PROMPT_HOOK=1` | the Claude prompt hook prints nothing |
+| `CODEGRAPHV_GUARD=0` | the Claude search guard allows everything |
 | `CODEGRAPHV_NO_WATCH=1` | no file watching in MCP sessions |
 | `CODEGRAPHV_DAEMON=0` | each session runs its own server instead of the shared one |
 | `CODEGRAPHV_PPID_POLL_MS` | how often (ms) a server checks that its agent is still there (default 5000, `0` = never) |

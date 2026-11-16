@@ -380,7 +380,7 @@ impl Environment {
         let permission = data["permissions"]["allow"]
             .as_array()
             .is_some_and(|a| a.iter().any(|v| v.as_str().is_some_and(|s| s.starts_with(brand.permission_prefix))));
-        let hook = has_prompt_hook(brand, data.get("hooks"));
+        let hook = has_hook(brand, data.get("hooks"), &PROMPT_HOOK);
         (permission, hook)
     }
     /// Whether `brand`'s MCP server entry is in `id`'s config file.
@@ -693,10 +693,17 @@ impl Environment {
                 // None (a refresh) keeps whatever is there.
                 let command = prompt_hook_command(&self.executable);
                 let next = match hook_choice {
-                    Some(on) => prompt_hook_hooks(brand, current, on, &command),
+                    Some(on) => command_hooks(brand, current, &PROMPT_HOOK, on, &command),
                     // A refresh keeps the choice, but brings an existing hook to today's spelling.
-                    None if has_prompt_hook(brand, current) => prompt_hook_hooks(brand, current, true, &command),
+                    None if has_hook(brand, current, &PROMPT_HOOK) => command_hooks(brand, current, &PROMPT_HOOK, true, &command),
                     None => current.cloned(),
+                };
+                // The search-first guard is on wherever codegraphV is configured, a refresh
+                // included, so an upgrade brings it; `CODEGRAPHV_GUARD=0` switches it off.
+                let next = if remove || brand.binary == CODEGRAPHV.binary {
+                    command_hooks(brand, next.as_ref(), &GUARD_HOOK, !remove, &command)
+                } else {
+                    next
                 };
                 if next.as_ref() != current {
                     after = match next {
@@ -864,16 +871,33 @@ pub fn prompt_hook_command(executable: &str) -> String {
     executable.to_owned()
 }
 
-fn is_prompt_hook(brand: &Brand, hook: &Value) -> bool {
+/// One of codegraphV's Claude command hooks: the event it runs on, its one argument, and the
+/// group fields written with it.
+struct HookSpec {
+    event: &'static str,
+    arg: &'static str,
+    matcher: Option<&'static str>,
+    timeout: Option<u64>,
+}
+/// The front-load hook: injects context into structural prompts.
+const PROMPT_HOOK: HookSpec = HookSpec { event: "UserPromptSubmit", arg: "prompt-hook", matcher: None, timeout: None };
+/// The tools the search-first guard inspects: search, listing, the shells, and codegraphV's own
+/// tools (which record what the session asked).
+pub const GUARD_MATCHER: &str = "^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$";
+/// The search-first guard (`guard-hook`): denies searching for indexed symbols until codegraphV
+/// was asked. It allows on any failure; 10 s bounds a hung run.
+const GUARD_HOOK: HookSpec = HookSpec { event: "PreToolUse", arg: "guard-hook", matcher: Some(GUARD_MATCHER), timeout: Some(10) };
+
+fn is_hook(brand: &Brand, hook: &Value, spec: &HookSpec) -> bool {
     if hook["type"] != "command" { return false; }
     if hook.get("args").is_some() {
-        if hook["args"] != json!(["prompt-hook"]) { return false; }
+        if hook["args"] != json!([spec.arg]) { return false; }
         let Some(program) = hook["command"].as_str() else { return false; };
         let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
         return name.eq_ignore_ascii_case(brand.binary)
             || name.eq_ignore_ascii_case(&format!("{}.exe", brand.binary));
     }
-    is_prompt_hook_command(brand, &hook["command"])
+    is_hook_command(brand, &hook["command"], spec.arg)
 }
 
 fn validate_claude_settings(data: &Value) -> Result<()> {
@@ -897,9 +921,10 @@ fn validate_claude_settings(data: &Value) -> Result<()> {
     Ok(())
 }
 
-fn is_prompt_hook_command(brand: &Brand, command: &Value) -> bool {
+/// The shell form of `brand`'s hook running `arg`, as earlier builds wrote it.
+fn is_hook_command(brand: &Brand, command: &Value, arg: &str) -> bool {
     let Some(command) = command.as_str() else { return false };
-    if brand.hook_forms.iter().any(|f| command.trim() == *f) {
+    if arg == PROMPT_HOOK.arg && brand.hook_forms.iter().any(|f| command.trim() == *f) {
         return true;
     }
     // `"<dir>/<binary>[.exe]" prompt-hook` or `<dir>/<binary> prompt-hook`.
@@ -915,7 +940,7 @@ fn is_prompt_hook_command(brand: &Brand, command: &Value) -> bool {
             split
         },
     };
-    if rest.trim() != "prompt-hook" {
+    if rest.trim() != arg {
         return false;
     }
     let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
@@ -924,36 +949,45 @@ fn is_prompt_hook_command(brand: &Brand, command: &Value) -> bool {
     stem.eq_ignore_ascii_case(brand.binary)
 }
 
-fn has_prompt_hook(brand: &Brand, hooks: Option<&Value>) -> bool {
+fn has_hook(brand: &Brand, hooks: Option<&Value>, spec: &HookSpec) -> bool {
     hooks.and_then(Value::as_object).is_some_and(|events| {
         events.values().filter_map(Value::as_array).flatten().any(|group| {
-            group["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_prompt_hook(brand, h)))
+            group["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_hook(brand, h, spec)))
         })
     })
 }
 
-/// `settings.hooks` with `brand`'s prompt hook written (`on`) or removed; None = drop `hooks`.
+/// `settings.hooks` with `brand`'s `spec` hook written (`on`) or removed; None = drop `hooks`.
 /// Unchanged input comes back equal, so the caller writes nothing.
 /// `command` is what the hook runs; an older spelling of `brand`'s hook is rewritten in place.
-fn prompt_hook_hooks(brand: &Brand, hooks: Option<&Value>, on: bool, command: &str) -> Option<Value> {
+fn command_hooks(brand: &Brand, hooks: Option<&Value>, spec: &HookSpec, on: bool, command: &str) -> Option<Value> {
     if on {
         let mut hooks = hooks.filter(|h| h.is_object()).cloned().unwrap_or_else(|| json!({}));
-        if !hooks["UserPromptSubmit"].is_array() {
-            hooks["UserPromptSubmit"] = json!([]);
+        if !hooks[spec.event].is_array() {
+            hooks[spec.event] = json!([]);
         }
-        let groups = hooks["UserPromptSubmit"].as_array_mut().unwrap();
+        let groups = hooks[spec.event].as_array_mut().unwrap();
         let mut already = false;
         for hook in groups.iter_mut().filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut)).flatten() {
-            if is_prompt_hook(brand, hook) {
+            if is_hook(brand, hook, spec) {
                 already = true;
                 if hook["command"] != command {
                     hook["command"] = json!(command);
                 }
-                hook["args"] = json!(["prompt-hook"]);
+                hook["args"] = json!([spec.arg]);
             }
         }
         if !already {
-            groups.push(json!({"hooks": [{"type": "command", "command": command, "args": ["prompt-hook"]}]}));
+            let mut hook = json!({"type": "command", "command": command, "args": [spec.arg]});
+            if let Some(timeout) = spec.timeout {
+                hook["timeout"] = json!(timeout);
+            }
+            let mut group = serde_json::Map::new();
+            if let Some(matcher) = spec.matcher {
+                group.insert("matcher".into(), json!(matcher));
+            }
+            group.insert("hooks".into(), json!([hook]));
+            groups.push(Value::Object(group));
         }
         return Some(hooks);
     }
@@ -968,12 +1002,13 @@ fn prompt_hook_hooks(brand: &Brand, hooks: Option<&Value>, on: bool, command: &s
             let mut changed = false;
             if let Some(hs) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 let before = hs.len();
-                hs.retain(|h| !is_prompt_hook(brand, h));
+                hs.retain(|h| !is_hook(brand, h, spec));
                 changed = hs.len() != before;
                 removed |= changed;
             }
+            // An emptied group goes, unless it carries settings beyond the matcher we wrote.
             !changed || !group["hooks"].as_array().is_some_and(|hs| hs.is_empty())
-                || group.as_object().is_some_and(|g| g.len() > 1)
+                || group.as_object().is_some_and(|g| g.keys().any(|k| k != "hooks" && k != "matcher"))
         });
         was_empty || !groups.is_empty()
     });

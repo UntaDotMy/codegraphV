@@ -40,7 +40,10 @@ fn refresh_preserves_explicit_hook_and_permission_opt_outs() {
     let before = std::fs::read_to_string(&path).unwrap_or_default();
     ok(cmd(home.path()).current_dir(home.path()).args(["install", "--target", "claude", "--refresh"]).output().unwrap());
     assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), before);
-    assert!(!before.contains("mcp__codegraphV__") && !before.contains("prompt-hook"));
+    let written: Value = serde_json::from_str(&before).unwrap();
+    assert!(written.get("permissions").is_none() && !before.contains("prompt-hook"), "{before}");
+    // The guard is not an opt-out choice: it is written by install and kept by refresh.
+    assert_eq!(written["hooks"]["PreToolUse"][0]["hooks"][0]["args"], json!(["guard-hook"]));
     ok(cmd(home.path()).current_dir(home.path()).args(["install", "--target", "claude", "--refresh", "--prompt-hook", "on"]).output().unwrap());
     let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"], json!(["prompt-hook"]));
