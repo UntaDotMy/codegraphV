@@ -1,0 +1,76 @@
+name: Bench (codegraph, rust vs ripgrep)
+
+# Runs on pull requests that touch this workflow or the bench scripts. The
+# released Linux binary is used, so no build runs here. Recall and token counts
+# are deterministic; wall times on a shared runner are noisy.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/bench.yml'
+      - 'scripts/bench/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # Full history: queries.json pins the codegraph corpus to an older rev, and a
+      # shallow clone does not contain it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install ripgrep and psutil
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep python3-psutil
+
+      - name: Fetch the released Linux binary and verify its checksum
+        run: |
+          base=https://github.com/${{ github.repository }}/releases/download/v0.0.12
+          asset=codegraphV-v0.0.12-linux-x64.tar.gz
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o "$asset" "$base/$asset"
+          curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
+          grep " $asset\$" SHA256SUMS | sha256sum -c -
+          mkdir -p bin && tar -xzf "$asset" -C bin
+          bin_path="$(find "$RUNNER_TEMP/bin" -type f -name codegraphV | head -n 1)"
+          test -n "$bin_path"
+          chmod +x "$bin_path"
+          echo "CODEGRAPH_RUST_BIN=$bin_path" >> "$GITHUB_ENV"
+
+      - name: Check the query targets against the source
+        run: python3 scripts/bench/bench.py --check-queries --repos codegraph --work "$RUNNER_TEMP/cg-bench"
+
+      - name: Benchmark rust against ripgrep plus Read
+        run: >-
+          python3 scripts/bench/bench.py --arms rust,rg --repos codegraph --quick
+          --work "$RUNNER_TEMP/cg-bench" --out "$RUNNER_TEMP/bench-report.json"
+
+      - name: Write the summary table
+        run: |
+          python3 - "$RUNNER_TEMP/bench-report.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, statistics, sys
+          report = json.load(open(sys.argv[1], encoding='utf-8'))
+          print('| repo | arm | queries | median recall | median out_tokens (chars/4) | median wall ms |')
+          print('|---|---|---:|---:|---:|---:|')
+          for repo, data in report['repos'].items():
+              for arm, rows in data['arms'].items():
+                  rows = [r for r in rows if 'recall' in r]
+                  if not rows:
+                      continue
+                  print(f"| {repo} | {arm} | {len(rows)} | "
+                        f"{statistics.median(r['recall'] for r in rows):.2f} | "
+                        f"{statistics.median(r['out_tokens'] for r in rows):.0f} | "
+                        f"{statistics.median(r['wall_ms'] for r in rows):.0f} |")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-report
+          path: ${{ runner.temp }}/bench-report.json
