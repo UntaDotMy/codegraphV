@@ -637,18 +637,26 @@ impl<'a> TemplateInstantiations<'a> {
         let mut typed_files = Vec::new();
         // (A lookup of a qualified name wants the namespace aliases, which are a walk over every
         // file too.)
+        let timed = synth_timed();
+        let started = std::time::Instant::now();
+        let mut scan = std::time::Duration::ZERO;
+        let mut walk_add = std::time::Duration::ZERO;
         let mut aliases = cpp_namespace_alias_walk(ctx);
         for file in ctx.get_all_files() {
             if !is_cpp_file(&file) {
                 continue;
             }
+            let read_at = std::time::Instant::now();
             let Some(text) = ctx.scan_file(&file) else { continue };
+            scan += read_at.elapsed();
             if text.is_empty() {
                 continue;
             }
+            let walk_at = std::time::Instant::now();
             if let Some(walk) = aliases.as_mut() {
                 walk.add(&file, &text);
             }
+            walk_add += walk_at.elapsed();
             let mut names = HashSet::new();
             add_names_before_angle(&text, &mut names);
             for name in names {
@@ -667,10 +675,23 @@ impl<'a> TemplateInstantiations<'a> {
             }
             declared.insert(file, Rc::new(types));
         }
+        let loop_ms = started.elapsed().as_millis();
+        let finish_at = std::time::Instant::now();
         if let Some(walk) = aliases {
             walk.finish(ctx);
         }
+        let finish_ms = finish_at.elapsed().as_millis();
+        let includes_at = std::time::Instant::now();
         let includes = if declared.is_empty() { Vec::new() } else { q("getCppIncludeEdges", ctx.store().get_cpp_include_edges()) };
+        if timed {
+            eprintln!(
+                "[phase-timing]       cppTemplateEdges read: files {loop_ms}ms (read {}ms, alias walk {}ms), alias finish {finish_ms}ms, includes {}ms ({} edges)",
+                scan.as_millis(),
+                walk_add.as_millis(),
+                includes_at.elapsed().as_millis(),
+                includes.len()
+            );
+        }
         let reader = TemplateInstantiations {
             ctx,
             includes: Rc::new(Includes::new(includes)),
@@ -1646,15 +1667,25 @@ fn writes_arrow(line: &str, receiver: &str, member: &str) -> bool {
 
 /// One edge per class a failed reference through a template parameter reaches (see the top of
 /// this file). Reads the graph and source only.
+/// `CODEGRAPHV_SYNTH_TIMINGS` set: the pass reports where its time goes.
+fn synth_timed() -> bool {
+    std::env::var("CODEGRAPHV_SYNTH_TIMINGS").is_ok_and(|v| !v.is_empty())
+}
+
 pub fn cpp_template_argument_edges(ctx: &Ctx) -> Vec<Edge> {
+    let timed = synth_timed();
+    let started = std::time::Instant::now();
     // A name in a template's head or an alias, by file: most references go no further.
     let (reader, declared) = TemplateInstantiations::read(ctx);
+    let read_ms = started.elapsed().as_millis();
     if declared.is_empty() {
         return Vec::new();
     }
     let files: Vec<String> = declared.keys().cloned().collect();
     let mut refs: Vec<UnresolvedRef> = Vec::new();
+    let query_at = std::time::Instant::now();
     let rows = q("iterateFailedCppTypeReferences", ctx.store().get_failed_cpp_type_references(&files));
+    let (query_ms, row_count) = (query_at.elapsed().as_millis(), rows.len());
     for row in rows {
         let file = row.file_path.clone().unwrap_or_default();
         let Some(head) = re!(r"^[A-Za-z_]\w*").find(&row.reference_name).map(|m| m.as_str().to_string()) else { continue };
@@ -1671,6 +1702,8 @@ pub fn cpp_template_argument_edges(ctx: &Ctx) -> Vec<Edge> {
             .then(a.reference_name.cmp(&b.reference_name))
             .then(a.reference_kind.as_str().cmp(b.reference_kind.as_str()))
     });
+    let ref_count = refs.len();
+    let group_at = std::time::Instant::now();
     let mut groups: IndexMap<String, (Slot, Vec<(UnresolvedRef, Through)>)> = IndexMap::new();
     for r in refs {
         let Some(caller) = ctx.node_by_id(&r.from_node_id) else { continue };
@@ -1678,6 +1711,8 @@ pub fn cpp_template_argument_edges(ctx: &Ctx) -> Vec<Edge> {
         let Some(through) = reader.through(&r, &caller, types) else { continue };
         groups.entry(slot_key(&through.slot)).or_insert_with(|| (through.slot.clone(), Vec::new())).1.push((r, through));
     }
+    let group_ms = group_at.elapsed().as_millis();
+    let classes_at = std::time::Instant::now();
     let mut edges = Vec::new();
     for (slot, group) in groups.values() {
         let Some(classes) = reader.classes_of(slot) else { continue };
@@ -1709,6 +1744,15 @@ pub fn cpp_template_argument_edges(ctx: &Ctx) -> Vec<Edge> {
                 edges.push(edge);
             }
         }
+    }
+    if timed {
+        eprintln!(
+            "[phase-timing]       cppTemplateEdges: read {read_ms}ms ({} files declare), failed refs {query_ms}ms ({row_count} rows, {ref_count} kept), through {group_ms}ms ({} slots), classes {}ms ({} edges)",
+            files.len(),
+            groups.len(),
+            classes_at.elapsed().as_millis(),
+            edges.len()
+        );
     }
     edges
 }
