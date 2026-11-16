@@ -46,6 +46,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: ./scripts/test-install-rust.ps1
+      - name: install-rust.sh platform checks
+        if: runner.os != 'Windows'
+        run: sh scripts/test-install-rust-sh.sh
 
   build:
     strategy:
