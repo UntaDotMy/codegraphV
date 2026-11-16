@@ -5,6 +5,8 @@
 //! as "Text file busy" when they start a freshly copied codegraphV.
 #![cfg(unix)]
 
+mod common;
+
 use std::{
     path::PathBuf,
     process::Command,
@@ -58,7 +60,9 @@ fn a_just_copied_binary_starts_while_other_threads_fork() {
     for round in 0..ROUNDS {
         let copy = dir.path().join(format!("true-{round}"));
         std::fs::copy(system_true(), &copy).unwrap();
-        let status = Command::new(&copy).status().unwrap_or_else(|err| panic!("round {round}: {err}"));
+        let mut child = common::spawn_retrying(&mut Command::new(&copy))
+            .unwrap_or_else(|err| panic!("round {round}: {err}"));
+        let status = child.wait().unwrap();
         std::fs::remove_file(&copy).unwrap();
         assert!(status.success(), "round {round}: the copy exited with {status}");
     }

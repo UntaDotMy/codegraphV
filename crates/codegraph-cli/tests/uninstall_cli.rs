@@ -1,9 +1,11 @@
 //! All-target uninstall may remove the installed binary; selected targets retain it.
 //! The binary is a copy placed in a throwaway install dir; agent config lives in a
 //! throwaway home, so nothing on the machine is touched.
+mod common;
+
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -24,26 +26,32 @@ fn installed_copy(root: &Path) -> PathBuf {
     copy
 }
 
+/// Runs `command` to completion like `Command::output`, starting it through `common::spawn_retrying`.
+fn run_to_completion(command: &mut Command) -> std::process::Output {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    common::spawn_retrying(command).unwrap().wait_with_output().unwrap()
+}
+
 fn uninstall(exe: &Path, home: &Path, extra: &[&str]) -> std::process::Output {
     std::fs::create_dir_all(home.join("project")).unwrap();
-    Command::new(exe)
-        .args(["uninstall", "--yes"])
-        .args(extra)
-        .current_dir(home.join("project"))
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        // The default install location must never be the machine's real one in a test.
-        .env("LOCALAPPDATA", home)
-        .env("APPDATA", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env_remove("CLAUDE_CONFIG_DIR")
-        .env_remove("CODEX_HOME")
-        .env_remove("HERMES_HOME")
-        .env_remove("COPILOT_HOME")
-        .env("CODEGRAPHV_INSTALL_DIR", exe.parent().unwrap())
-        .env("CODEGRAPHV_NO_UPDATE_CHECK", "1")
-        .output()
-        .unwrap()
+    run_to_completion(
+        Command::new(exe)
+            .args(["uninstall", "--yes"])
+            .args(extra)
+            .current_dir(home.join("project"))
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            // The default install location must never be the machine's real one in a test.
+            .env("LOCALAPPDATA", home)
+            .env("APPDATA", home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env_remove("HERMES_HOME")
+            .env_remove("COPILOT_HOME")
+            .env("CODEGRAPHV_INSTALL_DIR", exe.parent().unwrap())
+            .env("CODEGRAPHV_NO_UPDATE_CHECK", "1"),
+    )
 }
 
 fn gone_within(path: &Path, limit: Duration) -> bool {
@@ -104,7 +112,7 @@ fn selected_target_and_remaining_local_consumer_keep_the_binary() {
     let out = uninstall(&exe, &home, &["--target", "all"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read_to_string(config).unwrap(), entry);
-    assert!(Command::new(&exe).arg("--version").output().unwrap().status.success());
+    assert!(run_to_completion(Command::new(&exe).arg("--version")).status.success());
 }
 
 #[test]
