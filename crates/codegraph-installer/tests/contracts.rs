@@ -556,3 +556,26 @@ fn claude_refresh_adds_the_guard_and_updates_its_path() {
     env.apply("claude", Location::Global, refresh, false).unwrap();
     assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
 }
+
+/// Upstream #3234: from the home folder, a "local" setup's files are the global ones
+/// (`~/.codex/config.toml`, `~/.claude/settings.json`), and its instructions file is the user's
+/// own `~/AGENTS.md`. A local install there is refused and counts as not configured, so
+/// `upgrade`'s local refresh never writes `~/AGENTS.md` or strips the global guard.
+#[test]
+fn a_local_setup_from_the_home_folder_is_refused_and_never_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(&dir);
+    env.apply("codex", Location::Global, InstallOptions::default(), false).unwrap();
+    env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
+    env.project = env.home.clone();
+    let settings = env.home.join(".claude/settings.json");
+    let before = snapshot(&env.home);
+    for id in ["codex", "claude"] {
+        assert!(!env.configured(id, Location::Local), "{id}");
+        let refused = env.apply(id, Location::Local, InstallOptions { prompt_hook: None, preserve_permissions: true, ..InstallOptions::default() }, false);
+        assert!(refused.is_err_and(|e| e.to_string().contains("home folder")), "{id}");
+    }
+    assert!(!env.home.join("AGENTS.md").exists());
+    assert_eq!(guard_hooks(&settings).len(), 1);
+    assert_eq!(snapshot(&env.home), before);
+}

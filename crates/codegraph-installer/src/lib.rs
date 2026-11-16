@@ -383,8 +383,17 @@ impl Environment {
         let hook = has_hook(brand, data.get("hooks"), &PROMPT_HOOK);
         (permission, hook)
     }
+    /// Whether the project folder is the home folder, where a local setup's files are the global
+    /// ones and its instructions file is the user's own `~/AGENTS.md` (upstream #3234).
+    fn project_is_home(&self) -> bool {
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        canonical(&self.project) == canonical(&self.home)
+    }
     /// Whether `brand`'s MCP server entry is in `id`'s config file.
     pub fn configured_as(&self, brand: &Brand, id: &str, loc: Location) -> bool {
+        if loc == Location::Local && self.project_is_home() {
+            return false;
+        }
         let Ok(path) = self.config_path(id, loc) else {
             return false;
         };
@@ -483,6 +492,13 @@ impl Environment {
         loc: Location,
         remove: bool,
     ) -> Result<Vec<(String, WriteResult)>> {
+        if loc == Location::Local && self.project_is_home() {
+            return Err(format!(
+                "{} is your home folder: a local setup there would write the global agent settings and your own ~/AGENTS.md. Run this from a project folder, or use --location global.",
+                self.project.display()
+            )
+            .into());
+        }
         let dry_run = requests.iter().any(|(_, options)| options.dry_run);
         // Recovery writes, so a dry run must not trigger it.
         let recovery = if dry_run { Vec::new() } else { transaction::recover(&self.home)? };
