@@ -57,6 +57,8 @@ fn a_workspace_entry_outside_the_project_links_nothing() {
         let (_tmp, cg) = index_app(outside, &[]);
         assert_eq!(calls_of(&cg, "run"), Vec::<String>::new(), "{outside}");
     }
+    let (_tmp, cg) = index_app("", &[("app/pnpm-workspace.yaml", "packages:\n  - '../sibling'\n")]);
+    assert_eq!(calls_of(&cg, "run"), Vec::<String>::new(), "pnpm-workspace.yaml");
 }
 
 #[test]

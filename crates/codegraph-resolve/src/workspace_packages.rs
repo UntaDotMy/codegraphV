@@ -611,8 +611,7 @@ pub fn workspace_package_dir_of(ws: &WorkspacePackages, file: &str) -> Option<St
 /// packages are not indexed, so an import of one must stay external rather than resolve to a
 /// same-named symbol inside the project (upstream #3093).
 fn leaves_the_project(pattern: &str) -> bool {
-    let norm = pattern.replace('\\', "/");
-    norm.starts_with('/') || norm.as_bytes().get(1) == Some(&b':') || norm.split('/').any(|seg| seg == "..")
+    nodepath::leaves_root(&nodepath::join(&[pattern]))
 }
 
 /// Workspace glob patterns from package.json + pnpm-workspace.yaml.
