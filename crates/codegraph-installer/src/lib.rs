@@ -698,10 +698,11 @@ impl Environment {
                     None if has_hook(brand, current, &PROMPT_HOOK) => command_hooks(brand, current, &PROMPT_HOOK, true, &command),
                     None => current.cloned(),
                 };
-                // The search-first guard is on wherever codegraphV is configured, a refresh
-                // included, so an upgrade brings it; `CODEGRAPHV_GUARD=0` switches it off.
+                // The search-first guard is on wherever codegraphV is configured globally, a
+                // refresh included, so an upgrade brings it; `CODEGRAPHV_GUARD=0` switches it
+                // off. A project's settings, often committed, never get its per-machine path.
                 let next = if remove || brand.binary == CODEGRAPHV.binary {
-                    command_hooks(brand, next.as_ref(), &GUARD_HOOK, !remove, &command)
+                    command_hooks(brand, next.as_ref(), &GUARD_HOOK, !remove && loc == Location::Global, &command)
                 } else {
                     next
                 };

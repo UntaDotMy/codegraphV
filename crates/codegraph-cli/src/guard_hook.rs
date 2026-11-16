@@ -25,7 +25,10 @@ const LISTERS: &[&str] = &["get-childitem", "gci", "ls", "dir"];
 const FINDERS: &[&str] = &["find", "fd", "fdfind", "locate"];
 const INTERPRETERS: &[&str] = &["python", "python3", "py", "node", "perl", "ruby", "deno", "bun"];
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "pwsh", "powershell", "cmd"];
-const WRAPPERS: &[&str] = &["sudo", "command", "exec", "time", "nice", "nohup", "env", "&", ".", "xargs"];
+/// Words that run the command after them: wrappers and shell keywords (`if grep …; then`).
+const WRAPPERS: &[&str] = &[
+    "sudo", "command", "exec", "time", "nice", "nohup", "env", "&", ".", "xargs", "!", "if", "then", "else", "elif", "while", "until", "do",
+];
 const CD: &[&str] = &["cd", "pushd", "set-location", "sl", "chdir"];
 /// The codegraphV subcommands that answer a lookup.
 const LOOKUPS: &[&str] = &["explore", "node", "query", "callers", "callees", "impact", "context", "files"];
@@ -206,6 +209,11 @@ impl Guard {
             .entry(root.to_owned())
             .or_insert_with(|| {
                 let store = Store::open(database_path(Path::new(root)), DbOpenOptions { read_only: true, ..Default::default() }).ok()?;
+                // Mid-rebuild the index is half-built and holding it would block the file the
+                // rebuild replaces: allow, as the prompt hook stays out.
+                if store.get_metadata("index_state").ok().flatten().as_deref() == Some("indexing") {
+                    return None;
+                }
                 let files = store.get_all_file_paths().ok()?;
                 Some((store, files))
             })
@@ -651,6 +659,12 @@ fn stages(command: &str, cwd: &Path, depth: usize, out: &mut Vec<(PathBuf, usize
     }
     let mut eff = cwd.to_path_buf();
     for chain in split_top(command, &["&&", "||", ";", "\r\n", "\n"]) {
+        // `( … )` and `{ …; }` run their commands too.
+        let t = chain.trim();
+        if (t.starts_with('(') && t.ends_with(')')) || (t.starts_with('{') && t.ends_with('}')) {
+            stages(&t[1..t.len() - 1], &eff, depth + 1, out);
+            continue;
+        }
         let segs: Vec<String> = split_top(&chain, &["|"]).into_iter().filter(|s| !s.trim().is_empty()).collect();
         for (pos, seg) in segs.iter().enumerate() {
             let Some((name, args)) = stage(seg) else { continue };
@@ -696,7 +710,11 @@ impl Guard {
             if pos == 0 {
                 first_name = name.clone();
             }
-            let paths = |ps: &[String]| -> Vec<PathBuf> { ps.iter().map(|p| norm_path(p, &eff)).collect() };
+            // A path held in a variable (`grep x $f` in a loop) is unknown: count it as the folder
+            // the command runs in.
+            let paths = |ps: &[String]| -> Vec<PathBuf> {
+                ps.iter().map(|p| if p.contains('$') { eff.clone() } else { norm_path(p, &eff) }).collect()
+            };
             let n = name.as_str();
             if SEARCHERS.contains(&n) {
                 let s = parse_search(n, &args);

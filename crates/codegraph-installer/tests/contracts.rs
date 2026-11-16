@@ -155,15 +155,18 @@ fn audit_exec_hook_paths_are_literal_and_extra_arguments_are_not_owned() {
         assert_eq!(hook["command"], executable);
         assert_eq!(hook["args"], serde_json::json!(["prompt-hook"]));
         hook["args"] = serde_json::json!(["prompt-hook", "user-extension"]);
-        let guard = &data["hooks"]["PreToolUse"][0]["hooks"][0];
-        assert_eq!(guard["command"], executable);
-        assert_eq!(guard["args"], serde_json::json!(["guard-hook"]));
+        // A project's settings never get the guard's per-machine path.
+        assert!(data["hooks"].get("PreToolUse").is_none(), "{data}");
         fs::write(&path, data.to_string()).unwrap();
         env.apply("claude", Location::Local, InstallOptions::default(), true).unwrap();
         let after: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        // Uninstall takes the guard; the extended hook is no longer ours and stays.
-        data["hooks"].as_object_mut().unwrap().remove("PreToolUse");
         assert_eq!(after["hooks"], data["hooks"]);
+        // The global install writes it with the executable's literal path.
+        env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
+        let global = env.home.join(".claude/settings.json");
+        let guard = &guard_hooks(&global)[0]["hooks"][0];
+        assert_eq!(guard["command"], executable);
+        assert_eq!(guard["args"], serde_json::json!(["guard-hook"]));
     }
 }
 
@@ -416,8 +419,9 @@ fn claude_prompt_hook_is_added_idempotent_and_removed_without_touching_siblings(
     assert!(!left.contains("UserPromptSubmit"), "{left}");
 }
 
-/// A refresh (`install --refresh`, run by `upgrade`) never adds a hook and never rewrites the
-/// original codegraph's: replacing those is `migrate`'s job, on request.
+/// A refresh (`install --refresh`, run by `upgrade`) never adds a prompt hook and never rewrites
+/// the original codegraph's: replacing those is `migrate`'s job, on request. (It does add the
+/// search guard: see `claude_refresh_adds_the_guard_and_updates_its_path`.)
 #[test]
 fn claude_refresh_leaves_the_originals_hooks_and_never_adds_one() {
     let refresh = InstallOptions { prompt_hook: None, ..InstallOptions::default() };

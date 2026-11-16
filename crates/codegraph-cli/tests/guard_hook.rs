@@ -83,6 +83,11 @@ fn searches_naming_indexed_symbols_are_denied_until_codegraphv_was_asked() {
         // Command substitution and backticks run their commands too.
         ("Bash", bash("echo $(rg parseToken src)")),
         ("Bash", bash("echo `grep -rn parseToken .`")),
+        // Shell keywords, groups and loop variables run and name the searcher too.
+        ("Bash", bash("if grep -q parseToken src/auth.ts; then echo y; fi")),
+        ("Bash", bash("for f in src/*.ts; do grep parseToken $f; done")),
+        ("Bash", bash("( rg parseToken src )")),
+        ("Bash", bash("{ rg parseToken src; }")),
         // Mentioning a lookup is not making one.
         ("Bash", bash("echo codegraphV explore parseToken && rg parseToken src")),
         ("Glob", json!({"pattern": "**/*.ts", "path": p})),
