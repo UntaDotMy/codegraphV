@@ -91,7 +91,7 @@ pub fn load_workspace_packages(project_root: &str) -> Option<WorkspacePackages> 
     // What a negated glob matches is no member, wherever the glob is listed.
     let excluded: Vec<&str> = patterns.iter().filter(|p| p.starts_with('!')).map(|p| &p[1..]).collect();
     for pattern in &patterns {
-        if pattern.starts_with('!') {
+        if pattern.starts_with('!') || leaves_the_project(pattern) {
             continue;
         }
         for dir in expand_workspace_glob(project_root, pattern) {
@@ -605,6 +605,14 @@ pub fn workspace_package_dir_of(ws: &WorkspacePackages, file: &str) -> Option<St
     // A stable sort by length: of two nested folders the outer one is found first.
     dirs.sort_by_key(|d| utf16(d));
     dirs.into_iter().find(|dir| file.starts_with(dir.as_str()) && file[dir.len()..].starts_with('/')).cloned()
+}
+
+/// A workspace pattern naming a folder outside the project (`../sibling`, `/abs`, `C:/x`): its
+/// packages are not indexed, so an import of one must stay external rather than resolve to a
+/// same-named symbol inside the project (upstream #3093).
+fn leaves_the_project(pattern: &str) -> bool {
+    let norm = pattern.replace('\\', "/");
+    norm.starts_with('/') || norm.as_bytes().get(1) == Some(&b':') || norm.split('/').any(|seg| seg == "..")
 }
 
 /// Workspace glob patterns from package.json + pnpm-workspace.yaml.
