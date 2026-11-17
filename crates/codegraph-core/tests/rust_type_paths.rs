@@ -38,7 +38,7 @@ fn describe(cg: &CodeGraph, id: &str) -> String {
 fn calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
     let nodes = cg.get_nodes_by_file(file).unwrap();
     let Some(caller) = nodes.iter().find(|n| n.name == name && n.kind == NodeKind::Function) else {
-        return vec![format!("<no function {name} in {file}>")];
+        panic!("no function {name} in {file}");
     };
     let mut out = Vec::new();
     for edge in cg.get_outgoing_edges(&caller.id).unwrap() {
@@ -54,7 +54,7 @@ fn calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
 fn incoming(cg: &CodeGraph, file: &str, qualified: &str, kind: EdgeKind) -> Vec<String> {
     let nodes = cg.get_nodes_by_file(file).unwrap();
     let Some(target) = nodes.iter().find(|n| n.qualified_name == qualified) else {
-        return vec![format!("<no {qualified} in {file}>")];
+        panic!("no node {qualified} in {file}");
     };
     let mut out = Vec::new();
     for edge in cg.get_incoming_edges(&target.id).unwrap() {
@@ -73,16 +73,19 @@ fn incoming(cg: &CodeGraph, file: &str, qualified: &str, kind: EdgeKind) -> Vec<
 /// Every `file:qualifiedName` with any edge into a node named `Handle` or `new`.
 fn touches(cg: &CodeGraph, file: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut named = 0;
     for node in cg.get_nodes_by_file(file).unwrap() {
         if node.name != "Handle" && node.name != "new" {
             continue;
         }
+        named += 1;
         for edge in cg.get_incoming_edges(&node.id).unwrap() {
             if let Some(src) = cg.get_node(&edge.source).unwrap() {
                 out.push(format!("{}:{}", src.file_path, src.qualified_name));
             }
         }
     }
+    assert!(named > 0, "no Handle or new node in {file}");
     out.sort();
     out.dedup();
     out
@@ -405,4 +408,25 @@ fn cross_crate_paths_link_the_named_item() {
     );
 
     c.finish();
+}
+
+#[test]
+#[should_panic(expected = "no function absent in src/lib.rs")]
+fn a_missing_function_fails_the_calls_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = calls_of(&f.cg, "src/lib.rs", "absent");
+}
+
+#[test]
+#[should_panic(expected = "no node absent in src/lib.rs")]
+fn a_missing_node_fails_the_incoming_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = incoming(&f.cg, "src/lib.rs", "absent", EdgeKind::Imports);
+}
+
+#[test]
+#[should_panic(expected = "no Handle or new node in src/lib.rs")]
+fn a_file_without_the_named_nodes_fails_the_touches_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = touches(&f.cg, "src/lib.rs");
 }

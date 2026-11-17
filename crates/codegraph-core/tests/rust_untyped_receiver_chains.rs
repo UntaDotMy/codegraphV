@@ -64,7 +64,7 @@ fn describe(cg: &CodeGraph, id: &str) -> String {
 fn typed_calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
     let nodes = cg.get_nodes_by_file(file).unwrap();
     let Some(caller) = nodes.iter().find(|n| n.name == name && n.kind == NodeKind::Function) else {
-        return vec![format!("<no function {name} in {file}>")];
+        panic!("no function {name} in {file}");
     };
     let mut out = Vec::new();
     for edge in cg.get_outgoing_edges(&caller.id).unwrap() {
@@ -81,7 +81,7 @@ fn typed_calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
 fn calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
     let nodes = cg.get_nodes_by_file(file).unwrap();
     let Some(caller) = nodes.iter().find(|n| n.name == name && n.kind == NodeKind::Function) else {
-        return vec![format!("<no function {name} in {file}>")];
+        panic!("no function {name} in {file}");
     };
     let mut out = Vec::new();
     for edge in cg.get_outgoing_edges(&caller.id).unwrap() {
@@ -1341,10 +1341,6 @@ fn mutex_of_arc_clone_is_not_the_payload_clone() {
     let fx = cell_arc_fixture();
     let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_arc_clone");
     assert!(
-        !calls.iter().any(|c| c.starts_with("<no function")),
-        "{calls:?}"
-    );
-    assert!(
         !calls.iter().any(|c| c.contains("Relay::clone")),
         "{calls:?}"
     );
@@ -1354,10 +1350,6 @@ fn mutex_of_arc_clone_is_not_the_payload_clone() {
 fn refcell_of_rc_clone_is_not_the_payload_clone() {
     let fx = cell_arc_fixture();
     let calls = typed_calls_of(&fx.cg, "src/cell.rs", "refcell_rc_clone");
-    assert!(
-        !calls.iter().any(|c| c.starts_with("<no function")),
-        "{calls:?}"
-    );
     assert!(
         !calls.iter().any(|c| c.contains("Relay::clone")),
         "{calls:?}"
@@ -1369,10 +1361,6 @@ fn mutex_of_box_clone_is_not_the_payload_clone() {
     let fx = cell_arc_fixture();
     let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_box_clone");
     assert!(
-        !calls.iter().any(|c| c.starts_with("<no function")),
-        "{calls:?}"
-    );
-    assert!(
         !calls.iter().any(|c| c.contains("Relay::clone")),
         "{calls:?}"
     );
@@ -1383,10 +1371,6 @@ fn mutex_of_bound_arc_clone_is_not_the_payload_clone() {
     let fx = cell_arc_fixture();
     let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_binding_clone");
     assert!(
-        !calls.iter().any(|c| c.starts_with("<no function")),
-        "{calls:?}"
-    );
-    assert!(
         !calls.iter().any(|c| c.contains("Relay::clone")),
         "{calls:?}"
     );
@@ -1396,10 +1380,6 @@ fn mutex_of_bound_arc_clone_is_not_the_payload_clone() {
 fn mutex_of_annotated_arc_clone_is_not_the_payload_clone() {
     let fx = cell_arc_fixture();
     let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_annotated_clone");
-    assert!(
-        !calls.iter().any(|c| c.starts_with("<no function")),
-        "{calls:?}"
-    );
     assert!(
         !calls.iter().any(|c| c.contains("Relay::clone")),
         "{calls:?}"
@@ -1438,4 +1418,18 @@ fn mutex_of_arc_method_keeps_its_link() {
         calls.iter().any(|c| c.contains("Relay::from_daemon")),
         "{calls:?}"
     );
+}
+
+#[test]
+#[should_panic(expected = "no function absent in src/lib.rs")]
+fn a_missing_function_fails_the_typed_calls_helper() {
+    let fx = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = typed_calls_of(&fx.cg, "src/lib.rs", "absent");
+}
+
+#[test]
+#[should_panic(expected = "no function absent in src/lib.rs")]
+fn a_missing_function_fails_the_calls_helper() {
+    let fx = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = calls_of(&fx.cg, "src/lib.rs", "absent");
 }
