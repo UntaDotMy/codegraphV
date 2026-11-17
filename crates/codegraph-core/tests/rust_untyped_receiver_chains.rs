@@ -8,7 +8,7 @@
 //!
 //! A std `Mutex`, `RefCell` or `Vec` written with its std path (`std::sync::Mutex`, `std::cell::RefCell`,
 //! `std::vec::Vec`) is read as std when the crate declares a type of the same name, including a `Vec`
-//! iterated with `for row in store.rows.iter()`.
+//! iterated with `for row in store.rows.iter()` and a std `HashMap` read through `values()`.
 //!
 //! The controls must keep linking, and by their type: a project type reached through a
 //! RefCell or a Mutex borrow, a project-typed field, an extension trait implemented on a
@@ -540,7 +540,7 @@ fn std_refcell_borrow_with_a_project_refcell_namesake_is_not_a_project_method() 
     assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
 }
 
-// The one that stays red on 485dc466 (rust_item_of, types.rs:2000-2002, checks the name only).
+// Red on 485dc466: rust_item_of checked the head name only. Green after the std-rooted fix.
 #[test]
 fn std_vec_iteration_with_a_project_vec_namesake_is_not_a_project_method() {
     let fx = std_namesake_fixture();
