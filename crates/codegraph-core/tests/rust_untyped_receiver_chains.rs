@@ -16,6 +16,11 @@
 //! foreign type, and a generic or `dyn` receiver of a project trait. A same-file namesake
 //! on another type makes the bare name ambiguous, so a control passes only when its
 //! receiver's type is read.
+//!
+//! A `Mutex`, `RwLock` or `RefCell` built by `::new` keeps the type it holds, so its lock, read,
+//! write or borrow reads that type: through a guard local, and with a std path when
+//! the crate declares a `Mutex` of its own. A `Mutex` from another crate, written with its path
+//! or imported, is not the standard one, so its lock keeps its name link.
 use codegraph_core::CodeGraph;
 use codegraph_types::{EdgeKind, NodeKind};
 use std::fs;
@@ -603,4 +608,224 @@ fn std_hash_map_values_of_btree_maps_with_a_project_hash_map_namesake_is_not_a_p
     let fx = std_btree_item_fixture();
     let calls = calls_of(&fx.cg, "src/store.rs", "std_btree_values");
     assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+const CELL_LINK: &str = r#"
+pub struct Relay;
+
+impl Relay {
+    pub fn from_daemon(&self, line: &str) -> bool {
+        let _ = line;
+        true
+    }
+
+    pub fn get(&self, key: &str) -> u8 {
+        let _ = key;
+        0
+    }
+}
+
+pub struct Link {
+    pub relay: Relay,
+    pub closed: bool,
+}
+"#;
+
+const CELL_DAEMON: &str = r#"
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+
+use crate::link::{Link, Relay};
+
+pub fn behind_arc_mutex(line: &str) -> bool {
+    let link = Arc::new(Mutex::new(Link { relay: Relay, closed: false }));
+    link.lock().unwrap().relay.from_daemon(line)
+}
+
+pub fn behind_arc_mutex_guard_local(line: &str) -> bool {
+    let link = Arc::new(Mutex::new(Link { relay: Relay, closed: false }));
+    let link = link.lock().unwrap();
+    link.relay.from_daemon(line)
+}
+
+pub fn behind_rwlock(line: &str) -> bool {
+    let link = RwLock::new(Link { relay: Relay, closed: false });
+    link.read().unwrap().relay.from_daemon(line)
+}
+
+pub fn behind_refcell() -> bool {
+    let cell = RefCell::new(Relay);
+    cell.borrow().from_daemon("x")
+}
+
+pub fn std_map_behind_mutex(key: &str) -> u8 {
+    let map = Mutex::new(HashMap::new());
+    map.lock().unwrap().get(key).copied().unwrap_or(0)
+}
+"#;
+
+const NAMESAKE_DAEMON: &str = r#"
+use crate::link::{Link, Relay};
+
+pub fn std_rooted_behind_mutex_with_namesake(line: &str) -> bool {
+    let link = std::sync::Mutex::new(Link { relay: Relay, closed: false });
+    link.lock().unwrap().relay.from_daemon(line)
+}
+"#;
+
+fn cell_fixture() -> Fixture {
+    index(&[
+        ("src/lib.rs", "pub mod link;\npub mod daemon;\n"),
+        ("src/link.rs", CELL_LINK),
+        ("src/daemon.rs", CELL_DAEMON),
+    ])
+}
+
+fn cell_namesake_fixture() -> Fixture {
+    index(&[
+        (
+            "src/lib.rs",
+            "pub mod link;\npub mod daemon;\npub mod names;\n",
+        ),
+        ("src/link.rs", CELL_LINK),
+        ("src/daemon.rs", NAMESAKE_DAEMON),
+        ("src/names.rs", "pub struct Mutex;\n"),
+    ])
+}
+
+#[test]
+fn project_type_behind_arc_mutex_constructor_links_by_type() {
+    let fx = cell_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/daemon.rs", "behind_arc_mutex");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_behind_arc_mutex_guard_local_links_by_type() {
+    let fx = cell_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/daemon.rs", "behind_arc_mutex_guard_local");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_behind_rwlock_constructor_links_by_type() {
+    let fx = cell_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/daemon.rs", "behind_rwlock");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_behind_refcell_constructor_links_by_type() {
+    let fx = cell_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/daemon.rs", "behind_refcell");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn std_map_built_by_mutex_constructor_is_not_a_project_method() {
+    let fx = cell_fixture();
+    let calls = calls_of(&fx.cg, "src/daemon.rs", "std_map_behind_mutex");
+    assert!(!calls.iter().any(|c| c.contains("Relay::get")), "{calls:?}");
+}
+
+#[test]
+fn std_rooted_mutex_constructor_with_a_project_mutex_namesake_links_by_type() {
+    let fx = cell_namesake_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/daemon.rs",
+        "std_rooted_behind_mutex_with_namesake",
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+const THIRD_PARTY: &str = r#"use std::sync;
+use parking_lot::Mutex;
+use crate::link::{Link, Relay};
+
+pub fn parking_lot_qualified_direct(line: &str) -> bool {
+    let m = parking_lot::Mutex::new(Relay);
+    m.lock().from_daemon(line)
+}
+
+pub fn parking_lot_imported_direct(line: &str) -> bool {
+    let m = Mutex::new(Relay);
+    m.lock().from_daemon(line)
+}
+
+pub fn std_module_path_still_typed(line: &str) -> bool {
+    let m = sync::Mutex::new(Link { relay: Relay, closed: false });
+    m.lock().unwrap().relay.from_daemon(line)
+}
+"#;
+
+fn third_party_fixture() -> Fixture {
+    index(&[
+        (
+            "src/lib.rs",
+            "pub mod link;
+pub mod third_party;
+",
+        ),
+        ("src/link.rs", CELL_LINK),
+        ("src/third_party.rs", THIRD_PARTY),
+    ])
+}
+
+#[test]
+fn project_type_behind_qualified_parking_lot_mutex_keeps_the_edge() {
+    let fx = third_party_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/third_party.rs", "parking_lot_qualified_direct");
+    assert!(
+        calls.iter().any(|c| c.contains("Relay::from_daemon")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_behind_imported_parking_lot_mutex_keeps_the_edge() {
+    let fx = third_party_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/third_party.rs", "parking_lot_imported_direct");
+    assert!(
+        calls.iter().any(|c| c.contains("Relay::from_daemon")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn std_module_path_mutex_imported_from_std_still_links_by_type() {
+    let fx = third_party_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/third_party.rs", "std_module_path_still_typed");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
 }

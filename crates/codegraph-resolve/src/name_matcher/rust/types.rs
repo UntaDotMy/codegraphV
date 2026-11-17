@@ -1057,6 +1057,12 @@ pub fn rust_value_type(
                 }
                 return unwrapped(local(&callee));
             }
+            if last == "new" && unwraps == 0 {
+                if let Some(cell) = std_cell_constructor(&segments, args, at, scopes, r, ctx, depth)
+                {
+                    return Some(cell);
+                }
+            }
             if segments.len() >= 2 && re!(r"^[A-Z]").is_match(segments[segments.len() - 2]) {
                 let owner: Vec<String> = segments[..segments.len() - 1]
                     .iter()
@@ -1163,6 +1169,69 @@ pub fn rust_signature_offset(fn_: &Node, ctx: &Ctx) -> usize {
             .map(|f| f.from)
     });
     own.map_or(start, |from| from + 1)
+}
+
+/// `Mutex::new(x)`, `RwLock::new(x)` or `RefCell::new(x)` of the standard cell type (see
+/// `is_std_cell_type`): written by its std path and holding the type of `x`, so its accessor can read
+/// the value. The std path keeps a project namesake from switching the accessor off.
+fn std_cell_constructor(
+    segments: &[&str],
+    args: &str,
+    at: usize,
+    scopes: &RustScopes,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+    depth: u32,
+) -> Option<RustWrittenType> {
+    if segments.len() < 2 || split_rust_top_level(args, ',').len() != 1 {
+        return None;
+    }
+    let owner = segments[segments.len() - 2];
+    let std_path = match owner {
+        "Mutex" => "std::sync::Mutex",
+        "RwLock" => "std::sync::RwLock",
+        "RefCell" => "std::cell::RefCell",
+        _ => return None,
+    };
+    let head = (segments.len() > 2).then(|| segments[0]);
+    if !is_std_cell_type(head, owner, &r.file_path, Some(at), ctx) {
+        return None;
+    }
+    // Not one level deeper: `args` is a part of this expression, so the recursion ends, and
+    // `Arc::new(Mutex::new(x))` must reach `x` at the depth `Arc::new(x)` does.
+    let held = rust_value_type(args, at, scopes, r, ctx, depth)?;
+    Some(RustWrittenType {
+        text: format!("{std_path}<{}>", held.text),
+        wrappers: None,
+        opaque: None,
+        ..held
+    })
+}
+
+/// Whether the cell type `name` (`Mutex`, `RwLock` or `RefCell`), written under `head` (its first path
+/// segment, when it has a path) at `at` in `file`, is the standard one: rooted at `std`, `core` or
+/// `alloc`, or imported from there, and no project type of that name. A cell from another crate
+/// (`parking_lot::Mutex`) hands out its value without a `Result`, so its lock is not read as one.
+fn is_std_cell_type(
+    head: Option<&str>,
+    name: &str,
+    file: &str,
+    at: Option<usize>,
+    ctx: &Ctx,
+) -> bool {
+    if matches!(head, Some("std" | "core" | "alloc")) {
+        return true;
+    }
+    if is_rust_project_named(name, ctx) {
+        return false;
+    }
+    match rust_use_path(head.unwrap_or(name), file, at, ctx) {
+        Some(path) => matches!(
+            path.first().map(String::as_str),
+            Some("std" | "core" | "alloc")
+        ),
+        None => head.is_none(),
+    }
 }
 
 fn rust_associated_return(
