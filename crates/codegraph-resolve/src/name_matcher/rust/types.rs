@@ -1365,6 +1365,11 @@ fn read_rust_method_return(
         return None;
     }?;
     let read = rust_read_type(&written, r, ctx);
+    if awaits == 0 {
+        if let Some(held) = rust_std_accessor_result(&read, method, &written, ctx) {
+            return apply_unwraps(Some(held), unwraps);
+        }
+    }
     let result = match super::calls::rust_typed_method_call(&read, method, r, ctx, 0) {
         super::calls::CallRes::Hit(h) => h,
         _ => return None,
@@ -1386,10 +1391,66 @@ fn read_rust_method_return(
     if awaits == 1 && !is_async {
         made = made.and_then(|m| rust_future_output(&m));
     }
+    apply_unwraps(made, unwraps)
+}
+
+/// The `unwraps` a method result takes: through the `Option`/`Result` it holds, that many times.
+fn apply_unwraps(made: Option<RustWrittenType>, unwraps: u32) -> Option<RustWrittenType> {
     match made {
         Some(m) if unwraps > 0 => rust_unwrapped(&m, unwraps),
         other => other,
     }
+}
+
+/// What a method returns when a standard type is its receiver and no project declaration of
+/// that type answers. A receiver whose path is rooted at `std`, `core` or `alloc` is read as the
+/// standard type even when a project declares the same name, such as a `Result<T>` alias.
+/// A `RefCell` hands out the value it holds (`borrow`, `borrow_mut`); a `Mutex` or `RwLock`
+/// lock hands it out inside a result (`lock`, `try_lock`, `read`, `write`, `try_read`,
+/// `try_write`); an `Option` or `Result` `unwrap_or`, `unwrap_or_else` or `unwrap_or_default`
+/// hands out the value it holds. A deref wrapper (any of `RUST_DEREF_WRAPPERS`) is passed
+/// through to the type it holds, so `Rc<RefCell<T>>` reads as `RefCell<T>`.
+/// Not modelled: a file that imports `std::borrow::Borrow`, where `borrow` on a pointer is that
+/// trait's method. A bare project name that shadows a standard one (a `Result<T>` alias declared
+/// anywhere in the project) is left unread. A project module or crate named `core`, `std` or
+/// `alloc`, when written as a path root, is read as the standard one. Undefined for anything
+/// else, so every other receiver keeps the lookup it had.
+fn rust_std_accessor_result(
+    read: &RustTypeRead,
+    method: &str,
+    written: &RustWrittenType,
+    ctx: &Ctx,
+) -> Option<RustWrittenType> {
+    let RustTypeRead::Read(body) = read else {
+        return None;
+    };
+    let RustReadKind::Named { name, args, path } = &body.kind else {
+        return None;
+    };
+    let through_deref_only = body
+        .wrappers
+        .iter()
+        .all(|w| RUST_DEREF_WRAPPERS.contains(&w.as_str()));
+    // A path rooted at `std`, `core` or `alloc` is taken to be the standard type, so a project
+    // type of the same name (a `Result` alias, say) does not switch the standard accessor off.
+    let std_rooted = path
+        .first()
+        .is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"));
+    if !through_deref_only || (!std_rooted && is_rust_project_named(name, ctx)) {
+        return None;
+    }
+    let held = split_rust_top_level(args, ',').into_iter().next()?;
+    let text = match (name.as_str(), method) {
+        ("RefCell", "borrow" | "borrow_mut") => held,
+        // Named by its std path, so a project `Result` alias cannot be read in its place.
+        ("Mutex", "lock" | "try_lock") | ("RwLock", "read" | "write" | "try_read" | "try_write") => {
+            format!("std::result::Result<{held}, _>")
+        }
+        ("Option" | "Result", "unwrap_or" | "unwrap_or_else" | "unwrap_or_default") => held,
+        _ => return None,
+    };
+    // The held value is not behind the receiver's wrappers: those were passed through to reach it.
+    Some(RustWrittenType { text, wrappers: None, opaque: None, ..written.clone() })
 }
 
 fn identifier_names(text: &str) -> Vec<String> {
@@ -1936,7 +1997,13 @@ fn rust_item_of(
         return None;
     }
     let head = rust_path_head(&t)?;
-    if !std_(&head.name) {
+    // A path rooted at std, core or alloc is the standard type, as in rust_std_accessor_result,
+    // so a project type of the same name does not switch the standard item read off.
+    let std_rooted = head
+        .segments
+        .first()
+        .is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"));
+    if !std_rooted && !std_(&head.name) {
         return None;
     }
     let args = type_args(&head.args);
