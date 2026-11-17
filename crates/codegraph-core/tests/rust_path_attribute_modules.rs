@@ -48,7 +48,7 @@ fn calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
         .iter()
         .find(|n| n.name == name && n.kind == NodeKind::Function)
     else {
-        return vec![format!("<no function {name} in {file}>")];
+        panic!("no function {name} in {file}");
     };
     let mut out = Vec::new();
     for edge in cg.get_outgoing_edges(&caller.id).unwrap() {
@@ -304,4 +304,11 @@ fn a_use_through_a_glob_of_cfg_alternatives_reaches_the_item() {
             "OrphanQueue crates/core/src/process/unix/orphan.rs:1",
         ]
     );
+}
+
+#[test]
+#[should_panic(expected = "no function absent in src/lib.rs")]
+fn a_missing_function_fails_the_calls_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = calls_of(&f.cg, "src/lib.rs", "absent");
 }

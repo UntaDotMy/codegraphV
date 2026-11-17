@@ -470,12 +470,13 @@ fn rust_deref_target(name: &str, type_files: &[String], ctx: &Ctx) -> Option<Rus
     None
 }
 
-fn rust_alias_target(alias: &Node, ctx: &Ctx) -> Option<RustWrittenType> {
+/// The target and own generics of a `type` alias. The generics may carry defaults (`E = String`).
+pub(super) fn rust_alias_target(alias: &Node, ctx: &Ctx) -> Option<RustWrittenType> {
     let scopes = rust_scopes_of(&alias.file_path, ctx)?;
     let start = rust_node_offset(alias, ctx);
     let re = Re::cached(
         &format!(
-            r"\btype\s+{}\b\s*(?:<([^=;]*?)>)?\s*=\s*([^;]+);",
+            r"\btype\s+{}\b\s*(?:<([^;]*?)>)?\s*=\s*([^;]+);",
             escape_regex(&alias.name)
         ),
         "",
@@ -1389,14 +1390,35 @@ pub fn rust_type_text_at(text: &str) -> String {
     trim(text).to_string()
 }
 
-fn rust_declared_type_text(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
+/// A binding's declared type text, and the origin it is read from: the binding's declaration.
+fn rust_declared_type(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<(String, RustOrigin)> {
     let scopes = rust_scopes_of(&r.file_path, ctx)?;
     let offset = rust_ref_offset(&scopes, r);
     let (binding, ambiguous) = rust_binding_at(&scopes, name, offset)?;
     if ambiguous {
         return None;
     }
-    binding.ty.as_deref().map(rust_type_text_at)
+    let text = binding.ty.as_deref().map(rust_type_text_at)?;
+    Some((
+        text,
+        RustOrigin {
+            file: r.file_path.clone(),
+            at: binding.at,
+        },
+    ))
+}
+
+/// Whether `Pin` in a receiver's declared type is std's, read from that declaration as the lent route reads it.
+/// Without a declared `Pin` type, the project-wide namesake check stands.
+pub fn rust_pin_is_std(receiver: &str, r: &UnresolvedRef, ctx: &Ctx) -> bool {
+    let declared = rust_declared_type(receiver, r, ctx).and_then(|(text, origin)| {
+        let head = rust_type_head(&text).filter(|h| h.outer == "Pin")?;
+        Some((head.path, origin))
+    });
+    match declared {
+        Some((path, origin)) => rust_name_reading("Pin", &path, &origin, ctx) == NameReading::Std,
+        None => !is_rust_project_named("Pin", ctx),
+    }
 }
 
 fn rust_pinned_pointee(type_: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<String> {
@@ -1419,7 +1441,7 @@ pub fn match_rust_pinned_call(
     ctx: &Ctx,
 ) -> Option<ResolvedRef> {
     let pointee =
-        rust_declared_type_text(receiver, r, ctx).and_then(|t| rust_pinned_pointee(&t, r, ctx));
+        rust_declared_type(receiver, r, ctx).and_then(|(t, _)| rust_pinned_pointee(&t, r, ctx));
     rust_pinned_call_on(pointee, name, r, ctx)
 }
 
@@ -1464,6 +1486,8 @@ fn rust_pinned_call_on(
 const RUST_LENDING_POINTERS: [&str; 5] = ["Box", "NonNull", "Rc", "Arc", "Cow"];
 
 struct TypeHead {
+    /// The written path before the outer name (`std::sync` in `std::sync::Arc<T>`).
+    path: Vec<String>,
     outer: String,
     args: String,
     text: String,
@@ -1472,16 +1496,35 @@ struct TypeHead {
 fn rust_type_head(type_: &str) -> Option<TypeHead> {
     let a = strip(re!(r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?)+"), type_);
     let text = trim(&strip(re!(r"^(?:dyn|impl)\s+"), &a)).to_string();
-    let m = re!(r"^(?:[A-Za-z_]\w*\s*::\s*)*([A-Za-z_]\w*)\s*(?:<([\s\S]*)>)?").captures(&text)?;
+    let m = re!(r"^((?:[A-Za-z_]\w*\s*::\s*)*)([A-Za-z_]\w*)\s*(?:<([\s\S]*)>)?").captures(&text)?;
     Some(TypeHead {
-        outer: m.text(1).unwrap_or("").to_string(),
-        args: m.text(2).unwrap_or("").to_string(),
+        path: m
+            .text(1)
+            .unwrap_or("")
+            .split("::")
+            .map(trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        outer: m.text(2).unwrap_or("").to_string(),
+        args: m.text(3).unwrap_or("").to_string(),
         text: text.clone(),
     })
 }
 
+/// How `name`, written under `path` in a type read from `origin`, reads (`rust_name_reading`). With no origin, as
+/// a struct field's type has, only the project-wide namesake check stands.
+fn rust_name_read(name: &str, path: &[String], origin: Option<&RustOrigin>, ctx: &Ctx) -> NameReading {
+    match origin {
+        Some(origin) => rust_name_reading(name, path, origin, ctx),
+        None if is_rust_project_named(name, ctx) => NameReading::Project,
+        None => NameReading::Std,
+    }
+}
+
 fn rust_lent_call(
     type_: &str,
+    origin: Option<&RustOrigin>,
     name: &str,
     r: &UnresolvedRef,
     ctx: &Ctx,
@@ -1490,7 +1533,7 @@ fn rust_lent_call(
     let Some(head) = rust_type_head(type_) else {
         return Tri::Undefined;
     };
-    if head.outer == "Pin" && !is_rust_project_named("Pin", ctx) {
+    if head.outer == "Pin" && rust_name_read("Pin", &head.path, origin, ctx) == NameReading::Std {
         return if tried {
             Tri::Undefined
         } else {
@@ -1502,19 +1545,19 @@ fn rust_lent_call(
             ))
         };
     }
-    if is_rust_project_named(&head.outer, ctx) {
+    if rust_name_read(&head.outer, &head.path, origin, ctx) != NameReading::Std {
         return Tri::Undefined;
     }
     if RUST_LENDING_POINTERS.contains(&head.outer.as_str()) {
         return if tried {
             Tri::Undefined
         } else {
-            rust_call_on_type(&rust_type_text_at(&head.args), name, r, ctx)
+            rust_call_on_type(&rust_type_text_at(&head.args), origin, name, r, ctx)
         };
     }
     if head.outer == "Option" || head.outer == "Result" {
         return if tried {
-            rust_call_on_type(&rust_type_text_at(&head.args), name, r, ctx)
+            rust_call_on_type(&rust_type_text_at(&head.args), origin, name, r, ctx)
         } else {
             Tri::Null
         };
@@ -1529,11 +1572,17 @@ fn opt_to_tri(v: Option<ResolvedRef>) -> Tri<ResolvedRef> {
     v.map_or(Tri::Null, Tri::Value)
 }
 
-fn rust_call_on_type(type_: &str, name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Tri<ResolvedRef> {
+fn rust_call_on_type(
+    type_: &str,
+    origin: Option<&RustOrigin>,
+    name: &str,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+) -> Tri<ResolvedRef> {
     let Some(head) = rust_type_head(type_) else {
         return Tri::Undefined;
     };
-    if head.outer == "Pin" && !is_rust_project_named("Pin", ctx) {
+    if head.outer == "Pin" && rust_name_read("Pin", &head.path, origin, ctx) == NameReading::Std {
         return opt_to_tri(rust_pinned_call_on(
             rust_pinned_pointee(&head.text, r, ctx),
             name,
@@ -1541,19 +1590,21 @@ fn rust_call_on_type(type_: &str, name: &str, r: &UnresolvedRef, ctx: &Ctx) -> T
             ctx,
         ));
     }
-    let outer = if head.outer == "Self" {
-        rust_self_type(r, ctx).map(|s| s.type_)
+    // `Self` is the impl's own type, which no origin in the file decides.
+    let (outer, origin) = if head.outer == "Self" {
+        (rust_self_type(r, ctx).map(|s| s.type_), None)
     } else {
-        Some(head.outer.clone())
+        (Some(head.outer.clone()), origin)
     };
     let Some(outer) = outer.filter(|o| !is_rust_type_param(o, r, ctx)) else {
         return Tri::Null;
     };
-    if RUST_LENDING_POINTERS.contains(&outer.as_str()) && !is_rust_project_named(&outer, ctx) {
+    let read = rust_name_read(&outer, &head.path, origin, ctx);
+    if RUST_LENDING_POINTERS.contains(&outer.as_str()) && read == NameReading::Std {
         return if rust_wrapper_has_own(&outer, name) {
             Tri::Null
         } else {
-            rust_call_on_type(&rust_type_text_at(&head.args), name, r, ctx)
+            rust_call_on_type(&rust_type_text_at(&head.args), origin, name, r, ctx)
         };
     }
     if is_rust_outside_self(
@@ -1568,7 +1619,7 @@ fn rust_call_on_type(type_: &str, name: &str, r: &UnresolvedRef, ctx: &Ctx) -> T
     ) {
         return Tri::Null;
     }
-    if !is_rust_project_named(&outer, ctx) {
+    if read == NameReading::Std {
         return Tri::Undefined;
     }
     opt_to_tri(resolve_method_on_type(
@@ -1726,9 +1777,11 @@ pub fn match_rust_as_mut_chain_call(r: &UnresolvedRef, ctx: &Ctx) -> Tri<Resolve
                 Tri::Undefined
             };
         }
-        return match rust_declared_type_text(base, r, ctx) {
+        return match rust_declared_type(base, r, ctx) {
             None => Tri::Undefined,
-            Some(declared) => rust_lent_call(&declared, name, r, ctx, tried),
+            Some((declared, origin)) => {
+                rust_lent_call(&declared, Some(&origin), name, r, ctx, tried)
+            }
         };
     };
     let projected = base != "self";
@@ -1749,7 +1802,7 @@ pub fn match_rust_as_mut_chain_call(r: &UnresolvedRef, ctx: &Ctx) -> Tri<Resolve
     } else {
         decl.type_
     };
-    rust_lent_call(&type_, name, r, ctx, tried)
+    rust_lent_call(&type_, None, name, r, ctx, tried)
 }
 
 const RUST_NON_PROJECT_FIELD_TYPES: [&str; 20] = [

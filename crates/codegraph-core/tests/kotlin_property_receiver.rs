@@ -281,7 +281,7 @@ impl Fixture {
         let suffix = format!("{owner}::{method}");
         match self.callables().into_iter().find(|n| n.name == method && n.qualified_name.ends_with(&suffix)) {
             Some(node) => self.calls_of(&node),
-            None => vec![format!("<no callable {suffix}>")],
+            None => panic!("no callable {suffix}"),
         }
     }
 
@@ -413,4 +413,10 @@ fn a_library_receiver_gets_no_edge_and_a_fun_interface_parses() {
     c.is("a fun interface does not swallow the declaration after it: SessionEvents is an interface", vec![f.node_kind("p::SessionEvents")], &["interface"]);
     c.is("the declaration after a fun interface keeps its members: lost", f.callees("Supervisor", "lost"), &["p::SessionEvents::onLost"]);
     c.finish();
+}
+
+#[test]
+#[should_panic(expected = "no callable Absent::absent")]
+fn a_missing_method_fails_the_callees_helper() {
+    let _ = index().callees("Absent", "absent");
 }
