@@ -547,3 +547,31 @@ fn std_vec_iteration_with_a_project_vec_namesake_is_not_a_project_method() {
     let calls = calls_of(&fx.cg, "src/store.rs", "std_rows");
     assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
 }
+
+const STD_MAP_NAMESAKE_STORE: &str = r#"
+pub struct Store {
+    pub map: std::collections::HashMap<String, std::collections::HashMap<String, u8>>,
+}
+
+pub fn std_values(store: &Store) {
+    for row in store.map.values() {
+        row.entry("a".to_string());
+    }
+}
+"#;
+
+fn std_map_namesake_fixture() -> Fixture {
+    index(&[
+        ("src/lib.rs", "pub mod installer;\npub mod names;\npub mod store;\n"),
+        ("src/installer.rs", STD_NAMESAKE_INSTALLER),
+        ("src/names.rs", "pub struct HashMap;\n"),
+        ("src/store.rs", STD_MAP_NAMESAKE_STORE),
+    ])
+}
+
+#[test]
+fn std_hash_map_values_with_a_project_hash_map_namesake_is_not_a_project_method() {
+    let fx = std_map_namesake_fixture();
+    let calls = calls_of(&fx.cg, "src/store.rs", "std_values");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
