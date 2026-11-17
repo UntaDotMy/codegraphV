@@ -86,6 +86,8 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/codegraphV/rust-rewrite/i
 
 Both scripts download the release archive for your platform, check it against the release's
 `SHA256SUMS`, and delete their temporary files.
+There is no release archive for Apple Silicon Macs yet: `install-rust.sh` stops and prints the
+command to build from source.
 The Windows installer stages the replacement before switching executables and restores the
 previous executable if activation fails.
 
