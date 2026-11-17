@@ -8,7 +8,8 @@
 //!
 //! A std `Mutex`, `RefCell` or `Vec` written with its std path (`std::sync::Mutex`, `std::cell::RefCell`,
 //! `std::vec::Vec`) is read as std when the crate declares a type of the same name, including a `Vec`
-//! iterated with `for row in store.rows.iter()` and a std `HashMap` read through `values()`.
+//! iterated with `for row in store.rows.iter()`, and a std `HashMap` read through `values()`
+//! whose items are a `HashMap` or a `BTreeMap`.
 //!
 //! The controls must keep linking, and by their type: a project type reached through a
 //! RefCell or a Mutex borrow, a project-typed field, an extension trait implemented on a
@@ -573,5 +574,33 @@ fn std_map_namesake_fixture() -> Fixture {
 fn std_hash_map_values_with_a_project_hash_map_namesake_is_not_a_project_method() {
     let fx = std_map_namesake_fixture();
     let calls = calls_of(&fx.cg, "src/store.rs", "std_values");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+const STD_BTREE_ITEM_STORE: &str = r#"
+pub struct Store {
+    pub map: std::collections::HashMap<String, std::collections::BTreeMap<String, u8>>,
+}
+
+pub fn std_btree_values(store: &Store) {
+    for row in store.map.values() {
+        row.entry("a".to_string());
+    }
+}
+"#;
+
+fn std_btree_item_fixture() -> Fixture {
+    index(&[
+        ("src/lib.rs", "pub mod installer;\npub mod names;\npub mod store;\n"),
+        ("src/installer.rs", STD_NAMESAKE_INSTALLER),
+        ("src/names.rs", "pub struct HashMap;\n"),
+        ("src/store.rs", STD_BTREE_ITEM_STORE),
+    ])
+}
+
+#[test]
+fn std_hash_map_values_of_btree_maps_with_a_project_hash_map_namesake_is_not_a_project_method() {
+    let fx = std_btree_item_fixture();
+    let calls = calls_of(&fx.cg, "src/store.rs", "std_btree_values");
     assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
 }
