@@ -21,6 +21,12 @@
 //! write or borrow reads that type: through a guard local, and with a std path when
 //! the crate declares a `Mutex` of its own. A `Mutex` from another crate, written with its path
 //! or imported, is not the standard one, so its lock keeps its name link.
+//!
+//! An `Option` or `Result` built by `Some(x)`, `Ok(x)` or `Err(x)` (bare, under `Option::` or
+//! `Result::`, or with a std path) keeps the type of `x`: `unwrap` and `unwrap_or` read it, and an
+//! `if let` binds it. A variant name imported from elsewhere in the crate is not the standard one,
+//! so it keeps no type. Neither does an `x` behind a `Box`, `Rc` or `Arc`: the wrapper is not carried
+//! into the type, so `clone` would link to the payload's.
 use codegraph_core::CodeGraph;
 use codegraph_types::{EdgeKind, NodeKind};
 use std::fs;
@@ -826,6 +832,444 @@ fn std_module_path_mutex_imported_from_std_still_links_by_type() {
         calls
             .iter()
             .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+const OTHER_LINK: &str = r#"
+pub struct Other;
+
+impl Other {
+    pub fn from_daemon(&self, line: &str) -> bool {
+        let _ = line;
+        false
+    }
+}
+"#;
+
+const VARIANT_DAEMON: &str = r#"
+use std::collections::HashMap;
+
+use crate::link::Relay;
+
+pub fn some_then_unwrap(line: &str) -> bool {
+    let held = Some(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn ok_then_unwrap(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn qualified_option_some(line: &str) -> bool {
+    let held = Option::Some(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn qualified_result_ok(line: &str) -> bool {
+    let held = Result::Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn std_qualified_option_some(line: &str) -> bool {
+    let held = std::option::Option::Some(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn std_qualified_result_ok(line: &str) -> bool {
+    let held = std::result::Result::Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn turbofish_ok(line: &str) -> bool {
+    let held = Ok::<Relay, u8>(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn deeply_nested_some(line: &str) -> bool {
+    let held = Some(Some(Some(Some(Some(Some(Relay))))));
+    held.unwrap().unwrap().unwrap().unwrap().unwrap().unwrap().from_daemon(line)
+}
+
+pub fn some_map_is_not_the_project_get(key: u8) -> u8 {
+    let memo = Some(HashMap::new());
+    memo.unwrap().get(&key).copied().unwrap_or(0)
+}
+
+pub fn some_literal_is_not_a_project_method(line: &str) -> bool {
+    let held = Some(1);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+const ALIAS_DAEMON: &str = r#"
+use crate::link::Relay;
+
+pub fn ok_unwrap_or_with_a_project_result_alias(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap_or(Relay).from_daemon(line)
+}
+"#;
+
+const ERR_DAEMON: &str = r#"
+use crate::link::Relay;
+use crate::other::Other;
+
+pub fn err_pattern_neutral_binding(line: &str) -> bool {
+    let held = Err(Other);
+    if let Err(x) = held {
+        return x.from_daemon(line);
+    }
+    false
+}
+
+pub fn ok_pattern_neutral_binding(line: &str) -> bool {
+    let held = Ok(Relay);
+    if let Ok(x) = held {
+        return x.from_daemon(line);
+    }
+    false
+}
+
+pub fn qualified_result_err_pattern(line: &str) -> bool {
+    let held = Result::Err(Other);
+    if let Err(x) = held {
+        return x.from_daemon(line);
+    }
+    false
+}
+"#;
+
+const SHADOW_DAEMON: &str = r#"
+use crate::link::Relay;
+use crate::names::Outcome::Ok;
+
+pub fn imported_ok_is_not_the_std_result(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+fn variant_fixture() -> Fixture {
+    index(&[
+        ("src/lib.rs", "pub mod link;\npub mod variant;\n"),
+        ("src/link.rs", CELL_LINK),
+        ("src/variant.rs", VARIANT_DAEMON),
+    ])
+}
+
+fn result_alias_fixture() -> Fixture {
+    index(&[
+        (
+            "src/lib.rs",
+            "pub mod link;\npub mod names;\npub mod variant;\n",
+        ),
+        ("src/link.rs", CELL_LINK),
+        (
+            "src/names.rs",
+            "pub type Result<T> = std::result::Result<T, String>;\n",
+        ),
+        ("src/variant.rs", ALIAS_DAEMON),
+    ])
+}
+
+fn err_fixture() -> Fixture {
+    index(&[
+        (
+            "src/lib.rs",
+            "pub mod link;\npub mod other;\npub mod err;\n",
+        ),
+        ("src/link.rs", CELL_LINK),
+        ("src/other.rs", OTHER_LINK),
+        ("src/err.rs", ERR_DAEMON),
+    ])
+}
+
+fn shadowed_variant_fixture() -> Fixture {
+    index(&[
+        (
+            "src/lib.rs",
+            "pub mod link;\npub mod names;\npub mod shadow;\n",
+        ),
+        ("src/link.rs", CELL_LINK),
+        (
+            "src/names.rs",
+            "use crate::link::Relay;\n\npub enum Outcome {\n    Ok(Relay),\n    Err,\n}\n",
+        ),
+        ("src/shadow.rs", SHADOW_DAEMON),
+    ])
+}
+
+#[test]
+fn project_type_held_by_some_then_unwrap_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "some_then_unwrap");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_ok_then_unwrap_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "ok_then_unwrap");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_qualified_option_some_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "qualified_option_some");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_qualified_result_ok_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "qualified_result_ok");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_std_qualified_option_some_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "std_qualified_option_some");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_std_qualified_result_ok_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "std_qualified_result_ok");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_turbofish_ok_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "turbofish_ok");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_six_nested_some_links_by_type() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "deeply_nested_some");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn std_map_held_by_some_is_not_the_project_get() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/variant.rs", "some_map_is_not_the_project_get");
+    assert!(!calls.iter().any(|c| c.contains("Relay::get")), "{calls:?}");
+}
+
+#[test]
+fn literal_held_by_some_is_not_a_project_method() {
+    let fx = variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/variant.rs",
+        "some_literal_is_not_a_project_method",
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::from_daemon")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn project_type_held_by_ok_unwrap_or_links_when_result_is_a_project_alias() {
+    let fx = result_alias_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/variant.rs",
+        "ok_unwrap_or_with_a_project_result_alias",
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn err_pattern_with_a_neutral_binding_links_by_the_error_type() {
+    let fx = err_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/err.rs", "err_pattern_neutral_binding");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Other::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn qualified_result_err_pattern_links_by_the_error_type() {
+    let fx = err_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/err.rs", "qualified_result_err_pattern");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Other::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn ok_pattern_with_a_neutral_binding_links_by_the_value_type() {
+    let fx = err_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/err.rs", "ok_pattern_neutral_binding");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn ok_imported_from_a_project_enum_is_not_the_std_result() {
+    let fx = shadowed_variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/shadow.rs", "imported_ok_is_not_the_std_result");
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+const ARC_LINK: &str = r#"
+pub struct Relay;
+
+impl Clone for Relay {
+    fn clone(&self) -> Self {
+        Relay
+    }
+}
+
+impl Relay {
+    pub fn from_daemon(&self, line: &str) -> bool {
+        let _ = line;
+        true
+    }
+}
+"#;
+
+const ARC_DAEMON: &str = r#"
+use std::sync::Arc;
+
+use crate::link::Relay;
+
+pub fn option_arc_clone() -> Relay {
+    let held = Some(Arc::new(Relay));
+    held.unwrap().clone()
+}
+
+pub fn binding_arc_clone() -> Relay {
+    let a = Arc::new(Relay);
+    let held = Some(a);
+    held.unwrap().clone()
+}
+
+pub fn annotated_arc_clone(a: Arc<Relay>) -> Relay {
+    let held = Some(a);
+    held.unwrap().clone()
+}
+
+pub fn option_arc_from_daemon(line: &str) -> bool {
+    let held = Some(Arc::new(Relay));
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+fn arc_fixture() -> Fixture {
+    index(&[
+        ("src/lib.rs", "pub mod link;\npub mod arc;\n"),
+        ("src/link.rs", ARC_LINK),
+        ("src/arc.rs", ARC_DAEMON),
+    ])
+}
+
+#[test]
+fn option_of_arc_clone_is_not_the_payload_clone() {
+    let fx = arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/arc.rs", "option_arc_clone");
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn binding_of_arc_clone_is_not_the_payload_clone() {
+    let fx = arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/arc.rs", "binding_arc_clone");
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn annotated_arc_clone_is_not_the_payload_clone() {
+    let fx = arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/arc.rs", "annotated_arc_clone");
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn option_of_arc_method_keeps_its_link() {
+    let fx = arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/arc.rs", "option_arc_from_daemon");
+    assert!(
+        calls.iter().any(|c| c.contains("Relay::from_daemon")),
         "{calls:?}"
     );
 }

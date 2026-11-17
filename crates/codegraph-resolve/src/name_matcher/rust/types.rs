@@ -1043,6 +1043,11 @@ pub fn rust_value_type(
                 }
             }
             if re!(r"^[A-Z]").is_match(last) {
+                if let Some(wrapped) =
+                    std_variant_constructor(&segments, args, at, scopes, r, ctx, depth)
+                {
+                    return unwrapped(Some(wrapped));
+                }
                 if segments.len() == 1 && last == "Some" {
                     return unwrapped(local("Option<_>"));
                 }
@@ -1171,6 +1176,70 @@ pub fn rust_signature_offset(fn_: &Node, ctx: &Ctx) -> usize {
     own.map_or(start, |from| from + 1)
 }
 
+/// `Some(x)`, `Ok(x)` or `Err(x)`, bare or under `Option::` / `Result::` (or a std path), with one
+/// argument of known type: written under its std path with that type kept, so `unwrap`, `unwrap_or`
+/// and an `if let` read it. A variant name imported from elsewhere in the crate is not the standard
+/// one, and an untyped argument keeps the untyped text the branch below gives. A payload behind a
+/// `Box`, `Rc` or `Arc` is not typed either: its wrapper is not written back into the text, so a method
+/// the wrapper has itself (`clone`) would link to the payload's. A variant brought in by a glob import
+/// (`use Outcome::*`) is not seen here, so it is read as the standard one.
+fn std_variant_constructor(
+    segments: &[&str],
+    args: &str,
+    at: usize,
+    scopes: &RustScopes,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+    depth: u32,
+) -> Option<RustWrittenType> {
+    let variant = segments[segments.len() - 1];
+    let (owner, std_text) = match variant {
+        "Some" => ("Option", "std::option::Option"),
+        "Ok" | "Err" => ("Result", "std::result::Result"),
+        _ => return None,
+    };
+    if split_rust_top_level(args, ',').len() != 1 {
+        return None;
+    }
+    let standard = match segments.len() {
+        // Only an import shadows a prelude variant. A project enum with an `Ok` variant does not,
+        // so `is_rust_project_named` is deliberately not checked here.
+        1 => match rust_use_path(variant, &r.file_path, Some(at), ctx) {
+            None => true,
+            Some(path) => matches!(
+                path.first().map(String::as_str),
+                Some("std" | "core" | "alloc")
+            ),
+        },
+        n => {
+            segments[n - 2] == owner && {
+                let head = (n > 2).then(|| segments[0]);
+                is_std_cell_type(head, owner, &r.file_path, Some(at), ctx)
+            }
+        }
+    };
+    if !standard {
+        return None;
+    }
+    // Not one level deeper: `args` is a strict part of this expression.
+    let held = rust_value_type(args, at, scopes, r, ctx, depth)?;
+    // Behind a `Box`, `Rc` or `Arc`: the wrapper is not in the text, so `clone` would reach the payload.
+    if held.wrappers.as_deref().is_some_and(|w| !w.is_empty()) {
+        return None;
+    }
+    let text = match variant {
+        "Some" => format!("{std_text}<{}>", held.text),
+        "Ok" => format!("{std_text}<{}, _>", held.text),
+        _ => format!("{std_text}<_, {}>", held.text),
+    };
+    Some(RustWrittenType {
+        text,
+        wrappers: None,
+        opaque: None,
+        ..held
+    })
+}
+
 /// `Mutex::new(x)`, `RwLock::new(x)` or `RefCell::new(x)` of the standard cell type (see
 /// `is_std_cell_type`): written by its std path and holding the type of `x`, so its accessor can read
 /// the value. The std path keeps a project namesake from switching the accessor off.
@@ -1208,10 +1277,11 @@ fn std_cell_constructor(
     })
 }
 
-/// Whether the cell type `name` (`Mutex`, `RwLock` or `RefCell`), written under `head` (its first path
-/// segment, when it has a path) at `at` in `file`, is the standard one: rooted at `std`, `core` or
-/// `alloc`, or imported from there, and no project type of that name. A cell from another crate
-/// (`parking_lot::Mutex`) hands out its value without a `Result`, so its lock is not read as one.
+/// Whether the std type `name` (`Mutex`, `RwLock`, `RefCell`, or `Option`/`Result` for a variant
+/// constructor), written under `head` (its first path segment, when it has a path) at `at` in
+/// `file`, is the standard one: rooted at `std`, `core` or `alloc`, or imported from there, and no
+/// project type of that name. A cell from another crate (`parking_lot::Mutex`) hands out its value
+/// without a `Result`, so its lock is not read as one.
 fn is_std_cell_type(
     head: Option<&str>,
     name: &str,
