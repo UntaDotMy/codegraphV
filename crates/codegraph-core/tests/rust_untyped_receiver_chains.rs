@@ -6,6 +6,10 @@
 //! and with a project `Result` alias in the crate (`src/errors.rs`): the alias must not switch
 //! the standard lock accessor off.
 //!
+//! A std `Mutex`, `RefCell` or `Vec` written with its std path (`std::sync::Mutex`, `std::cell::RefCell`,
+//! `std::vec::Vec`) is read as std when the crate declares a type of the same name, including a `Vec`
+//! iterated with `for row in store.rows.iter()`.
+//!
 //! The controls must keep linking, and by their type: a project type reached through a
 //! RefCell or a Mutex borrow, a project-typed field, an extension trait implemented on a
 //! foreign type, and a generic or `dyn` receiver of a project trait. A same-file namesake
@@ -475,5 +479,71 @@ fn generic_and_dyn_receivers_of_a_project_trait_still_link() {
 fn std_map_behind_rwlock_write_unwrap_or_else_is_not_a_project_method() {
     let fx = fixture();
     let calls = calls_of(&fx.cg, "src/render.rs", "rw_write_guarded");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+const STD_NAMESAKE_INSTALLER: &str = r#"
+pub struct Installer;
+
+impl Installer {
+    pub fn entry(&self, id: &str, loc: u8) -> u8 {
+        let _ = id;
+        loc
+    }
+}
+"#;
+
+const STD_NAMESAKE_STORE: &str = r#"
+use std::collections::HashMap;
+
+pub struct Store {
+    pub guarded: std::sync::Mutex<HashMap<String, u8>>,
+    pub cell: std::cell::RefCell<HashMap<String, u8>>,
+    pub rows: std::vec::Vec<HashMap<String, u8>>,
+}
+
+pub fn std_locked(store: &Store) {
+    store.guarded.lock().unwrap_or_else(|e| e.into_inner()).entry("a".to_string());
+}
+
+pub fn std_borrowed(store: &Store) {
+    store.cell.borrow_mut().entry("a".to_string());
+}
+
+pub fn std_rows(store: &Store) {
+    for row in store.rows.iter() {
+        row.entry("a".to_string());
+    }
+}
+"#;
+
+fn std_namesake_fixture() -> Fixture {
+    index(&[
+        ("src/lib.rs", "pub mod installer;\npub mod names;\npub mod store;\n"),
+        ("src/installer.rs", STD_NAMESAKE_INSTALLER),
+        ("src/names.rs", "pub struct Mutex;\npub struct RefCell;\npub struct Vec;\n"),
+        ("src/store.rs", STD_NAMESAKE_STORE),
+    ])
+}
+
+#[test]
+fn std_mutex_lock_with_a_project_mutex_namesake_is_not_a_project_method() {
+    let fx = std_namesake_fixture();
+    let calls = calls_of(&fx.cg, "src/store.rs", "std_locked");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+#[test]
+fn std_refcell_borrow_with_a_project_refcell_namesake_is_not_a_project_method() {
+    let fx = std_namesake_fixture();
+    let calls = calls_of(&fx.cg, "src/store.rs", "std_borrowed");
+    assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
+}
+
+// The one that stays red on 485dc466 (rust_item_of, types.rs:2000-2002, checks the name only).
+#[test]
+fn std_vec_iteration_with_a_project_vec_namesake_is_not_a_project_method() {
+    let fx = std_namesake_fixture();
+    let calls = calls_of(&fx.cg, "src/store.rs", "std_rows");
     assert!(!calls.iter().any(|c| c.contains("Installer::entry")), "{calls:?}");
 }
