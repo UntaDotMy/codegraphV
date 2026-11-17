@@ -1997,7 +1997,13 @@ fn rust_item_of(
         return None;
     }
     let head = rust_path_head(&t)?;
-    if !std_(&head.name) {
+    // A path rooted at std, core or alloc is the standard type, as in rust_std_accessor_result,
+    // so a project type of the same name does not switch the standard item read off.
+    let std_rooted = head
+        .segments
+        .first()
+        .is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"));
+    if !std_rooted && !std_(&head.name) {
         return None;
     }
     let args = type_args(&head.args);
