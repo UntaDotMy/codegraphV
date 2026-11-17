@@ -9,6 +9,7 @@ cargo test --workspace --locked                      # regression suite
 cargo test --locked -p <crate> [--test <file>]       # targeted
 cargo test --locked -p codegraph-mcp --test explore_render
 cargo test --locked -p codegraph-installer --test contracts
+cargo test --locked -p codegraph-cli --test executable  # end to end through the built binary
 node scripts/rust-golden/verify.mjs                  # Rust↔TS graph parity (see scripts/rust-golden/README.md)
 ```
 - Windows: never build a Cargo target while its probe executable is running. Checkouts may be CRLF; split on `\r?\n` in tests.
@@ -41,5 +42,5 @@ Goal: a flow question ("how does X reach Y", trace, impact, callers) resolves in
 
 ## Owner rules
 - Before changing files or calling a diff final, have the plan or diff verified by the session's advisor or reviewer tool. If none exists, ask the owner. Never spawn a subagent for this check.
-- Run tests and builds on GitHub Actions; use the local machine only when needed. This checkout is a fork, so `gh pr create` must pass `--repo` for this repository; to run CI on a branch, open a draft PR into `rust-rewrite`.
+- Run tests and builds on GitHub Actions; use the local machine only when needed. This checkout is a fork, so `gh pr create` must pass `--repo` for this repository; to run CI on a branch, open a draft PR into `rust-rewrite`. Never merge until every leg on the head commit is green; a cancelled leg is not green.
 - When a task is finished, delete what it left behind that nothing needs. Never run `git clean -X` at the repo root; it also removes `.codegraphV/`, `node_modules/` and `dist/`.
