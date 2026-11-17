@@ -154,6 +154,33 @@ fn calls_through_a_type_a_path_or_a_use_names() {
     c.finish();
 }
 
+/// A `type` alias with a default parameter (`M = ()`) still names its target. HEAD's alias pattern rejected `=` in the
+/// generics, so such an alias had no target at all. Two routes read the target: a binding typed by the alias, and an
+/// `impl` written on the alias that a receiver of the target type calls. A second `only_on_alias` on another type makes
+/// a name-only match ambiguous, so the link comes from the alias route.
+#[test]
+fn calls_through_an_alias_with_a_default_parameter() {
+    let f = index(&[
+        ("src/lib.rs", "pub mod driver;\npub mod other;\npub mod alias;\npub mod user;\n"),
+        ("src/driver.rs", "pub struct Handle;\n\nimpl Handle {\n    pub fn current() -> Handle {\n        Handle\n    }\n\n    pub fn ping(&self) -> bool {\n        true\n    }\n}\n"),
+        ("src/other.rs", "pub struct Other;\n\nimpl Other {\n    pub fn only_on_alias(&self) -> bool {\n        false\n    }\n}\n"),
+        ("src/alias.rs", "pub type Defaulted<M = ()> = crate::driver::Handle;\n\nimpl Defaulted {\n    pub fn only_on_alias(&self) -> bool {\n        true\n    }\n}\n"),
+        ("src/user.rs", "use crate::alias::Defaulted;\nuse crate::driver::Handle;\n\npub fn through_binding(h: Defaulted) -> bool {\n    h.ping()\n}\n\npub fn through_alias_impl(h: Handle) -> bool {\n    h.only_on_alias()\n}\n"),
+    ]);
+    let mut c = Checks::default();
+    c.is(
+        "h.ping on a binding typed Defaulted reaches Handle::ping",
+        calls_of(&f.cg, "src/user.rs", "through_binding"),
+        &["method Handle::ping src/driver.rs:8"],
+    );
+    c.is(
+        "h.only_on_alias on a Handle reaches the impl written on the alias",
+        calls_of(&f.cg, "src/user.rs", "through_alias_impl"),
+        &["method Defaulted::only_on_alias src/alias.rs:4"],
+    );
+    c.finish();
+}
+
 const WORKSPACE: &str = "[workspace]\nresolver = \"2\"\nmembers = [\"crates/sim\", \"crates/server\", \"crates/client\"]\n\n[workspace.dependencies]\nsim = { path = \"crates/sim\" }\n";
 const SIM_TOML: &str = "[package]\nname = \"sim\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
 const SIM_LIB: &str = "pub mod items;\nmod rng;\npub use rng::Rng;\npub const RANK_COUNT: usize = 6;\npub fn median_u32(v: &[u32]) -> u32 { v[0] }\n";

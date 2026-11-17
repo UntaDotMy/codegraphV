@@ -475,7 +475,7 @@ fn rust_alias_target(alias: &Node, ctx: &Ctx) -> Option<RustWrittenType> {
     let start = rust_node_offset(alias, ctx);
     let re = Re::cached(
         &format!(
-            r"\btype\s+{}\b\s*(?:<([^=;]*?)>)?\s*=\s*([^;]+);",
+            r"\btype\s+{}\b\s*(?:<([^;]*?)>)?\s*=\s*([^;]+);",
             escape_regex(&alias.name)
         ),
         "",
