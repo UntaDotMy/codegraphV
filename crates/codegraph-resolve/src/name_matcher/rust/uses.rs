@@ -2224,6 +2224,50 @@ pub fn rust_glob_items(name: &str, file_path: &str, ctx: &Ctx) -> Option<Rc<Hash
     })
 }
 
+/// What a file's `use …::*` globs say about one name.
+pub enum GlobReach {
+    /// A glob brings the name, as these project nodes.
+    Brings(Vec<Rc<Node>>),
+    /// No glob can bring the name.
+    Absent,
+    /// A glob cannot be read, or leaves the project (std, a dependency): it might bring the name.
+    Unknown,
+}
+
+/// The reach of `name`'s globs in `file_path`. Unlike `rust_glob_items`, which counts a glob that leaves the
+/// project as bringing nothing, this answers `Unknown` for it, so a dependency's `Option` cannot read as std.
+pub fn rust_glob_reach(name: &str, file_path: &str, ctx: &Ctx) -> GlobReach {
+    let uses = rust_uses_of(file_path, ctx);
+    if uses.glob_paths.is_empty() {
+        return GlobReach::Absent;
+    }
+    if !uses.balanced {
+        return GlobReach::Unknown;
+    }
+    let mut found: Vec<Rc<Node>> = Vec::new();
+    let mut unknown = false;
+    for g in &uses.glob_paths {
+        let from = rust_module_at(file_path, g.at, ctx);
+        match rust_walk_modules(&g.segs, &from, ctx, 0) {
+            Walked::Module(module) => {
+                let public_only = !rust_module_within(&from, &module, ctx);
+                match rust_module_items(&module, name, ctx, &mut HashSet::new(), public_only) {
+                    Some(items) => found.extend(items),
+                    None => unknown = true,
+                }
+            }
+            Walked::Outside | Walked::Unknown => unknown = true,
+        }
+    }
+    if !found.is_empty() {
+        GlobReach::Brings(found)
+    } else if unknown {
+        GlobReach::Unknown
+    } else {
+        GlobReach::Absent
+    }
+}
+
 /// Whether a glob import brings `candidate` in under `name`.
 pub fn rust_glob_scope(
     name: &str,

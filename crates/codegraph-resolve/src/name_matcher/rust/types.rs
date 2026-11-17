@@ -679,6 +679,138 @@ pub fn rust_type_lookup(
 
 // -- Reading a written type ----------------------------------------------------------------
 
+/// Where a written name is read from: its file, and the declaration offset (a `RustBinding`'s `at`, or
+/// the written type's own offset). Visibility is judged from there, so a `use` later in the block counts.
+pub struct RustOrigin {
+    pub file: String,
+    pub at: usize,
+}
+
+/// What a written name means at its origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameReading {
+    /// The standard type: no project type of that name is in sight at the origin.
+    Std,
+    /// A project type (or a dependency's) that the origin sees.
+    Project,
+    /// The origin cannot be read (a glob that leaves the project, an unreadable file): callers keep the
+    /// answer they gave before this reading existed.
+    Unknown,
+}
+
+/// What `name`, written under `path`, means at `origin`. Only a project type of the same name can change the
+/// answer, so this reads `Std` unless the project declares one. Then the project's type is in sight when the
+/// origin file declares it, imports it by name, or a glob brings it; a std-rooted path is `Std`.
+pub fn rust_name_reading(name: &str, path: &[String], origin: &RustOrigin, ctx: &Ctx) -> NameReading {
+    if !is_rust_project_named(name, ctx) {
+        return NameReading::Std;
+    }
+    let file = origin.file.as_str();
+    let at = Some(origin.at);
+    if !path.is_empty() {
+        let Some(root) = rust_written_root(path, file, at, ctx) else {
+            return NameReading::Unknown;
+        };
+        if is_std_root(&root) {
+            return NameReading::Std;
+        }
+        return reading_of_lookup(&rust_type_lookup(name, path, file, ctx, at), ctx);
+    }
+    if let Some(bound) = rust_use_path(name, file, at, ctx).filter(|b| b.len() > 1) {
+        if is_std_root(&bound[0]) {
+            return NameReading::Std;
+        }
+        return reading_of_lookup(&rust_type_lookup(name, &[], file, ctx, at), ctx);
+    }
+    let same: Vec<NodeRef> = ctx
+        .get_nodes_by_name(name)
+        .iter()
+        .filter(|n| {
+            n.language == Language::Rust
+                && n.name == name
+                && is_rust_declared_type_kind(n.kind)
+                && n.file_path == file
+        })
+        .cloned()
+        .collect();
+    if !same.is_empty() {
+        return reading_of_candidates(&same, ctx);
+    }
+    let uses = rust_uses_of(file, ctx);
+    if uses.external.contains(name) && !uses.bound.contains(name) {
+        return NameReading::Project;
+    }
+    match rust_glob_reach(name, file, ctx) {
+        GlobReach::Brings(items) => reading_of_candidates(&items, ctx),
+        GlobReach::Unknown => NameReading::Unknown,
+        GlobReach::Absent => NameReading::Std,
+    }
+}
+
+fn is_std_root(root: &str) -> bool {
+    matches!(root, "std" | "core" | "alloc")
+}
+
+/// The root of a written path once its first segment is expanded through the file's `use` bindings, as
+/// `rust_type_lookup` does: `io::Result` with `use std::io;` roots at `std`.
+fn rust_written_root(path: &[String], file: &str, at: Option<usize>, ctx: &Ctx) -> Option<String> {
+    let first = path.first()?;
+    match rust_use_path(first, file, at, ctx).filter(|h| !h.is_empty()) {
+        Some(head) => head.into_iter().next(),
+        None => Some(first.clone()),
+    }
+}
+
+/// A lookup's reading. Outside the project (std was read before, so this is a dependency) is `Project`.
+fn reading_of_lookup(lookup: &RustTypeLookup, ctx: &Ctx) -> NameReading {
+    if lookup.outside {
+        return NameReading::Project;
+    }
+    if lookup.nodes.is_empty() {
+        return NameReading::Unknown;
+    }
+    reading_of_candidates(&lookup.nodes, ctx)
+}
+
+/// A single candidate that is a `type` alias of `std::result::Result` is `Std`; any other project type is
+/// `Project`.
+fn reading_of_candidates(nodes: &[NodeRef], ctx: &Ctx) -> NameReading {
+    match nodes {
+        [only] if only.kind == NodeKind::TypeAlias && alias_is_std_result(only, ctx) => {
+            NameReading::Std
+        }
+        _ => NameReading::Project,
+    }
+}
+
+/// Whether a `type` alias is `std::result::Result` with its first parameter as the payload: the alias's first
+/// parameter is the first argument of the target, so `Alias<X>` is `Result<X, _>`.
+fn alias_is_std_result(alias: &Node, ctx: &Ctx) -> bool {
+    let Some(target) = super::calls::rust_alias_target(alias, ctx) else {
+        return false;
+    };
+    let Some(head) = rust_path_head(&target.text) else {
+        return false;
+    };
+    if head.name != "Result" || !head.segments.first().is_some_and(|root| is_std_root(root)) {
+        return false;
+    }
+    let alias_first = target.generics.as_deref().and_then(first_type_parameter);
+    let target_first = split_rust_top_level(&head.args, ',')
+        .first()
+        .map(|a| a.trim().to_string());
+    alias_first.is_some() && alias_first == target_first
+}
+
+/// The first type parameter of a generics list: lifetimes are skipped, bounds and defaults dropped.
+fn first_type_parameter(generics: &str) -> Option<String> {
+    split_rust_top_level(generics, ',')
+        .iter()
+        .map(|p| p.trim())
+        .find(|p| !p.is_empty() && !p.starts_with('\''))
+        .map(|p| p.split(|c| c == ':' || c == '=').next().unwrap_or("").trim().to_string())
+}
+
 /// The traits bounding generic `name` where `written` is written (`None` when it isn't a generic there).
 pub fn rust_generic_bounds(
     name: &str,
@@ -1614,12 +1746,13 @@ fn rust_std_accessor_result(
         .wrappers
         .iter()
         .all(|w| RUST_DEREF_WRAPPERS.contains(&w.as_str()));
-    // A path rooted at `std`, `core` or `alloc` is taken to be the standard type, so a project
-    // type of the same name (a `Result` alias, say) does not switch the standard accessor off.
-    let std_rooted = path
-        .first()
-        .is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"));
-    if !through_deref_only || (!std_rooted && is_rust_project_named(name, ctx)) {
+    // A std reading holds unless the written name can mean a project type here (`rust_name_reading`).
+    // `Unknown` keeps the block this gate always had.
+    let origin = RustOrigin {
+        file: written.file.clone(),
+        at: written.at,
+    };
+    if !through_deref_only || rust_name_reading(name, path, &origin, ctx) != NameReading::Std {
         return None;
     }
     let held = split_rust_top_level(args, ',').into_iter().next()?;
