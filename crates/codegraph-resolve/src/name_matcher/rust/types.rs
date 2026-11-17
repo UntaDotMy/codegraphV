@@ -1179,9 +1179,10 @@ pub fn rust_signature_offset(fn_: &Node, ctx: &Ctx) -> usize {
 /// `Some(x)`, `Ok(x)` or `Err(x)`, bare or under `Option::` / `Result::` (or a std path), with one
 /// argument of known type: written under its std path with that type kept, so `unwrap`, `unwrap_or`
 /// and an `if let` read it. A variant name imported from elsewhere in the crate is not the standard
-/// one, and an untyped argument keeps the untyped text the branch below gives. A payload behind a
-/// `Box`, `Rc` or `Arc` is not typed either: its wrapper is not written back into the text, so a method
-/// the wrapper has itself (`clone`) would link to the payload's. A variant brought in by a glob import
+/// one, and an untyped argument keeps the untyped text the branch below gives. A payload built by
+/// `Box::new`, `Rc::new` or `Arc::new`, directly or through a binding, is not typed either: that wrapper
+/// is not written back into the text, so a method it has itself (`clone`) would link to the payload's.
+/// A declared `Arc<T>` parameter keeps its wrapper in the text. A variant brought in by a glob import
 /// (`use Outcome::*`) is not seen here, so it is read as the standard one.
 fn std_variant_constructor(
     segments: &[&str],
@@ -1223,7 +1224,8 @@ fn std_variant_constructor(
     }
     // Not one level deeper: `args` is a strict part of this expression.
     let held = rust_value_type(args, at, scopes, r, ctx, depth)?;
-    // Behind a `Box`, `Rc` or `Arc`: the wrapper is not in the text, so `clone` would reach the payload.
+    // Built by `Box::new`, `Rc::new` or `Arc::new`: that wrapper is not in the text, so `clone` would
+    // reach the payload.
     if held.wrappers.as_deref().is_some_and(|w| !w.is_empty()) {
         return None;
     }
@@ -1242,7 +1244,12 @@ fn std_variant_constructor(
 
 /// `Mutex::new(x)`, `RwLock::new(x)` or `RefCell::new(x)` of the standard cell type (see
 /// `is_std_cell_type`): written by its std path and holding the type of `x`, so its accessor can read
-/// the value. The std path keeps a project namesake from switching the accessor off.
+/// the value. The std path keeps a project namesake from switching the accessor off. Not when `x` is
+/// built by `Box::new`, `Rc::new` or `Arc::new`, directly or through a binding: that wrapper is not
+/// written into the type, so a method it has itself (`clone`) would link to the payload's, and the
+/// call falls through to the generic `Type::function` branch below. A declared `Arc<T>` parameter keeps
+/// its wrapper in the type and is not affected, and a wrapper around the cell (`Arc::new(Mutex::new(x))`)
+/// still reaches `x`.
 fn std_cell_constructor(
     segments: &[&str],
     args: &str,
@@ -1269,6 +1276,11 @@ fn std_cell_constructor(
     // Not one level deeper: `args` is a part of this expression, so the recursion ends, and
     // `Arc::new(Mutex::new(x))` must reach `x` at the depth `Arc::new(x)` does.
     let held = rust_value_type(args, at, scopes, r, ctx, depth)?;
+    // Built by `Box::new`, `Rc::new` or `Arc::new`: that wrapper is not in the text, so `clone` would
+    // reach the payload.
+    if held.wrappers.as_deref().is_some_and(|w| !w.is_empty()) {
+        return None;
+    }
     Some(RustWrittenType {
         text: format!("{std_path}<{}>", held.text),
         wrappers: None,

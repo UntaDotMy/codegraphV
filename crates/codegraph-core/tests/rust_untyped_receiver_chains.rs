@@ -21,12 +21,17 @@
 //! write or borrow reads that type: through a guard local, and with a std path when
 //! the crate declares a `Mutex` of its own. A `Mutex` from another crate, written with its path
 //! or imported, is not the standard one, so its lock keeps its name link.
+//! A cell built by `::new` around an `x` built by `Box::new`, `Rc::new` or `Arc::new`, directly or
+//! through a binding, keeps no type, so its lock or borrow falls back to the name match: the wrapper is
+//! not carried into the type, so `clone` would link to the payload's. A declared `Arc<T>` parameter
+//! keeps its wrapper in the type.
 //!
 //! An `Option` or `Result` built by `Some(x)`, `Ok(x)` or `Err(x)` (bare, under `Option::` or
 //! `Result::`, or with a std path) keeps the type of `x`: `unwrap` and `unwrap_or` read it, and an
 //! `if let` binds it. A variant name imported from elsewhere in the crate is not the standard one,
-//! so it keeps no type. Neither does an `x` behind a `Box`, `Rc` or `Arc`: the wrapper is not carried
-//! into the type, so `clone` would link to the payload's.
+//! so it keeps no type. Neither does an `x` built by `Box::new`, `Rc::new` or `Arc::new`, directly or
+//! through a binding: the wrapper is not carried into the type, so `clone` would link to the payload's.
+//! A declared `Arc<T>` parameter keeps its wrapper in the type.
 use codegraph_core::CodeGraph;
 use codegraph_types::{EdgeKind, NodeKind};
 use std::fs;
@@ -1268,6 +1273,167 @@ fn annotated_arc_clone_is_not_the_payload_clone() {
 fn option_of_arc_method_keeps_its_link() {
     let fx = arc_fixture();
     let calls = typed_calls_of(&fx.cg, "src/arc.rs", "option_arc_from_daemon");
+    assert!(
+        calls.iter().any(|c| c.contains("Relay::from_daemon")),
+        "{calls:?}"
+    );
+}
+
+const CELL_ARC_DAEMON: &str = r#"
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use crate::link::Relay;
+
+pub fn mutex_arc_clone() -> Relay {
+    let cell = Mutex::new(Arc::new(Relay));
+    cell.lock().unwrap().clone()
+}
+
+pub fn mutex_arc_from_daemon(line: &str) -> bool {
+    let cell = Mutex::new(Arc::new(Relay));
+    cell.lock().unwrap().from_daemon(line)
+}
+
+pub fn mutex_box_clone() -> Relay {
+    let cell = Mutex::new(Box::new(Relay));
+    cell.lock().unwrap().clone()
+}
+
+pub fn mutex_binding_clone() -> Relay {
+    let a = Arc::new(Relay);
+    let cell = Mutex::new(a);
+    cell.lock().unwrap().clone()
+}
+
+pub fn mutex_annotated_clone(a: Arc<Relay>) -> Relay {
+    let cell = Mutex::new(a);
+    cell.lock().unwrap().clone()
+}
+
+pub fn mutex_annotated_from_daemon(a: Arc<Relay>, line: &str) -> bool {
+    let cell = Mutex::new(a);
+    cell.lock().unwrap().from_daemon(line)
+}
+
+pub fn option_annotated_from_daemon(a: Arc<Relay>, line: &str) -> bool {
+    let held = Some(a);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn refcell_rc_clone() -> Relay {
+    let cell = RefCell::new(Rc::new(Relay));
+    cell.borrow().clone()
+}
+"#;
+
+fn cell_arc_fixture() -> Fixture {
+    index(&[
+        ("src/lib.rs", "pub mod link;\npub mod cell;\n"),
+        ("src/link.rs", ARC_LINK),
+        ("src/cell.rs", CELL_ARC_DAEMON),
+    ])
+}
+
+#[test]
+fn mutex_of_arc_clone_is_not_the_payload_clone() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_arc_clone");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("<no function")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn refcell_of_rc_clone_is_not_the_payload_clone() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "refcell_rc_clone");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("<no function")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn mutex_of_box_clone_is_not_the_payload_clone() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_box_clone");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("<no function")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn mutex_of_bound_arc_clone_is_not_the_payload_clone() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_binding_clone");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("<no function")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn mutex_of_annotated_arc_clone_is_not_the_payload_clone() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_annotated_clone");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("<no function")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("Relay::clone")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn mutex_of_declared_arc_parameter_links_by_type() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_annotated_from_daemon");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn option_of_declared_arc_parameter_links_by_type() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "option_annotated_from_daemon");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn mutex_of_arc_method_keeps_its_link() {
+    let fx = cell_arc_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/cell.rs", "mutex_arc_from_daemon");
     assert!(
         calls.iter().any(|c| c.contains("Relay::from_daemon")),
         "{calls:?}"
