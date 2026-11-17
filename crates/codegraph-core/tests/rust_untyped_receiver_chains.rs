@@ -1187,6 +1187,343 @@ fn ok_imported_from_a_project_enum_is_not_the_std_result() {
     );
 }
 
+const GLOB_OK_DAEMON: &str = r#"
+use crate::link::Relay;
+use crate::names::Outcome::*;
+
+pub fn glob_ok_is_not_the_std_result(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+const GLOB_SOME_DAEMON: &str = r#"
+use crate::link::Relay;
+use crate::names::Maybe::*;
+
+pub fn glob_some_is_not_the_std_option(line: &str) -> bool {
+    let held = Some(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+const GLOB_SAME_FILE_DAEMON: &str = r#"
+use crate::link::Relay;
+
+pub enum Local {
+    Ok(Relay),
+    Err,
+}
+
+use Local::*;
+
+pub fn same_file_ok_is_not_the_std_result(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+const GLOB_PLAIN_DAEMON: &str = r#"
+use crate::link::Relay;
+use crate::plain::*;
+
+pub fn plain_glob_ok_is_the_std_result(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+const GLOB_CHILD_DAEMON: &str = r#"
+use crate::names::Outcome::*;
+
+pub mod inner {
+    use crate::link::Relay;
+
+    pub fn inner_ok_is_the_std_result(line: &str) -> bool {
+        let held = Ok(Relay);
+        held.unwrap().from_daemon(line)
+    }
+}
+"#;
+
+const GLOB_TESTS_DAEMON: &str = r#"
+use crate::link::Relay;
+use crate::plain::*;
+
+mod tests {
+    use super::*;
+
+    pub fn tests_ok_is_the_std_result(line: &str) -> bool {
+        let held = Ok(Relay);
+        held.unwrap().from_daemon(line)
+    }
+}
+"#;
+
+const GLOB_SIBLINGS_DAEMON: &str = r#"
+pub mod a {
+    use crate::names::Outcome::*;
+}
+
+pub mod b {
+    use crate::link::Relay;
+
+    pub fn sibling_ok_is_the_std_result(line: &str) -> bool {
+        let held = Ok(Relay);
+        held.unwrap().from_daemon(line)
+    }
+}
+"#;
+
+const GLOB_STD_DAEMON: &str = r#"
+use crate::link::Relay;
+use std::result::Result::*;
+
+pub fn std_glob_ok_is_the_std_result(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+fn glob_variant_fixture() -> Fixture {
+    index(&[
+        (
+            "src/lib.rs",
+            "pub mod link;\npub mod names;\npub mod plain;\npub mod glob_ok;\npub mod glob_some;\npub mod glob_same_file;\npub mod glob_plain;\npub mod glob_child;\npub mod glob_tests;\npub mod glob_siblings;\npub mod glob_std;\npub mod glob_fn_body;\npub mod glob_inner_mod;\npub mod glob_module;\n",
+        ),
+        ("src/link.rs", CELL_LINK),
+        (
+            "src/names.rs",
+            "use crate::link::Relay;\n\npub enum Outcome {\n    Ok(Relay),\n    Err,\n}\n\npub enum Maybe {\n    Some(Relay),\n    Empty,\n}\n",
+        ),
+        ("src/plain.rs", "pub fn helper() -> u8 {\n    1\n}\n"),
+        ("src/glob_ok.rs", GLOB_OK_DAEMON),
+        ("src/glob_some.rs", GLOB_SOME_DAEMON),
+        ("src/glob_same_file.rs", GLOB_SAME_FILE_DAEMON),
+        ("src/glob_plain.rs", GLOB_PLAIN_DAEMON),
+        ("src/glob_child.rs", GLOB_CHILD_DAEMON),
+        ("src/glob_tests.rs", GLOB_TESTS_DAEMON),
+        ("src/glob_siblings.rs", GLOB_SIBLINGS_DAEMON),
+        ("src/glob_std.rs", GLOB_STD_DAEMON),
+        ("src/glob_fn_body.rs", GLOB_FN_BODY_DAEMON),
+        ("src/glob_inner_mod.rs", GLOB_INNER_MOD_DAEMON),
+        ("src/glob_module.rs", GLOB_MODULE_DAEMON),
+    ])
+}
+
+#[test]
+fn glob_imported_ok_is_not_the_std_result() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/glob_ok.rs", "glob_ok_is_not_the_std_result");
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn glob_imported_some_is_not_the_std_option() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_some.rs",
+        "glob_some_is_not_the_std_option",
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn same_file_glob_ok_is_not_the_std_result() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_same_file.rs",
+        "same_file_ok_is_not_the_std_result",
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_glob_of_a_module_without_ok_keeps_the_std_result() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_plain.rs",
+        "plain_glob_ok_is_the_std_result",
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_parent_glob_does_not_reach_a_child_module() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/glob_child.rs", "inner_ok_is_the_std_result");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_child_that_uses_super_keeps_the_std_result_without_an_ok_glob() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/glob_tests.rs", "tests_ok_is_the_std_result");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_glob_in_a_sibling_module_does_not_reach_another() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_siblings.rs",
+        "sibling_ok_is_the_std_result",
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_std_result_glob_keeps_the_std_result() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(&fx.cg, "src/glob_std.rs", "std_glob_ok_is_the_std_result");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+const GLOB_FN_BODY_DAEMON: &str = r#"
+use crate::link::Relay;
+
+pub fn body_glob_ok_is_not_the_std_result(line: &str) -> bool {
+    use crate::names::Outcome::*;
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+
+pub fn body_sibling_ok_is_the_std_result(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+const GLOB_INNER_MOD_DAEMON: &str = r#"
+pub mod inner {
+    use crate::link::Relay;
+    use crate::names::Outcome::*;
+
+    pub fn inner_glob_ok_is_not_the_std_result(line: &str) -> bool {
+        let held = Ok(Relay);
+        held.unwrap().from_daemon(line)
+    }
+}
+"#;
+
+#[test]
+fn a_glob_in_a_function_body_shadows_ok_in_that_body() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_fn_body.rs",
+        "body_glob_ok_is_not_the_std_result",
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_function_body_glob_does_not_reach_a_sibling_function() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_fn_body.rs",
+        "body_sibling_ok_is_the_std_result",
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_glob_and_its_call_in_one_inline_module_shadow_ok() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_inner_mod.rs",
+        "inner_glob_ok_is_not_the_std_result",
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
+const GLOB_MODULE_DAEMON: &str = r#"
+use crate::link::Relay;
+use crate::names::*;
+
+pub fn module_glob_ok_is_the_std_result(line: &str) -> bool {
+    let held = Ok(Relay);
+    held.unwrap().from_daemon(line)
+}
+"#;
+
+#[test]
+fn a_module_glob_does_not_bring_in_an_enums_variants() {
+    let fx = glob_variant_fixture();
+    let calls = typed_calls_of(
+        &fx.cg,
+        "src/glob_module.rs",
+        "module_glob_ok_is_the_std_result",
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("Relay::from_daemon") && c.ends_with("by=instance-method")),
+        "{calls:?}"
+    );
+}
+
 const ARC_LINK: &str = r#"
 pub struct Relay;
 

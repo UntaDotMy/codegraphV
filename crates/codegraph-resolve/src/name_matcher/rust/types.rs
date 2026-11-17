@@ -1183,7 +1183,7 @@ pub fn rust_signature_offset(fn_: &Node, ctx: &Ctx) -> usize {
 /// `Box::new`, `Rc::new` or `Arc::new`, directly or through a binding, is not typed either: that wrapper
 /// is not written back into the text, so a method it has itself (`clone`) would link to the payload's.
 /// A declared `Arc<T>` parameter keeps its wrapper in the text. A variant brought in by a glob import
-/// (`use Outcome::*`) is not seen here, so it is read as the standard one.
+/// (`use Outcome::*`) shadows the standard one (see `glob_brings_name`).
 fn std_variant_constructor(
     segments: &[&str],
     args: &str,
@@ -1203,10 +1203,11 @@ fn std_variant_constructor(
         return None;
     }
     let standard = match segments.len() {
-        // Only an import shadows a prelude variant. A project enum with an `Ok` variant does not,
-        // so `is_rust_project_named` is deliberately not checked here.
+        // Only an import shadows a prelude variant: a named `use`, or a visible glob that brings the name
+        // in. A project enum with an `Ok` variant that is not imported does not, so
+        // `is_rust_project_named` is deliberately not checked here.
         1 => match rust_use_path(variant, &r.file_path, Some(at), ctx) {
-            None => true,
+            None => !glob_brings_name(variant, &r.file_path, at, ctx),
             Some(path) => matches!(
                 path.first().map(String::as_str),
                 Some("std" | "core" | "alloc")
@@ -1239,6 +1240,37 @@ fn std_variant_constructor(
         wrappers: None,
         opaque: None,
         ..held
+    })
+}
+
+/// Whether a glob import visible at `at` brings `name` into scope, shadowing the prelude's variant of
+/// that name. A glob over a module counts when the module holds an item of that name; a glob over an
+/// enum counts when the enum has that variant. Still read as the standard one: a glob this walk cannot
+/// resolve; a dependency's glob (an `Outside` walk never shadows); and a child's `use super::*` over a
+/// parent whose `Ok` comes from an enum glob, since `rust_globbed_items` cannot see enum globs. A file
+/// the walk cannot balance keeps the standard reading.
+fn glob_brings_name(name: &str, file_path: &str, at: usize, ctx: &Ctx) -> bool {
+    let uses = rust_uses_of(file_path, ctx);
+    if !uses.balanced {
+        return false;
+    }
+    let here = rust_block_at(&uses.blocks, at);
+    uses.glob_paths.iter().any(|g| {
+        let visible = match g.scope {
+            None => rust_block_at(&uses.blocks, g.at) == here,
+            Some(s) => s.open < at && at < s.close,
+        };
+        visible && {
+            let mut segs = g.segs.clone();
+            segs.push(name.to_string());
+            rust_use_path_items(
+                &segs,
+                &rust_module_at(file_path, g.at, ctx),
+                ctx,
+                &mut HashSet::new(),
+            )
+            .is_some_and(|items| !items.is_empty())
+        }
     })
 }
 
