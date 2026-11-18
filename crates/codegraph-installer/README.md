@@ -22,12 +22,14 @@ commands that merely mention CodeGraphV are preserved.
 
 `install --refresh` preserves the existing permission and prompt-hook choices.
 The search guard (`PreToolUse`, `args` `["guard-hook"]`, matcher
-`^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$`, timeout 10 s) is written by
+`^(Grep|Glob|Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__codegraphV__.*)$`,
+timeout 10 s) is written by
 every global Claude install and refresh (never into a project's own
 `.claude/settings.json`, which would carry a per-machine path), so `upgrade` brings it to existing setups and
 restores an entry that was deleted by hand; uninstall removes it. Users switch it
 off with `CODEGRAPHV_GUARD=0` in Claude Code's environment. It allows the call on
-any failure.
+any failure. A refresh also rewrites the matcher and timeout of an entry already
+there, so a guard written by an older version starts inspecting the new tools.
 `--no-permissions` explicitly removes CodeGraphV permissions.
 `--prompt-hook preserve|on|off` independently controls hook installation. The hook
 accepts at most 1 MiB of input and exits silently after a default two-second

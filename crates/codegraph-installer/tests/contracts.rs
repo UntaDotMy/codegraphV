@@ -508,7 +508,9 @@ fn guard_hooks(p: &std::path::Path) -> Vec<serde_json::Value> {
         .cloned()
         .collect()
 }
-const GUARD_GROUP: &str = r#"{"matcher":"^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$","hooks":[{"type":"command","command":"C:\\codegraphV native\\codegraphV.exe","args":["guard-hook"],"timeout":10}]}"#;
+// The matcher covers the tools the guard inspects: search and listing, the shells, and the file
+// edits that could take the guard back out of the settings it was written into.
+const GUARD_GROUP: &str = r#"{"matcher":"^(Grep|Glob|Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__codegraphV__.*)$","hooks":[{"type":"command","command":"C:\\codegraphV native\\codegraphV.exe","args":["guard-hook"],"timeout":10}]}"#;
 
 /// The guard is on by default: install and every refresh (what `upgrade` runs) write it once,
 /// beside the user's own PreToolUse hooks; uninstall takes it and the keys it emptied.
@@ -554,6 +556,42 @@ fn claude_refresh_adds_the_guard_and_updates_its_path() {
     let old = GUARD_GROUP.replace(r"C:\\codegraphV native\\codegraphV.exe","D:/old place/codegraphV.exe");
     fs::write(&settings, format!(r#"{{"hooks":{{"PreToolUse":[{old}]}}}}"#)).unwrap();
     env.apply("claude", Location::Global, refresh, false).unwrap();
+    assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
+}
+
+/// A guard written by an older version is found by its hook, not by its matcher, so a refresh
+/// brings it the matcher of today — a tool the old matcher left out would otherwise stay unseen.
+#[test]
+fn claude_refresh_rewrites_the_guard_matcher_of_an_existing_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let settings = env.home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let old = GUARD_GROUP.replace(
+        "^(Grep|Glob|Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__codegraphV__.*)$",
+        "^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$",
+    );
+    fs::write(&settings, format!(r#"{{"hooks":{{"PreToolUse":[{old}]}}}}"#)).unwrap();
+    env.apply("claude", Location::Global, InstallOptions { prompt_hook: None, preserve_permissions: true, ..InstallOptions::default() }, false).unwrap();
+    assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
+}
+
+/// A setup that has our hooks but no MCP entry — the shape left by `--no-permissions` with an
+/// MCP entry the user removed by hand — is still configured, so the refresh `upgrade` runs
+/// reaches it instead of skipping it and leaving the old entry forever.
+#[test]
+fn claude_hooks_without_an_mcp_entry_are_configured_and_refreshed() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let settings = env.home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let old = GUARD_GROUP.replace(
+        "^(Grep|Glob|Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__codegraphV__.*)$",
+        "^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$",
+    );
+    fs::write(&settings, format!(r#"{{"hooks":{{"PreToolUse":[{old}]}}}}"#)).unwrap();
+    assert!(env.configured("claude", Location::Global), "the guard hook alone makes it configured");
+    env.apply("claude", Location::Global, InstallOptions { prompt_hook: None, preserve_permissions: true, ..InstallOptions::default() }, false).unwrap();
     assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
 }
 

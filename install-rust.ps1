@@ -52,8 +52,9 @@ try {
 
     New-Item -ItemType Directory -Force $dir | Out-Null
     $target = Join-Path $dir 'codegraphV.exe'
-    # Copies earlier upgrades moved aside; one still in use by an open session stays.
+    # Copies earlier upgrades moved aside, and stage files a failed run left behind.
     Get-ChildItem -LiteralPath $dir -Filter 'codegraphV.exe.old*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $dir -Filter '.codegraphV-*.new.exe' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     # Finish the potentially failing copy while the current executable is still in place.
     # The staged file is on the destination filesystem, so the final swap is a rename.
     $staged = Join-Path $dir (".codegraphV-" + [guid]::NewGuid() + '.new.exe')

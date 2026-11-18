@@ -366,7 +366,24 @@ impl Environment {
             .is_ok_and(|p| p.exists() || p.parent().is_some_and(Path::exists))
     }
     pub fn configured(&self, id: &str, loc: Location) -> bool {
-        self.configured_as(&CODEGRAPHV, id, loc)
+        self.configured_as(&CODEGRAPHV, id, loc) || self.claude_hooks_configured(id, loc)
+    }
+    /// Claude keeps its two hooks in `settings.json`, not in the MCP file [`config_path`] names,
+    /// so a setup that opted out of (or never had) the MCP entry is still configured: without
+    /// this, `install --refresh` — which `upgrade` runs — skips the target and leaves an older
+    /// hook entry, its matcher and its spelling in place forever.
+    fn claude_hooks_configured(&self, id: &str, loc: Location) -> bool {
+        if id != "claude" || (loc == Location::Local && self.project_is_home()) {
+            return false;
+        }
+        let path = self.profile(loc, "CLAUDE_CONFIG_DIR", ".claude").join("settings.json");
+        let Ok(Some(data)) = std::fs::read_to_string(path)
+            .map(|text| jsonc_parser::parse_to_serde_value(&text, &Default::default()).ok().flatten())
+        else {
+            return false;
+        };
+        let hooks = data.get("hooks");
+        has_hook(&CODEGRAPHV, hooks, &PROMPT_HOOK) || has_hook(&CODEGRAPHV, hooks, &GUARD_HOOK)
     }
     /// What `brand` has in Claude Code's settings.json at `loc`: (its tool permission, its
     /// prompt hook). An unreadable file has neither.
@@ -899,9 +916,10 @@ struct HookSpec {
 }
 /// The front-load hook: injects context into structural prompts.
 const PROMPT_HOOK: HookSpec = HookSpec { event: "UserPromptSubmit", arg: "prompt-hook", matcher: None, timeout: None };
-/// The tools the search-first guard inspects: search, listing, the shells, and codegraphV's own
-/// tools (which record what the session asked).
-pub const GUARD_MATCHER: &str = "^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$";
+/// The tools the search-first guard inspects: search, listing, the shells, codegraphV's own
+/// tools (which record what the session asked), and the file edits that could remove the guard
+/// from Claude's settings. A tool outside this matcher is never seen by the guard.
+pub const GUARD_MATCHER: &str = "^(Grep|Glob|Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__codegraphV__.*)$";
 /// The search-first guard (`guard-hook`): denies searching for indexed symbols until codegraphV
 /// was asked. It allows on any failure; 10 s bounds a hung run.
 const GUARD_HOOK: HookSpec = HookSpec { event: "PreToolUse", arg: "guard-hook", matcher: Some(GUARD_MATCHER), timeout: Some(10) };
@@ -975,6 +993,13 @@ fn has_hook(brand: &Brand, hooks: Option<&Value>, spec: &HookSpec) -> bool {
     })
 }
 
+/// True when `hook` is codegraphV's search guard, in any spelling the installer writes or
+/// rewrites. The guard itself asks this to tell whether an edit to Claude's settings would
+/// remove it.
+pub fn is_guard_hook(hook: &Value) -> bool {
+    is_hook(&CODEGRAPHV, hook, &GUARD_HOOK)
+}
+
 /// `settings.hooks` with `brand`'s `spec` hook written (`on`) or removed; None = drop `hooks`.
 /// Unchanged input comes back equal, so the caller writes nothing.
 /// `command` is what the hook runs; an older spelling of `brand`'s hook is rewritten in place.
@@ -993,6 +1018,19 @@ fn command_hooks(brand: &Brand, hooks: Option<&Value>, spec: &HookSpec, on: bool
                     hook["command"] = json!(command);
                 }
                 hook["args"] = json!([spec.arg]);
+            }
+        }
+        // The group fields are ours too: a matcher that no longer covers a tool, or a timeout,
+        // only reaches an existing install when they are rewritten in place.
+        if already {
+            if let Some(matcher) = spec.matcher {
+                for group in groups.iter_mut().filter(|g| {
+                    g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| is_hook(brand, h, spec)))
+                }) {
+                    if group.get("matcher").is_some_and(|m| m != matcher) {
+                        group["matcher"] = json!(matcher);
+                    }
+                }
             }
         }
         if !already {

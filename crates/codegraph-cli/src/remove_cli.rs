@@ -114,14 +114,20 @@ pub fn remove_from_user_path(dir: &Path) -> bool {
 }
 
 /// Copies an upgrade or uninstall renamed aside next to an installed binary
-/// (`codegraph.exe.old`, `codegraph.exe.old-<pid>`): stale once their process exits.
+/// (`codegraphV[.exe].old`, `….old-<stamp>`), and staged replacements a cancelled install left
+/// behind — `.codegraphV-<guid>.new.exe` from `install-rust.ps1`, `.codegraphV.new.XXXXXX` from
+/// `install-rust.sh`'s `mktemp`: stale once no process maps them.
 pub fn stale_copies(dir: &Path) -> Vec<PathBuf> {
-    let prefix = format!("{}.old", exe_name());
+    let old = format!("{}.old", exe_name());
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix) && e.path().is_file())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let staged = name.starts_with(".codegraphV-") || name.starts_with(".codegraphV.new.");
+            (name.starts_with(&old) || staged) && e.path().is_file()
+        })
         .map(|e| e.path())
         .collect();
     found.sort();
@@ -234,6 +240,25 @@ mod tests {
             Some(r"C:\a;D:\b")
         );
         assert_eq!(path_without(r"C:\a;D:\b", r"C:\codegraphV\bin"), None);
+    }
+
+    #[test]
+    fn stale_copies_finds_renamed_aside_and_staged_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        // The binary's own name is per-OS, so the names are built from it rather than hard-coded.
+        let live = exe_name().to_owned();
+        let old = format!("{live}.old");
+        let old_stamped = format!("{live}.old-010508");
+        let staged_ps = ".codegraphV-4adb58b5-948b-4d4b-b1c5-63d78fe261d2.new.exe".to_owned();
+        let staged_sh = ".codegraphV.new.Ab12Cd".to_owned();
+        for name in [&live, &old, &old_stamped, &staged_ps, &staged_sh, "notes.txt"] {
+            std::fs::write(dir.path().join(name), "x").unwrap();
+        }
+        let found: Vec<String> =
+            stale_copies(dir.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        let mut expected = vec![old.clone(), old_stamped.clone(), staged_ps.clone(), staged_sh.clone()];
+        expected.sort();
+        assert_eq!(found, expected, "the running binary and unrelated files are not stale copies");
     }
 
     #[test]

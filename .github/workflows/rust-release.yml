@@ -96,8 +96,12 @@ jobs:
           if-no-files-found: error
 
   release:
+    # An archive leg that never got a runner must not withhold the other two: `macos-15-intel`
+    # has gone 15 minutes with no runner (PR #31, 2026-11-19). `always()` lets this run when a
+    # needed job is cancelled or skipped; `!failure()` still refuses to publish a broken build.
+    # The publish step tolerates a missing archive and the notes say which platforms shipped.
     needs: [test, build]
-    if: startsWith(inputs.tag || github.ref_name, 'v')
+    if: ${{ always() && startsWith(inputs.tag || github.ref_name, 'v') && !failure() }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -108,7 +112,13 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: cd dist && sha256sum codegraphV-* > SHA256SUMS && cat SHA256SUMS
+        run: |
+          cd dist
+          # A platform whose leg never got a runner has no archive; the other two still ship.
+          ls codegraphV-* >/dev/null 2>&1 || { echo "no archives were built"; exit 1; }
+          sha256sum codegraphV-* > SHA256SUMS
+          cat SHA256SUMS
+          echo "Platforms published:"; for f in codegraphV-*; do echo "  $f"; done
       - name: Attest build provenance for release archives
         # SHA256SUMS proves integrity only; the attestation proves the archives were built by
         # this workflow from this repository. Verify with:

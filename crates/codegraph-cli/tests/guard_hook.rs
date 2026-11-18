@@ -154,3 +154,45 @@ fn unindexed_folders_the_switch_and_bad_payloads_all_pass() {
     std::fs::write(broken.path().join(".codegraphV/codegraph.db"), "not a database").unwrap();
     assert_eq!(decide(&session("broken"), broken.path(), "Bash", bash("rg parseToken .")), None);
 }
+
+/// The guard's own wiring: an edit or command that would remove it from Claude's settings, or
+/// turn hooks off, is denied — in an unindexed folder too, because it needs no index.
+#[test]
+fn edits_and_commands_that_remove_the_guard_are_denied() {
+    let home = tempfile::tempdir().unwrap();
+    let plain = tempfile::tempdir().unwrap();
+    let s = session("tamper");
+    let dir = home.path().join(".claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings = dir.join("settings.json");
+    let guard = r#"{"matcher":"^(Grep|Glob|Bash)$","hooks":[{"type":"command","command":"C:/bin/codegraphV.exe","args":["guard-hook"],"timeout":10}]}"#;
+    std::fs::write(&settings, format!(r#"{{"model":"x","hooks":{{"PreToolUse":[{guard}]}}}}"#)).unwrap();
+
+    let write = |content: &str| json!({"file_path": settings, "content": content});
+    // Replacing the file with settings that no longer carry the guard.
+    let stripped = write(r#"{"model":"x","hooks":{"PreToolUse":[]}}"#);
+    assert!(decide(&s, plain.path(), "Write", stripped).is_some(), "a write that drops the guard is denied");
+    // The same, through a fragment edit and through MultiEdit.
+    let cut = json!({"file_path": settings, "old_string": guard, "new_string": ""});
+    assert!(decide(&s, plain.path(), "Edit", cut.clone()).is_some(), "an edit that cuts the guard is denied");
+    assert!(
+        decide(&s, plain.path(), "MultiEdit", json!({"file_path": settings, "edits": [cut]})).is_some(),
+        "a multi-edit that cuts the guard is denied"
+    );
+    // A write that keeps it — and any other setting — passes, and so does another file.
+    let kept = write(&std::fs::read_to_string(&settings).unwrap().replace(r#""model":"x""#, r#""model":"y""#));
+    assert_eq!(decide(&s, plain.path(), "Write", kept), None, "keeping the guard passes");
+    assert_eq!(decide(&s, plain.path(), "Write", json!({"file_path": dir.join("CLAUDE.md"), "content": "x"})), None);
+    // Commands that would rewrite the settings or switch hooks off.
+    for command in [
+        format!("Set-Content {} '{{}}'", settings.display()),
+        format!("Remove-Item {}", settings.display()),
+        "echo '{\"disableAllHooks\":true}' > ~/.claude/settings.json".to_owned(),
+    ] {
+        let reason = decide(&s, plain.path(), "PowerShell", bash(&command));
+        assert!(reason.is_some(), "{command} should be denied");
+    }
+    // Reading the settings, and a guard-hook path in ordinary prose, are not tampering.
+    assert_eq!(decide(&s, plain.path(), "PowerShell", bash(&format!("Get-Content {}", settings.display()))), None);
+    assert_eq!(decide(&s, plain.path(), "Grep", json!({"pattern": "args guard-hook", "path": dir})), None);
+}
