@@ -114,8 +114,9 @@ pub fn remove_from_user_path(dir: &Path) -> bool {
 }
 
 /// Copies an upgrade or uninstall renamed aside next to an installed binary
-/// (`codegraphV.exe.old`, `codegraphV.exe.old-<stamp>`), and staged replacements a cancelled
-/// install left behind (`.codegraphV-*.new.exe`): stale once no process maps them.
+/// (`codegraphV[.exe].old`, `….old-<stamp>`), and staged replacements a cancelled install left
+/// behind — `.codegraphV-<guid>.new.exe` from `install-rust.ps1`, `.codegraphV.new.XXXXXX` from
+/// `install-rust.sh`'s `mktemp`: stale once no process maps them.
 pub fn stale_copies(dir: &Path) -> Vec<PathBuf> {
     let old = format!("{}.old", exe_name());
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -124,7 +125,7 @@ pub fn stale_copies(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .filter(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let staged = name.starts_with(".codegraphV-") && name.ends_with(".new.exe");
+            let staged = name.starts_with(".codegraphV-") || name.starts_with(".codegraphV.new.");
             (name.starts_with(&old) || staged) && e.path().is_file()
         })
         .map(|e| e.path())
@@ -244,26 +245,20 @@ mod tests {
     #[test]
     fn stale_copies_finds_renamed_aside_and_staged_replacements() {
         let dir = tempfile::tempdir().unwrap();
-        for name in [
-            "codegraphV.exe",
-            "codegraphV.exe.old",
-            "codegraphV.exe.old-010508",
-            ".codegraphV-4adb58b5-948b-4d4b-b1c5-63d78fe261d2.new.exe",
-            "notes.txt",
-        ] {
+        // The binary's own name is per-OS, so the names are built from it rather than hard-coded.
+        let live = exe_name().to_owned();
+        let old = format!("{live}.old");
+        let old_stamped = format!("{live}.old-010508");
+        let staged_ps = ".codegraphV-4adb58b5-948b-4d4b-b1c5-63d78fe261d2.new.exe".to_owned();
+        let staged_sh = ".codegraphV.new.Ab12Cd".to_owned();
+        for name in [&live, &old, &old_stamped, &staged_ps, &staged_sh, "notes.txt"] {
             std::fs::write(dir.path().join(name), "x").unwrap();
         }
         let found: Vec<String> =
             stale_copies(dir.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(
-            found,
-            vec![
-                ".codegraphV-4adb58b5-948b-4d4b-b1c5-63d78fe261d2.new.exe".to_owned(),
-                "codegraphV.exe.old".to_owned(),
-                "codegraphV.exe.old-010508".to_owned(),
-            ],
-            "the running binary and unrelated files are not stale copies"
-        );
+        let mut expected = vec![old.clone(), old_stamped.clone(), staged_ps.clone(), staged_sh.clone()];
+        expected.sort();
+        assert_eq!(found, expected, "the running binary and unrelated files are not stale copies");
     }
 
     #[test]

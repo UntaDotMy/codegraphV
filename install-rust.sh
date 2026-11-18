@@ -102,7 +102,7 @@ cp "$tmp/$name/codegraphV" "$stage"
 chmod +x "$stage"
 mv -f "$stage" "$dir/codegraphV"
 # Copies earlier upgrades moved aside, and stage files a failed run left behind, are dead weight.
-rm -f "$dir"/codegraphV.old* "$dir"/.codegraphV-*.new.exe 2>/dev/null || true
+rm -f "$dir"/codegraphV.old* "$dir"/.codegraphV-* "$dir"/.codegraphV.new.* 2>/dev/null || true
 
 echo "Installed $("$dir/codegraphV" --version) to $dir/codegraphV"
 case ":$PATH:" in
