@@ -3,16 +3,11 @@
 # codegraphV
 
 **A full rewrite in Rust of [CodeGraph](https://github.com/colbymchenry/codegraph) by [Colby McHenry](https://github.com/colbymchenry).**
-One native executable: indexer, CLI and MCP server. There is no Node.js and no npm, and it has no telemetry.
+One native executable: indexer, CLI and MCP server. No Node.js, no npm, no telemetry.
 
 Windows · macOS · Linux · MIT
 
 </div>
-
-The [November audit](docs/benchmarks/audit-2026-11-03/report.md) records retrieval,
-context-size and reliability fixes, validation results, and the exact upstream
-changes included in v0.0.9. Its upstream ledger distinguishes ported changes
-from remaining work; this is not a claim of full parity with upstream HEAD.
 
 > **Credit where it is due.** CodeGraph was designed and built by Colby McHenry
 > ([colbymchenry/codegraph](https://github.com/colbymchenry/codegraph), MIT). The ideas, the
@@ -207,24 +202,23 @@ While an MCP session runs, the server checks GitHub at most once a day for a new
 and tells the agent when one exists. It never upgrades by itself. Turn the check off with
 `CODEGRAPHV_NO_UPDATE_CHECK=1` (or `DO_NOT_TRACK=1`).
 
-## Benchmarks, measured honestly
+## Benchmarks
 
-These results come from [`scripts/bench/bench.py`](scripts/bench/bench.py), run on 2026-10-26
-with codegraphV v0.0.2.
+Every number below was produced by a script in this repository, and each section names the script
+that reproduces it. Ground truth is always found from source text, never from either index. Where a
+table is from an older release it says so — these figures are not re-measured on every release.
+
+### Answering questions: Rust vs TypeScript vs ripgrep
+
+[`scripts/bench/bench.py`](scripts/bench/bench.py) · measured 2026-10-26 with **v0.0.2**
+([raw results](docs/benchmarks/rust-v0.0.2/report.md), [v0.0.1's](docs/benchmarks/rust-v0.0.1/report.md))
 
 - **Machine:** Windows 11, AMD Ryzen 5 2600 (6 cores / 12 threads), 16 GB RAM.
-- **Engines:** the Rust engine (this release) against the TypeScript engine it was ported
-  from (v1.6.2, built from this repo's `src/`), plus a ripgrep-and-read baseline that models
-  an agent without codegraph.
-- **Inputs:** each engine indexes its own copy of each repo. "This repo" is pinned to commit
-  `592b255e`, so the numbers stay comparable between releases.
-- **Ground truth:** found from source text alone, never from either index.
-- **Raw results:** [`docs/benchmarks/rust-v0.0.2/`](docs/benchmarks/rust-v0.0.2/report.md)
-  (v0.0.1's are in [`docs/benchmarks/rust-v0.0.1/`](docs/benchmarks/rust-v0.0.1/report.md)).
+- **Engines:** the Rust engine, the TypeScript engine it was ported from (v1.6.2), and a
+  ripgrep-and-read baseline that models an agent without codegraph.
+- **Inputs:** each engine indexes its own copy. "this repo" is pinned to commit `592b255e`.
 
-### Answering questions (`explore`, median per query)
-
-| repo | engine | queries | recall | time | peak memory | estimated output tokens |
+| repo | engine | queries | recall | time | peak memory | est. output tokens |
 |---|---|---|---|---|---|---|
 | serde_json | **Rust** | 11 | **1.00** | **37 ms** | 12 MB | **696** |
 | serde_json | TypeScript | 11 | 0.94 | 1039 ms | 190 MB | 3367 |
@@ -232,24 +226,24 @@ with codegraphV v0.0.2.
 | tokio | **Rust** | 11 | **0.92** | **48 ms** | 20 MB | **2433** |
 | tokio | TypeScript | 11 | 0.80 | 1175 ms | 211 MB | 6239 |
 | tokio | rg + read | 11 | 0.39 | 215 ms | 8 MB | 58016 |
-| codegraph (this repo) | **Rust** | 12 | **1.00** | **53 ms** | 26 MB | **2632** |
-| codegraph (this repo) | TypeScript | 12 | 0.74 | 1949 ms | 332 MB | 6235 |
-| codegraph (this repo) | rg + read | 12 | 0.51 | 462 ms | 33 MB | 52987 |
-
-How to read the columns:
+| this repo | **Rust** | 12 | **1.00** | **53 ms** | 26 MB | **2632** |
+| this repo | TypeScript | 12 | 0.74 | 1949 ms | 332 MB | 6235 |
+| this repo | rg + read | 12 | 0.51 | 462 ms | 33 MB | 52987 |
 
 - **recall:** the share of each query's target definitions whose source is in the answer.
-- **estimated output tokens:** response characters divided by four, rounded up; this is a size estimate, not a provider tokenizer count or total agent-session usage.
-- **time:** includes process start-up. Each CLI query is a new process, so most of the
-  TypeScript time is Node start-up and loading. A long-running MCP server pays that cost only
-  once.
-- **Why recall differs:** the two engines build the same graph, but the explore output is not
-  the same. The Rust explore renderer was written to its own design rather than copied, so
-  the recall and token columns compare the two renderers, not the graphs.
-- **The rg + read row varies between runs** (tokio's recall was 0.64 in v0.0.1's run), because
-  ripgrep searches in parallel and the order of its capped output is not fixed.
+- **est. output tokens:** response characters ÷ 4. A size estimate, not a provider tokenizer count
+  and not whole-session usage.
+- **time:** includes process start-up. Each CLI query is a new process, so most of the TypeScript
+  time is Node start-up. A long-running MCP server pays that once.
+- **Why recall differs:** both engines build the same graph, but the explore *renderer* is written to
+  its own design rather than copied, so these columns compare renderers, not graphs.
+- **The rg + read row varies between runs** (tokio was 0.64 in v0.0.1's run) because ripgrep searches
+  in parallel and its capped output order is not fixed. A later `fix(bench)` pinned the sampled
+  block; the v0.0.2 report predates that fix.
 
-### Indexing (`init`, a full index from scratch)
+### Indexing a project from scratch
+
+[`scripts/bench/bench.py`](scripts/bench/bench.py) · measured 2026-10-26 with **v0.0.2**
 
 | repo | files | engine | wall time | CPU time | avg cores | peak memory |
 |---|---|---|---|---|---|---|
@@ -263,48 +257,105 @@ How to read the columns:
 Both engines produced identical node and edge counts on every row (2100/6135, 9934/25384 and
 49367/180304).
 
-**Against v0.0.1:** on this repo v0.0.1 indexed in 54.7 s and v0.0.2 in 30.8 s (median of 3
-interleaved runs each, [`scripts/bench/index_speed.py`](scripts/bench/index_speed.py)), with a
-byte-identical graph. v0.0.2 resolves references and runs the synthesis passes on every core,
-and reads SQLite inside one transaction per unit of work instead of re-taking its lock for
-every statement.
+### Index speed between releases
 
-**Against v0.0.2:** on this repo (pinned to commit 014ac5c0, files over 1 MB skipped so both
-builds index the same files) v0.0.3 indexes in 30.2 s against 30.7 s, uses 88.7 CPU-seconds
-against 118.6 (-25%) and peaks at 1.8 GB of memory against 3.4 GB (-47%), with an identical
-graph (median of 3 interleaved runs, [`scripts/bench/efficiency_gate.py`](scripts/bench/efficiency_gate.py)).
-The gains come from no longer copying each file once per `super` call while resolving, a JIT
-stack that starts at one page instead of 32 KB for each of the thousands of compiled regular
-expressions, a byte limit on the resolver's file caches, and one resolve worker per physical
-core instead of per hardware thread (a second thread on a core added CPU time and memory, not
-speed).
+[`scripts/bench/index_speed.py`](scripts/bench/index_speed.py) · median of 3 interleaved runs
+
+- **v0.0.1 → v0.0.2:** on this repo, 54.7 s → 30.8 s with a byte-identical graph. v0.0.2 resolves
+  references and runs synthesis on every core, and reads SQLite inside one transaction per unit of
+  work instead of re-taking its lock per statement.
+
+### Efficiency between releases
+
+[`scripts/bench/efficiency_gate.py`](scripts/bench/efficiency_gate.py) · median of 3 interleaved runs
+
+- **v0.0.2 → v0.0.3:** on this repo (pinned to `014ac5c0`, files over 1 MB skipped so both builds
+  index the same files): 30.2 s vs 30.7 s, **88.7 vs 118.6 CPU-seconds (−25%)**, **1.8 vs 3.4 GB
+  peak (−47%)**, identical graph. From not copying each file per `super` call, a JIT stack that
+  starts at one page instead of 32 KB for each of thousands of compiled regexes, byte-limited
+  resolver caches, and one resolve worker per physical core instead of per hardware thread.
+
+### Memory on large inputs
+
+[`scripts/bench/memory_budget_gate.py`](scripts/bench/memory_budget_gate.py)
+
+- Several generated files up to the 10 MB limit index without blowing up memory.
+- Parsing holds at most about 12 MB of source at a time. A graph of two million symbols (12
+  generated 8 MB files) still peaks near 1.5 GB during the synthesis passes; those files parse one
+  after the other. Lower `CODEGRAPHV_MAX_FILE_MB` to skip such files.
+
+### Graph parity with the TypeScript engine
+
+These are correctness gates, not speed measurements — did the Rust engine build the *same* graph?
+
+| script | what it checks |
+|---|---|
+| [`scripts/bench/lang_parity.py`](scripts/bench/lang_parity.py) | Indexes one repo with both engines and diffs the graphs; exits non-zero on any difference. Run per language. |
+| [`scripts/bench/verify_identical.py`](scripts/bench/verify_identical.py) | Indexes the bench repos fresh and diffs each against a baseline index. |
+| [`scripts/bench/compare_index.py`](scripts/bench/compare_index.py) | Diffs two `codegraph.db` files as multisets of nodes, edges and unresolved refs. |
+| [`scripts/bench/lang_probe.py`](scripts/bench/lang_probe.py) | One sample file per README language; fails if any yields no symbols. |
+
+### Extraction and retrieval gates
+
+| script | what it checks |
+|---|---|
+| [`scripts/rust-golden/verify.mjs`](scripts/rust-golden/verify.mjs) | Rust↔TS graph parity with a one-directional divergence class: a Rust file may *gain* rows from an unwrapped macro body, never lose or change one. |
+| [`scripts/bench/gate_explore.py`](scripts/bench/gate_explore.py) | Gates a bench report's explore numbers: Rust recall and token use against TypeScript. |
+| [`scripts/bench/gate_index.py`](scripts/bench/gate_index.py) | Gates a bench report's index numbers: Rust no slower than TS, CPU within budget. |
+| [`scripts/bench/fts_rank.py`](scripts/bench/fts_rank.py) | Compares weighted BM25 ordering against FTS5's ranked iterator on an existing index. |
+| [`scripts/bench/autosync_e2e.py`](scripts/bench/autosync_e2e.py) | End-to-end: the MCP server keeps the graph in sync with file edits. |
+
+### Agent A/B — does an agent actually do better?
+
+[`scripts/agent-eval/`](scripts/agent-eval/) · the harness that measures retrieval *from the agent's
+side*, rather than from the CLI
+
+Deterministic probes measure what a command prints. They cannot measure whether that output let an
+agent stop reading. These harnesses run a real agent twice — with and without codegraphV, or against
+two builds — and score the transcript. Entry point:
+[`docs/benchmarks/agent-eval-feedback-metrics.md`](docs/benchmarks/agent-eval-feedback-metrics.md).
+
+| metric | the question it answers |
+|---|---|
+| **Residual context occupancy** | How many tokens the arm's retrieval still occupies when the run ends — the headroom every following turn works in. |
+| **Explore sufficiency** | Was the response *enough*? Read from what the agent did next: explored again, read a file, or answered. |
+| **Explore allocation** | What share of the returned bytes did the final answer actually cite. |
+
+| harness | compares |
+|---|---|
+| [`ab-new-vs-baseline.sh`](scripts/agent-eval/ab-new-vs-baseline.sh) | Two codegraphV builds on one question (the main A/B). |
+| [`ab-rust-builds.sh`](scripts/agent-eval/ab-rust-builds.sh) | The same, for two Rust binaries — each arm indexes with *its own* binary and serves it as the MCP server, with a daemon pre-warmed per arm. |
+| [`run-all.sh`](scripts/agent-eval/run-all.sh) | with codegraphV vs without. |
+| [`ab-sufficiency.sh`](scripts/agent-eval/ab-sufficiency.sh), [`ab-impl.sh`](scripts/agent-eval/ab-impl.sh), [`ab-adoption.sh`](scripts/agent-eval/ab-adoption.sh), [`ab-hook.sh`](scripts/agent-eval/ab-hook.sh) | Purpose-built arms (sufficiency, implementation, adoption, hook). |
+
+`parse-run.mjs` scores a transcript; `compare-arms.mjs` prints the side-by-side table. Both have a
+`--selftest` that must stay green.
+
+### Audit reports
+
+| date | baseline → release | what it covers |
+|---|---|---|
+| [2026-10-30](docs/benchmarks/audit-2026-10-30/report.md) | `c645adc0` | Reliability: SQLite WAL fix, Windows installer recovery, migration safety, query cost. |
+| [2026-11-03](docs/benchmarks/audit-2026-11-03/report.md) | v0.0.8 → v0.0.9 | All 16 crates, retrieval, search, graph accuracy, components, protocol recovery, locking. Its [upstream ledger](docs/benchmarks/audit-2026-11-03/upstream.json) marks every reviewed upstream commit ported, partial, native, reference-only or pending. |
+
+The audit is explicit that it does not certify every function, and the broad parity checkpoint is
+deliberately not advanced on its own.
 
 ### Where Rust is not better
 
-- **Indexing a large repo uses more memory than v0.0.1 did.** On this repo (2,053 files) the peak
-  with v0.0.12 is about 1.6 GB, against 1.1 GB for v0.0.1 (and 4.0 GB for TypeScript). To trade speed for memory,
-  set `CODEGRAPHV_RESOLVE_WORKERS` and `CODEGRAPHV_PARSE_WORKERS` to a lower number.
-- **A tree of very large generated sources still needs a lot of memory.** Parsing now holds at
-  most about 12 MB of source at a time, but a graph of two million symbols (12 generated 8 MB
-  files) peaks near 1.5 GB while the synthesis passes run, and those files parse one after the
-  other. Set `CODEGRAPHV_MAX_FILE_MB` lower to skip such files.
-- **The binary is large:** about 77 MB on Windows, because tree-sitter grammars for every language are
-  compiled in, plus a WebAssembly runtime that loads the original's grammar files for some
-  languages. The npm package downloads a full Node.js runtime instead, but that is no
-  excuse: shrinking the binary is open work.
-- **Fewer surfaces than the original:**
-  - no npm package and no JavaScript library API;
-  - the browser viewer (`codegraphV ui`) is a preview behind `CODEGRAPHV_UI=1`, as it is
-    upstream, and does not have every view the original has;
-  - `codegraphV init` does not yet offer to index the other repositories it finds under the
-    folder.
-- **This is an early release.** Parity was checked as follows:
-  - a graph diff against the TypeScript engine on serde_json, tokio, this repo, and one
-    public repo for each of 15 languages;
-  - the workspace test suite.
-
-  That is a lot of code, but not every repo in the world. If the Rust and TypeScript engines
-  disagree on your code, that is a bug: please open an issue with the repo.
+- **Indexing a very large repo uses more memory than v0.0.1 did.** On this repo (2,053 files) the
+  peak with v0.0.12 is about 1.6 GB, against 1.1 GB for v0.0.1 (and 4.0 GB for TypeScript). Lower
+  `CODEGRAPHV_RESOLVE_WORKERS` and `CODEGRAPHV_PARSE_WORKERS` to trade speed for memory.
+- **The binary is large:** about 77 MB on Windows, because tree-sitter grammars for every language
+  are compiled in, plus a WebAssembly runtime for some grammars. Shrinking it is open work.
+- **Fewer surfaces than the original:** no npm package and no JavaScript library API; the browser
+  viewer (`codegraphV ui`) is a preview behind `CODEGRAPHV_UI=1` and does not have every view the
+  original has; `codegraphV init` does not yet offer to index the other repositories it finds under
+  the folder.
+- **This is an early release.** Parity was checked on serde_json, tokio, this repo and one public
+  repo for each of 15 languages, plus the workspace test suite. That is a lot of code, but not every
+  repo in the world: if the two engines disagree on your code, that is a bug — please open an issue
+  with the repo.
 
 ## How it stays in sync
 
