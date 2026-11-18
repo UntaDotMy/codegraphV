@@ -366,7 +366,24 @@ impl Environment {
             .is_ok_and(|p| p.exists() || p.parent().is_some_and(Path::exists))
     }
     pub fn configured(&self, id: &str, loc: Location) -> bool {
-        self.configured_as(&CODEGRAPHV, id, loc)
+        self.configured_as(&CODEGRAPHV, id, loc) || self.claude_hooks_configured(id, loc)
+    }
+    /// Claude keeps its two hooks in `settings.json`, not in the MCP file [`config_path`] names,
+    /// so a setup that opted out of (or never had) the MCP entry is still configured: without
+    /// this, `install --refresh` — which `upgrade` runs — skips the target and leaves an older
+    /// hook entry, its matcher and its spelling in place forever.
+    fn claude_hooks_configured(&self, id: &str, loc: Location) -> bool {
+        if id != "claude" || (loc == Location::Local && self.project_is_home()) {
+            return false;
+        }
+        let path = self.profile(loc, "CLAUDE_CONFIG_DIR", ".claude").join("settings.json");
+        let Ok(Some(data)) = std::fs::read_to_string(path)
+            .map(|text| jsonc_parser::parse_to_serde_value(&text, &Default::default()).ok().flatten())
+        else {
+            return false;
+        };
+        let hooks = data.get("hooks");
+        has_hook(&CODEGRAPHV, hooks, &PROMPT_HOOK) || has_hook(&CODEGRAPHV, hooks, &GUARD_HOOK)
     }
     /// What `brand` has in Claude Code's settings.json at `loc`: (its tool permission, its
     /// prompt hook). An unreadable file has neither.

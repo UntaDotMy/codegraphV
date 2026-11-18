@@ -576,6 +576,25 @@ fn claude_refresh_rewrites_the_guard_matcher_of_an_existing_entry() {
     assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
 }
 
+/// A setup that has our hooks but no MCP entry — the shape left by `--no-permissions` with an
+/// MCP entry the user removed by hand — is still configured, so the refresh `upgrade` runs
+/// reaches it instead of skipping it and leaving the old entry forever.
+#[test]
+fn claude_hooks_without_an_mcp_entry_are_configured_and_refreshed() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let settings = env.home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let old = GUARD_GROUP.replace(
+        "^(Grep|Glob|Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__codegraphV__.*)$",
+        "^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$",
+    );
+    fs::write(&settings, format!(r#"{{"hooks":{{"PreToolUse":[{old}]}}}}"#)).unwrap();
+    assert!(env.configured("claude", Location::Global), "the guard hook alone makes it configured");
+    env.apply("claude", Location::Global, InstallOptions { prompt_hook: None, preserve_permissions: true, ..InstallOptions::default() }, false).unwrap();
+    assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
+}
+
 /// Upstream #3234: from the home folder, a "local" setup's files are the global ones
 /// (`~/.codex/config.toml`, `~/.claude/settings.json`), and its instructions file is the user's
 /// own `~/AGENTS.md`. A local install there is refused and counts as not configured, so
