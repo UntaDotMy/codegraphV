@@ -4,6 +4,9 @@
 //! the deny reason names the exact `codegraphV_explore` call to make. Plain-text searches, pipe
 //! filters, reads and edits always pass.
 //!
+//! It also guards itself: an edit or shell command that would remove the guard from Claude's
+//! settings, or that turns hooks off, is denied. That check needs no index — it runs anywhere.
+//!
 //! LOAD-BEARING: it must never stop work by malfunctioning. Every failure path — switch off,
 //! bad payload, no index, engine error, timeout — prints nothing and exits 0 (allow).
 //! `CODEGRAPHV_GUARD=0` in the agent's environment turns it off.
@@ -765,6 +768,30 @@ impl Guard {
         let input = &event["tool_input"];
         let cwd = event["cwd"].as_str().filter(|c| !c.is_empty()).map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let text = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
+        // Guarding the guard comes first and needs no index: it applies everywhere.
+        match tool {
+            "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+                let file = input["file_path"].as_str().or(input["notebook_path"].as_str()).unwrap_or_default();
+                if file.is_empty() {
+                    return Ok(());
+                }
+                let path = norm_path(file, &cwd);
+                if path.file_name().is_some_and(|n| n == "settings.json" || n == "settings.local.json")
+                    && path.parent().and_then(Path::file_name).is_some_and(|n| n == ".claude")
+                {
+                    // The settings case is decided by the edit's effect on the guard entry, not by
+                    // the words in it: a write that keeps the guard is a legitimate settings change.
+                    return check_settings_edit(input, &path);
+                }
+                return tamper_reason(&strings_in(input).join("\n")).map_or(Ok(()), Err);
+            }
+            "Bash" | "PowerShell" => {
+                if let Some(reason) = tamper_reason(&text("command")) {
+                    return Err(reason);
+                }
+            }
+            _ => {}
+        }
         if tool.starts_with("mcp__codegraphV__") {
             let root = match input["projectPath"].as_str() {
                 Some(p) => find_root(&norm_path(p, &cwd)),
@@ -801,6 +828,102 @@ fn strings_in(v: &Value) -> Vec<String> {
         Value::Array(items) => items.iter().flat_map(strings_in).collect(),
         Value::Object(map) => map.values().flat_map(strings_in).collect(),
         _ => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------- guarding the guard
+//
+// The rules the agent must not talk its way around. A settings edit is judged by what the edit
+// does to the guard entry (see `check_settings_edit`); everything else goes by these text rules,
+// which need no index, so they apply in every project.
+
+/// What an edit or command's text may not do to the hook wiring.
+fn tamper_reason(text: &str) -> Option<Deny> {
+    let lower = text.to_lowercase();
+    if lower.contains("disableallhooks") {
+        return Some("codegraphV guard: turning every hook off is blocked; ask the user.".into());
+    }
+    let names_guard = lower.contains("guard-hook") || lower.contains("guard_hook");
+    let settings = lower.contains(".claude") && (lower.contains("settings.json") || lower.contains("settings.local.json"));
+    if names_guard && settings {
+        return Some("codegraphV guard: changing the guard's own hook entry in Claude's settings is blocked; ask the user.".into());
+    }
+    let shell_write = lower.contains('>')
+        || lower.contains("set-content")
+        || lower.contains("add-content")
+        || lower.contains("out-file")
+        || lower.contains("writealltext")
+        || lower.contains("remove-item")
+        || lower.contains("set-item");
+    if settings && shell_write {
+        return Some("codegraphV guard: rewriting Claude's settings through a shell is blocked; ask the user to change settings.".into());
+    }
+    None
+}
+
+/// The PreToolUse entries in `settings` that are the guard. A text that does not parse holds no
+/// guard, so a settings file that was already broken is not treated as a loss.
+fn guard_entries(settings: &Value) -> Vec<Value> {
+    settings["hooks"]["PreToolUse"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|group| {
+            group["hooks"].as_array().is_some_and(|hooks| hooks.iter().any(codegraph_installer::is_guard_hook))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Deny an edit that would remove the guard from Claude's settings file.
+///
+/// Settings are edited by writing the whole file or by replacing a fragment, so the check applies
+/// the edit to the current text and looks for a guard entry that existed before and is gone after.
+/// Failing open on the settings case is what let the guard be removed by hand: so an unreadable
+/// settings file is denied while an entry is gone, and a broken result is denied, since a file that
+/// cannot be read holds no guard to keep.
+fn check_settings_edit(input: &Value, file: &Path) -> Result<(), Deny> {
+    let Ok(before_text) = std::fs::read_to_string(file) else { return Ok(()) };
+    let parse = |text: &str| -> Value {
+        jsonc_parser::parse_to_serde_value(text, &Default::default())
+            .ok()
+            .flatten()
+            .unwrap_or(Value::Null)
+    };
+    let before = guard_entries(&parse(&before_text));
+    if before.is_empty() {
+        return Ok(());
+    }
+    let after_text = if input.get("content").and_then(Value::as_str).is_some() {
+        input["content"].as_str().unwrap_or_default().to_owned()
+    } else if let Some(edits) = input.get("edits").and_then(Value::as_array) {
+        edits.iter().fold(before_text.clone(), |text, edit| replace_fragment(&text, edit))
+    } else {
+        replace_fragment(&before_text, input)
+    };
+    let after = guard_entries(&parse(&after_text));
+    if before.iter().all(|entry| after.contains(entry)) {
+        return Ok(());
+    }
+    Err("codegraphV guard: this change would remove the guard hook from Claude's settings; ask the user. \
+         A settings file edited by hand keeps working — reinstall with `codegraphV install` to restore it."
+        .into())
+}
+
+/// `text` with one `old_string` → `new_string` replacement, as the file tools apply an edit.
+fn replace_fragment(text: &str, edit: &Value) -> String {
+    let (Some(old), Some(new)) = (edit["old_string"].as_str(), edit["new_string"].as_str()) else {
+        return text.to_owned();
+    };
+    if old.is_empty() {
+        return text.to_owned();
+    }
+    if edit["replace_all"].as_bool() == Some(true) {
+        return text.replace(old, new);
+    }
+    match text.find(old) {
+        Some(at) => format!("{}{}{}", &text[..at], new, &text[at + old.len()..]),
+        None => text.to_owned(),
     }
 }
 

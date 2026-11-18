@@ -24,6 +24,7 @@ codegraph-context = { path = "../codegraph-context" }
 serde_json.workspace = true
 serde.workspace = true
 regex.workspace = true
+jsonc-parser = { workspace = true }
 indexmap.workspace = true
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"

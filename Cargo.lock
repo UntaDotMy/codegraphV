@@ -252,6 +252,7 @@ dependencies = [
  "ctrlc",
  "globset",
  "indexmap",
+ "jsonc-parser",
  "mimalloc",
  "regex",
  "serde",
