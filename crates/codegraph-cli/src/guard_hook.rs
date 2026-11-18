@@ -783,7 +783,8 @@ impl Guard {
                     // the words in it: a write that keeps the guard is a legitimate settings change.
                     return check_settings_edit(input, &path);
                 }
-                return tamper_reason(&strings_in(input).join("\n")).map_or(Ok(()), Err);
+                // Any other file is ordinary work, whatever it mentions.
+                return Ok(());
             }
             "Bash" | "PowerShell" => {
                 if let Some(reason) = tamper_reason(&text("command")) {
@@ -833,11 +834,13 @@ fn strings_in(v: &Value) -> Vec<String> {
 
 // ---------------------------------------------------------------- guarding the guard
 //
-// The rules the agent must not talk its way around. A settings edit is judged by what the edit
-// does to the guard entry (see `check_settings_edit`); everything else goes by these text rules,
-// which need no index, so they apply in every project.
+// The rules the agent must not talk its way around. A settings edit is judged by what it does to
+// the guard entry (`check_settings_edit`), never by the words in the file: a source file, a test
+// or a script that merely mentions the guard and a settings path is ordinary work, and refusing
+// it is how a text rule turns into an obstacle. Shell commands keep the text rules, because a
+// command's effect cannot be applied and read back here.
 
-/// What an edit or command's text may not do to the hook wiring.
+/// What a shell command's text may not do to the hook wiring.
 fn tamper_reason(text: &str) -> Option<Deny> {
     let lower = text.to_lowercase();
     if lower.contains("disableallhooks") {
