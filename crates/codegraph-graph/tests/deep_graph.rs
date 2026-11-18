@@ -2,7 +2,7 @@
 //! implementation. All graphs use real SQLite and close before temp cleanup.
 use codegraph_db::Store;
 use codegraph_graph::{GraphQueryManager, GraphTraverser};
-use codegraph_types::{Edge, EdgeKind, Language, Node, NodeKind, TraversalOptions};
+use codegraph_types::{Edge, EdgeKind, FileRecord, Language, Node, NodeKind, TraversalOptions};
 
 #[test]
 fn impact_budgets_preserve_endpoints_and_report_only_incomplete_walks() {
@@ -213,4 +213,48 @@ fn structural_containment_does_not_create_file_dependencies() {
     assert_eq!(q.get_file_dependencies("a.rs").unwrap(), ["b.rs"]);
     assert_eq!(q.get_file_dependents("b.rs").unwrap(), ["a.rs"]);
     store.close().unwrap();
+}
+
+/// A file's dependencies are the cross-file edges a reader follows — any kind but `contains`,
+/// which points at the file's own symbols — so two files that reference each other without an
+/// `imports` edge are a cycle too. Counting only `imports` under-reported, and the original
+/// engine follows the same rule (`getFileDependencies`).
+#[test]
+fn file_cycles_follow_every_cross_file_edge_not_only_imports() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::initialize(dir.path().join("codegraph.db")).unwrap();
+    let node = |id: &str, file: &str| {
+        Node::new(id, NodeKind::Function, id, id, file, Language::TypeScript, 1, 1, 0, 0, 1)
+    };
+    store
+        .insert_nodes(&[node("a", "one.ts"), node("b", "two.ts"), node("c", "three.ts")])
+        .unwrap();
+    // The walk starts from the indexed files, as the original engine's does.
+    for (path, count) in [("one.ts", 1), ("two.ts", 1), ("three.ts", 1)] {
+        store
+            .upsert_file(&FileRecord {
+                path: path.into(),
+                content_hash: "h".into(),
+                language: Language::TypeScript,
+                size: 10,
+                modified_at: 5,
+                indexed_at: 6,
+                node_count: count,
+                errors: None,
+                generated: None,
+            })
+            .unwrap();
+    }
+    // one.ts -> two.ts by a reference, two.ts -> one.ts by a call: a cycle with no import edge.
+    // three.ts is only reached in one direction, so it is in no cycle.
+    store
+        .insert_edges(&[
+            Edge::new("a", "b", EdgeKind::References),
+            Edge::new("b", "a", EdgeKind::Calls),
+            Edge::new("a", "c", EdgeKind::Calls),
+        ])
+        .unwrap();
+    let q = GraphQueryManager::new(&store);
+    let cycles = q.find_circular_dependencies().unwrap();
+    assert_eq!(cycles, vec![vec!["one.ts".to_string(), "two.ts".to_string()]], "{cycles:?}");
 }

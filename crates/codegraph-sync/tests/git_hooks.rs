@@ -115,6 +115,88 @@ fn legacy_blocks_belong_to_the_worktree_root_and_are_upgraded() {
     assert!(body.contains("# codegraphV-root: "));
 }
 
+/// A hook the original `codegraph` wrote. Its markers carry the old name, and the block names no
+/// root — the older install synced from the directory git runs hooks in, which is why a block
+/// without a root line belongs to the work tree's top-level project.
+fn original_codegraph_hook() -> &'static str {
+    "#!/bin/sh\n\
+     # >>> codegraph sync hook >>>\n\
+     # Keeps the CodeGraph index fresh while the live file watcher is off\n\
+     # (e.g. WSL2 /mnt drives). Runs in the background so it never blocks git.\n\
+     # Managed by codegraph; remove with `codegraph uninit` or delete this block.\n\
+     if command -v codegraph >/dev/null 2>&1; then\n  \
+     ( codegraph sync >/dev/null 2>&1 & ) >/dev/null 2>&1\n\
+     fi\n\
+     # <<< codegraph sync hook <<<\n"
+}
+
+/// Upgrading over an install of the original `codegraph` must adopt its block, not stack a second
+/// one beside it: two blocks would run `codegraph sync` and `codegraphV sync` on every commit.
+#[test]
+fn an_original_codegraph_block_is_replaced_not_stacked() {
+    let dir = repo();
+    let root = dir.path().to_str().unwrap();
+    let p = dir.path().join(".git/hooks/post-commit");
+    fs::write(&p, original_codegraph_hook()).unwrap();
+    assert!(
+        is_sync_hook_installed(root, Some(COMMIT)).unwrap(),
+        "an original codegraph hook already keeps this project fresh"
+    );
+    install_git_sync_hook(root, Some(COMMIT)).unwrap();
+    let body = fs::read_to_string(&p).unwrap();
+    assert_eq!(body.matches("sync hook >>>").count(), 1, "{body}");
+    assert!(!body.contains("codegraph sync"), "the old block still runs: {body}");
+    assert!(body.contains("codegraphV sync"), "{body}");
+    install_git_sync_hook(root, Some(COMMIT)).unwrap();
+    assert_eq!(fs::read_to_string(&p).unwrap(), body, "installing again changes nothing");
+    remove_git_sync_hook(root, Some(COMMIT)).unwrap();
+    assert!(!p.exists(), "the hook held only the adopted block: {body}");
+}
+
+/// A block naming another project's root is that project's, whatever its markers say: another
+/// install of the original `codegraph` may have written it.
+#[test]
+fn an_original_block_naming_another_root_is_left_alone() {
+    let dir = repo();
+    let root = dir.path().to_str().unwrap();
+    let p = dir.path().join(".git/hooks/post-commit");
+    let other = "#!/bin/sh\n\
+                 # >>> codegraph sync hook >>>\n\
+                 # codegraph-root: /someone/else\n\
+                 codegraph sync\n\
+                 # <<< codegraph sync hook <<<\n";
+    fs::write(&p, other).unwrap();
+    assert!(!is_sync_hook_installed(root, Some(COMMIT)).unwrap());
+    install_git_sync_hook(root, Some(COMMIT)).unwrap();
+    let body = fs::read_to_string(&p).unwrap();
+    assert!(body.contains("# codegraph-root: /someone/else"), "{body}");
+    assert!(body.contains("# >>> codegraphV sync hook >>>"), "{body}");
+    remove_git_sync_hook(root, Some(COMMIT)).unwrap();
+    assert_eq!(fs::read_to_string(p).unwrap(), other, "the other project's block survives");
+}
+
+/// The original `codegraph` had no namespaced project marker, so a block of it with a root line
+/// still belongs to whoever the line names; one without belongs to the top-level project.
+#[test]
+fn an_original_block_without_a_root_belongs_to_the_top_level_project() {
+    let dir = repo();
+    let root = dir.path().to_str().unwrap();
+    let p = dir.path().join(".git/hooks/post-commit");
+    let plain = "#!/bin/sh\n# >>> codegraph sync hook >>>\ncodegraph sync\n# <<< codegraph sync hook <<<\n";
+    fs::write(&p, plain).unwrap();
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    assert!(is_sync_hook_installed(root, Some(COMMIT)).unwrap());
+    assert!(
+        !is_sync_hook_installed(sub.to_str().unwrap(), Some(COMMIT)).unwrap(),
+        "a block with no root is the work tree's, not every folder's in it"
+    );
+    install_git_sync_hook(root, Some(COMMIT)).unwrap();
+    let body = fs::read_to_string(&p).unwrap();
+    assert_eq!(body.matches("sync hook >>>").count(), 1, "{body}");
+    assert!(!body.contains("codegraph sync"), "{body}");
+}
+
 #[test]
 fn honors_custom_hooks_path_and_non_shell_interpreters() {
     let dir = repo();

@@ -64,7 +64,15 @@ try{
     const probe=spawnSync(bin,[],{input:all.map(x=>JSON.stringify(x.q)).join('\n')+'\n',encoding:'utf8',maxBuffer:64<<20,windowsHide:true});
     if(probe.status!==0)throw Error(`${probe.status}: ${probe.stderr}`);
     const actual=probe.stdout.trim().split('\n').map(s=>JSON.parse(s));if(actual.length!==all.length)throw Error('wrong output count');
-    for(let i=0;i<actual.length;i++)if(!isDeepStrictEqual(actual[i],all[i].expected)){
+    // The native product's own name and CLI spelling (`codegraphV sync`), as in the degraded
+    // message; every other field — counts, timers, paths, ordering — is compared exactly.
+    const brand=value=>{
+      if(typeof value==='string')return value.replace(/\bCodeGraph(?!V)\b/g,'CodeGraphV').replace(/\bcodegraph sync\b/g,'codegraphV sync');
+      if(Array.isArray(value))return value.map(brand);
+      if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,brand(v)]));
+      return value;
+    };
+    for(let i=0;i<actual.length;i++)if(!isDeepStrictEqual(brand(actual[i]),brand(all[i].expected))){
         fs.writeFileSync(path.join(root,'target/watcher-diff.json'),JSON.stringify({i,...all[i],actual:actual[i]},null,2));throw Error(`watcher parity mismatch at ${i} (${all[i].name}); see target/watcher-diff.json`);
     }
     if(process.argv.includes('--write')){const dir=path.join(root,'crates/codegraph-sync/tests/fixtures');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'watcher.json'),JSON.stringify(scenarios.map(({name,cases})=>({name,cases:cases.map(({query,expected})=>({query,expected:compact(expected)}))})))+'\n');}

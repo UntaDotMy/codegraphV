@@ -14,7 +14,13 @@ const require=createRequire(import.meta.url);
 const hooks=require(path.join(oracleRoot,'dist/sync/git-hooks.js'));
 const wt=require(path.join(oracleRoot,'dist/sync/worktree.js'));
 const bin=path.resolve(process.argv[2]??'target/debug/examples/sync_probe.exe');
-const work=fs.mkdtempSync(path.join(os.tmpdir(),'cg-native-git-'));
+// Build the fixture under the long spelling of the temp root. Windows reports `TEMP` as an 8.3
+// alias (`ADMINI~1`), and git answers with whatever spelling the directory is reached by, so a
+// root under the alias mixed spellings between the two sides. Native's own worktree tests build
+// their fixture the same way (`real_path(temp_dir)` in `tests/worktree_spelling.rs`); the 8.3
+// case itself is covered there, not here.
+const tempRoot=fs.realpathSync.native(os.tmpdir());
+const work=fs.mkdtempSync(path.join(tempRoot,'cg-native-git-'));
 const root=path.join(work,"repo's space");fs.mkdirSync(root);
 const git=(dir,args)=>execFileSync('git',args,{cwd:dir,encoding:'utf8',windowsHide:true,timeout:5000,stdio:['ignore','pipe','pipe']}).trim();
 const init=dir=>{fs.mkdirSync(dir,{recursive:true});git(dir,['init','-q','--template=']);git(dir,['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','core.hooksPath=','-c','commit.gpgSign=false','commit','-q','--allow-empty','-m','fixture']);};
@@ -41,7 +47,48 @@ function rust(queries) {
 }
 const snapshot=dir=>Object.fromEntries(names.map(h=>{const p=path.join(dir,h);return[h,fs.existsSync(p)?fs.readFileSync(p,'utf8'):null];}));
 function reset(dir,body) {fs.mkdirSync(dir,{recursive:true});for(const h of names){const p=path.join(dir,h);if(body===null)fs.rmSync(p,{force:true});else fs.writeFileSync(p,body);}}
-function same(actual,expected,label) {if(!isDeepStrictEqual(actual,expected))throw Error(`${label}\nactual: ${JSON.stringify(actual)}\nexpected: ${JSON.stringify(expected)}`);}
+// The native product deliberately uses its own name, and its one-line notice (always read by an
+// agent) says the user can index, in the phrasing its longer warning uses. Only those spellings
+// are normalized; every count, path, verdict and ordering is compared exactly. Both advice forms
+// collapse to one token first, so the old-name pass cannot split them.
+// Every spelling of the advice sentence, including the reference's own (which still names the old
+// command as `codegraph init -i`), so all collapse to one token before names are rewritten.
+const ADVICE=[
+  'Run "codegraphV init" in this worktree for a worktree-local index.',
+  'The user can run "codegraphV init" in this worktree for a worktree-local index.',
+  'Run "codegraphV init" here for a worktree-local index.',
+  'Run "codegraph init -i" in this worktree for a worktree-local index.',
+  'The user can run "codegraph init -i" in this worktree for a worktree-local index.',
+  'Run "codegraph init -i" here for a worktree-local index.',
+];
+const INIT_TOKEN='@@INIT@@';
+const brand=value=>{
+  if(typeof value==='string'){
+    let text=value;
+    for(const phrase of ADVICE) text=text.split(phrase).join(INIT_TOKEN);
+    text=text.replace(/\bcodegraph init -i\b/g,'codegraphV init').replace(/\bCodeGraph(?!V)\b/g,'CodeGraphV');
+    return text.split(INIT_TOKEN).join(ADVICE[0]);
+  }
+  if(Array.isArray(value))return value.map(brand);
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,brand(v)]));
+  return value;
+};
+
+function same(actual,expected,label) {
+  const a=brand(actual),e=brand(expected);
+  if(isDeepStrictEqual(a,e))return;
+  if(Array.isArray(a)&&Array.isArray(e)){
+    for(let i=0;i<Math.max(a.length,e.length);i++){
+      if(!isDeepStrictEqual(a[i],e[i])){
+        console.error(`${label}: FIRST DIFF at ${i}`);
+        console.error(`  actual  : ${JSON.stringify(a[i])}`);
+        console.error(`  expected: ${JSON.stringify(e[i])}`);
+        break;
+      }
+    }
+  }
+  throw Error(`${label}\nactual: ${JSON.stringify(a)}\nexpected: ${JSON.stringify(e)}`);
+}
 let count=0;
 try {
   init(root);const a=path.join(root,'a'),b=path.join(root,'b');fs.mkdirSync(a);fs.mkdirSync(b);

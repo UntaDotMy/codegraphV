@@ -170,21 +170,28 @@ impl Store {
             paths: parsed.path_filters.iter().map(|s| s.to_lowercase()).collect(),
             names: parsed.name_filters.iter().map(|s| s.to_lowercase()).collect(),
         };
+        // Every candidate source fetches from the first row and ranks afterwards, so `offset`
+        // is taken once, on the answer, at the end of this function. The fetch depth covers the
+        // page being asked for.
+        let depth = limit.saturating_add(offset);
         let mut results = if !parsed.text.is_empty() {
             if self.fts5_available() {
-                self.search_fts(&parsed.text, &kinds, &languages, limit, offset, &fields)
+                self.search_fts(&parsed.text, &kinds, &languages, depth, 0, &fields)
                     .unwrap_or_default()
             } else {
                 Vec::new()
             }
         } else {
-            self.search_all_filters(&kinds, &languages, limit.saturating_mul(5), offset, &fields)?
+            // The listing is by name; ranking below reorders it. Paging the listing would return
+            // rows from a different order than the one asked for (the reference drops `offset`
+            // here instead).
+            self.search_all_filters(&kinds, &languages, depth.saturating_mul(5), 0, &fields)?
         };
         if results.is_empty() && utf16_len(&parsed.text) >= 2 {
-            results = self.search_like(&parsed.text, &kinds, &languages, limit, offset, &fields)?;
+            results = self.search_like(&parsed.text, &kinds, &languages, depth, 0, &fields)?;
         }
         if results.is_empty() && utf16_len(&parsed.text) >= 3 {
-            results = self.search_fuzzy(&parsed.text, &kinds, &languages, limit, &fields)?;
+            results = self.search_fuzzy(&parsed.text, &kinds, &languages, depth, &fields)?;
         }
         if !results.is_empty() && !query.is_empty() {
             let mut seen: HashSet<_> = results.iter().map(|r| r.node.id.clone()).collect();
@@ -241,7 +248,14 @@ impl Store {
                     f64::from(name_bonus)
                 };
             }
+            // A stable sort, as the reference's is: equal scores keep the order the candidate
+            // source gave them (FTS rank), so the answer matches the reference's and a page is
+            // reproducible. `sort_by` is stable, so no tiebreak is added here.
             results.sort_by(|a, b| b.score.total_cmp(&a.score));
+            // The page is taken from the ranked answer, not from the candidate listing.
+            if offset > 0 {
+                results = results.into_iter().skip(offset).collect();
+            }
             results.truncate(limit);
         }
         Ok(results)

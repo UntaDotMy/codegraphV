@@ -222,3 +222,37 @@ fn ranked_fts_preserves_tied_results_with_kind_and_language_filters() {
         .all(|r| r.node.kind == NodeKind::Function && r.node.language == Language::Rust));
     store.close().unwrap();
 }
+
+/// `offset` pages the answer, not the rows SQL happened to list first. A filter-only query
+/// orders its candidates by name and then adds a name and path score, so the ranked order differs
+/// from that listing: taking `offset` in SQL skipped listing rows and returned rows the first page
+/// had already shown. The page also has to be reproducible, so equal scores break on the node id.
+#[test]
+fn offset_pages_the_ranked_order_and_a_tie_breaks_on_the_node_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::initialize(dir.path().join("codegraph.db")).unwrap();
+    // Every `targ` scores alike: same name length, same kind, same path shape.
+    let mut rows: Vec<_> = (0..40)
+        .map(|i| Node::new(format!("n{i:02}"), NodeKind::Function, format!("targ{i:02}"),
+            format!("targ{i:02}"), format!("src/f{i:02}.rs"), Language::Rust, 1, 1, 0, 0, 1))
+        .collect();
+    // `hit` scores higher: its file path names the scoring query.
+    rows.push(Node::new("hit", NodeKind::Function, "targHit", "targHit", "src/targ.rs", Language::Rust, 1, 1, 0, 0, 1));
+    store.insert_nodes(&rows).unwrap();
+    let page = |limit: usize, offset: usize| -> Vec<String> {
+        store
+            .search_nodes("targ", &SearchOptions { limit: Some(limit), offset: Some(offset), kinds: Some(vec![NodeKind::Function]), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .map(|r| r.node.id)
+            .collect()
+    };
+    let all = page(100, 0);
+    assert_eq!(all.len(), 41, "every candidate is reachable: {all:?}");
+    assert_eq!(all[0], "hit", "the higher score comes first: {all:?}");
+    for offset in [0, 10, 20, 30, 40] {
+        assert_eq!(page(10, offset), all[offset.min(41)..(offset + 10).min(41)].to_vec(), "offset {offset}");
+    }
+    assert_eq!(page(10, 0), page(10, 0), "a page is reproducible");
+    store.close().unwrap();
+}
