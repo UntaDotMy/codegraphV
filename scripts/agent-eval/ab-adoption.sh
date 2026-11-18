@@ -50,8 +50,9 @@ count() {
       for(const b of (Array.isArray(blocks)?blocks:[])){
         if(b.type!=="tool_use")continue;
         if(b.name==="Read")read++;
-        else if(b.name==="mcp__codegraph__codegraph_node"){ if(b.input&&b.input.symbol)cgSym++; else cgFile++; }
-        else if(/mcp__codegraph__/.test(b.name))cgOther++;
+        // Both spellings: the Rust rewrite renamed the server and the tool.
+        else if(/codegraphV?_node(?:_|$)/.test(b.name||"")){ if(b.input&&b.input.symbol)cgSym++; else cgFile++; }
+        else if(/^mcp__codegraphV?__/.test(b.name||""))cgOther++;
       }
     }catch{}}
     console.log(`    Read=${read}  codegraph_node[file]=${cgFile}  codegraph_node[symbol]=${cgSym}  other_cg=${cgOther}  (cg exposed=${exposed})`);

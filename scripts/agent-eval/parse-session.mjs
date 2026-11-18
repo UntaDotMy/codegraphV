@@ -9,6 +9,7 @@ import { homedir } from 'os';
 import {
   classifySufficiency, formatSufficiency,
   collectExploreTexts, computeAllocation, finalAnswerText, formatAllocation,
+  isExploreTool,
 } from './parse-run.mjs';
 
 const projectArg = process.argv[2];
@@ -81,7 +82,9 @@ console.log(`session: ${sessionId}`);
 console.log(`\nMAIN thread tools:\n${fmt(mainCounts)}`);
 console.log(`\nSUBAGENT tools (${subAgentFiles} subagent transcript${subAgentFiles === 1 ? '' : 's'}):\n${fmt(subCounts)}`);
 
-const explore = subCounts['mcp__codegraph__codegraph_explore'] || mainCounts['mcp__codegraph__codegraph_explore'] || 0;
+const exploreCount = (counts) => Object.entries(counts)
+  .filter(([n]) => isExploreTool(n)).reduce((s, [, v]) => s + v, 0);
+const explore = exploreCount(subCounts) + exploreCount(mainCounts);
 const reads = (subCounts['Read'] || 0) + (mainCounts['Read'] || 0);
 const greps = (subCounts['Grep'] || 0) + (mainCounts['Grep'] || 0) + (subCounts['Bash'] || 0) + (mainCounts['Bash'] || 0);
 console.log(`\nVERDICT: codegraph_explore used ${explore}x | Read ${reads} | Grep/Bash ${greps}`);

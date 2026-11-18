@@ -156,51 +156,28 @@ impl<'a> GraphQueryManager<'a> {
         Ok(out)
     }
 
-    /// Strongly connected import groups, not traversal-dependent loops or call cycles.
+    /// The circular file dependencies, enumerated the way the original engine enumerates them:
+    /// a depth-first walk from each unvisited file, recording the part of the walk's path that
+    /// closes back onto it. The same strongly connected group therefore yields one entry per
+    /// closing edge, not one per group — `codegraphV cycles` reports those, so the order and the
+    /// duplicates are the answer, not something to tidy.
+    ///
+    /// A dependency is any cross-file edge `getFileDependencies` follows — a resolved call,
+    /// reference, instantiation, inheritance and the rest, `contains` excepted — not only an
+    /// `imports` edge.
     pub fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
         let mut forward = HashMap::<String, Vec<String>>::new();
-        let mut reverse = HashMap::<String, Vec<String>>::new();
-        let mut files = std::collections::BTreeSet::new();
-        for (source, target) in self.store.get_file_import_pairs()? {
-            files.insert(source.clone());
-            files.insert(target.clone());
-            forward.entry(source.clone()).or_default().push(target.clone());
-            reverse.entry(target).or_default().push(source);
+        for (source, target) in self.store.get_file_dependency_pairs()? {
+            forward.entry(source).or_default().push(target);
         }
-        // Iterative Kosaraju: two linear walks, no recursion on deep import chains.
+        let mut cycles = Vec::new();
         let mut visited = HashSet::new();
-        let mut finished = Vec::new();
-        for file in files {
-            let mut stack = vec![(file, false)];
-            while let Some((file, leave)) = stack.pop() {
-                if leave { finished.push(file); continue; }
-                if !visited.insert(file.clone()) { continue; }
-                stack.push((file.clone(), true));
-                for next in forward.get(&file).into_iter().flatten() {
-                    if !visited.contains(next) { stack.push((next.clone(), false)); }
-                }
+        for file in self.store.get_all_files()? {
+            if !visited.contains(&file.path) {
+                file_cycles_from(&file.path, &mut Vec::new(), &mut visited, &forward, &mut cycles);
             }
         }
-        visited.clear();
-        let mut groups = Vec::new();
-        for file in finished.into_iter().rev() {
-            if visited.contains(&file) { continue; }
-            let mut group = Vec::new();
-            let mut stack = vec![file];
-            while let Some(file) = stack.pop() {
-                if !visited.insert(file.clone()) { continue; }
-                for next in reverse.get(&file).into_iter().flatten() {
-                    if !visited.contains(next) { stack.push(next.clone()); }
-                }
-                group.push(file);
-            }
-            if group.len() > 1 {
-                group.sort_by(|a,b| a.encode_utf16().cmp(b.encode_utf16()));
-                groups.push(group);
-            }
-        }
-        groups.sort_by(|a,b| a.len().cmp(&b.len()).then_with(|| crate::type_hierarchy::locale_compare(&a[0], &b[0])));
-        Ok(groups)
+        Ok(cycles)
     }
 
     pub fn get_node_metrics(&self, id: &str) -> Result<NodeMetrics> {
@@ -285,5 +262,46 @@ impl<'a> GraphQueryManager<'a> {
             }
         }
         Ok(out)
+    }
+}
+
+/// `fileCyclesFrom`: the walk from `from`, recording every part of the path that closes back onto
+/// a file already on it. `visited` is the engine-wide set of files whose walk is done, so a file
+/// is entered once overall; `path` is this walk's stack, which grows with the chain and is
+/// re-entered rather than recursed into, so a deep chain cannot exhaust the thread.
+fn file_cycles_from(
+    from: &str,
+    path: &mut Vec<String>,
+    visited: &mut HashSet<String>,
+    forward: &HashMap<String, Vec<String>>,
+    cycles: &mut Vec<Vec<String>>,
+) {
+    enum Step<'a> {
+        Enter(&'a str),
+        Leave,
+    }
+    let mut steps = vec![Step::Enter(from)];
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Leave => {
+                path.pop();
+            }
+            Step::Enter(file) => {
+                // Back onto a file still on the path: the cycle is the path from there on.
+                if let Some(start) = path.iter().position(|on_path| on_path == file) {
+                    cycles.push(path[start..].to_vec());
+                    continue;
+                }
+                if !visited.insert(file.to_string()) {
+                    continue;
+                }
+                path.push(file.to_string());
+                steps.push(Step::Leave);
+                // Reversed, so the walk follows the dependency order.
+                for next in forward.get(file).into_iter().flatten().rev() {
+                    steps.push(Step::Enter(next));
+                }
+            }
+        }
     }
 }

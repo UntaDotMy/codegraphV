@@ -70,6 +70,7 @@ mod pascal;
 
 pub use decode::decode_tables;
 pub use pascal::is_system_name as is_pascal_system_name;
+pub use preparse::rust_source_for_walk;
 pub use langs::{grammar_for, LANGUAGES as NATIVE_LANGUAGES};
 pub use stack::with_error_tolerance;
 
@@ -88,7 +89,21 @@ pub fn has_native_walker(language: Language) -> bool {
 /// contains parse errors, or when the file nests deeper than the walker's stack
 /// budget allows.
 pub fn extract_file(file_path: &str, source: &str, language: Language) -> Result<ExtractionResult, String> {
-    extract_file_with(file_path, source, source, language)
+    let pre = pre_parse(file_path, source, language);
+    let walk_source = walk_source_for(&pre, language);
+    extract_file_with(file_path, &walk_source, source, language)
+}
+
+/// The text a language's walker parses, given its `preParse` output. Rust's walker gets the
+/// item-position macros blanked out, so the declarations inside them are seen (`rustmac.rs`);
+/// every other walker parses the `preParse` text itself. `pre_parse` has no Rust arm, so this is
+/// where Rust's one pre-parse pass lives.
+fn walk_source_for(pre: &str, language: Language) -> String {
+    if matches!(language, Language::Rust) {
+        preparse::rust_source_for_walk(pre)
+    } else {
+        pre.to_string()
+    }
 }
 
 /// [`extract_file`] with the file as written beside its pre-parsed `source`: Pascal
@@ -101,7 +116,7 @@ fn extract_file_with(file_path: &str, source: &str, as_written: &str, language: 
         "python" => python::extract(file_path, source),
         "go" => go::extract(file_path, source),
         "c" | "cpp" | "objc" => ccpp::extract(file_path, source, lang),
-        "rust" => rustlang::extract(file_path, source),
+        "rust" => rustlang::extract_with_text(file_path, source, as_written),
         "csharp" => csharp::extract(file_path, source),
         "ruby" => ruby::extract(file_path, source),
         "php" => php::extract(file_path, source),
@@ -166,7 +181,8 @@ pub fn extract_source(file_path: &str, source: &str, language: Language) -> Resu
         _ => {}
     }
     let pre = pre_parse(file_path, source, language);
-    let mut result = extract_file_with(file_path, &pre, source, language)?;
+    let walk_source = walk_source_for(&pre, language);
+    let mut result = extract_file_with(file_path, &walk_source, source, language)?;
     if matches!(language, Language::TypeScript | Language::Tsx | Language::ArkTs) && pre != source && preparse::blanks_export_type_star(source) {
         restore_re_export_signatures(&mut result, source);
     }
