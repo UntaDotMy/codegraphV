@@ -38,14 +38,25 @@ RULES = [
     (re.compile(BEFORE + r'codegraph(?![\w.\-])'), 'codegraphV'),
 ]
 
-# (path suffix, exact literal, or None for the whole file): the original's names, on purpose.
+# (path suffix, exact literal, or None for the whole file[, line pattern]): the original's
+# names, on purpose. A line pattern narrows an exact literal to the declarations and tests that
+# are MEANT to hold it — without one, renaming our own constant to the original's value would
+# pass, because the body would match. An exact literal that no named holder or test asserts
+# stays unpinned: a pin would then fail on a rename instead of on a rename to the original.
 ALLOWED = [
-    ('crates/codegraph-types/src/paths.rs', '.codegraph'),                      # the original's index folder: skipped, migrated
-    ('crates/codegraph-resolve/src/workspace_packages.rs', '.codegraph'),      # the original's index folder: skipped
+    # The original's index folder: skipped, migrated. Pinned to the declaration that holds it and
+    # to the test asserting the folder is still skipped — not to any other text in the file.
+    ('crates/codegraph-types/src/paths.rs', '.codegraph', re.compile(r'\bORIGINAL_CODEGRAPH_DIR\b|is_codegraph_data_dir\(')),
+    ('crates/codegraph-resolve/src/workspace_packages.rs', '.codegraph', re.compile(r'\bOHPM_SKIP_DIRS\b')),
     ('crates/codegraph-core/src/file_limits.rs', 'codegraph:oversize:{size}'),  # hashed into indexes; must equal the original's
     ('crates/codegraph-types/src/branding.rs', None),                           # the name map itself
     ('crates/codegraph-installer/src/original.rs', None),                      # what the original wrote (migrate)
     ('crates/codegraph-cli/src/migrate.rs', None),                              # migrate from the original
+    # The original's git-hook markers: read back off disk so an upgrade can replace its block
+    # in place. Pinned to the LEGACY_ declarations that exist to hold them; our own BEGIN/END
+    # and any user-visible text in this file must still be renamed.
+    ('crates/codegraph-sync/src/git_hooks.rs', '# >>> codegraph sync hook >>>', re.compile(r'\bconst\s+LEGACY_BEGIN\b')),
+    ('crates/codegraph-sync/src/git_hooks.rs', '# <<< codegraph sync hook <<<', re.compile(r'\bconst\s+LEGACY_END\b')),
 ]
 
 
@@ -98,8 +109,18 @@ def rename(text):
     return text
 
 
-def allowed(rel, body):
-    return any(rel.endswith(path) and (exact is None or body == exact) for path, exact in ALLOWED)
+def allowed(rel, body, line=''):
+    for entry in ALLOWED:
+        path, exact = entry[0], entry[1]
+        if not rel.endswith(path):
+            continue
+        if exact is not None and body != exact:
+            continue
+        # A third element pins the allowance to one declaration line.
+        if len(entry) > 2 and not entry[2].search(line):
+            continue
+        return True
+    return False
 
 
 def main():
@@ -115,7 +136,12 @@ def main():
         out, last = [], 0
         for start, end in spans:
             body = src[start:end]
-            new = body if allowed(rel, body) else rename(body)
+            # The whole source line the literal starts on, so an allowance can name the
+            # declaration meant to hold it.
+            line_start = src.rfind('\n', 0, start) + 1
+            line_end = src.find('\n', end)
+            line = src[line_start:line_end if line_end >= 0 else len(src)]
+            new = body if allowed(rel, body, line) else rename(body)
             if new != body:
                 found += 1
                 line = src.count('\n', 0, start) + 1
