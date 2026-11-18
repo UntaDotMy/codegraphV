@@ -51,9 +51,13 @@ analyze(){
     for(const l of L){try{const o=JSON.parse(l);
       if(o.type==="system"&&o.subtype==="init")exposed=(o.tools||[]).filter(t=>/codegraph/.test(t)).length;
       for(const b of (o.message?.content||[])){if(b.type!=="tool_use")continue;
-        if(b.name==="mcp__codegraph__codegraph_explore")ex++;
-        else if(b.name==="mcp__codegraph__codegraph_node"){if(b.input&&b.input.symbol)ns++;else nf++;}
-        else if(/mcp__codegraph__/.test(b.name))oc++;
+        // Both spellings: the Rust rewrite renamed the server and the tool
+        // (mcp__codegraphV__codegraphV_explore). A literal old name counted 0
+        // explores on every Rust run.
+        const n=b.name||"";
+        if(/codegraphV?_explore(?:_|$)/.test(n))ex++;
+        else if(/codegraphV?_node(?:_|$)/.test(n)){if(b.input&&b.input.symbol)ns++;else nf++;}
+        else if(/^mcp__codegraphV?__/.test(n))oc++;
         else if(b.name==="Read")reads.push((b.input?.file_path||"").split("/").pop());
         else if(b.name==="Grep")gr++;
       }}catch{}}

@@ -74,8 +74,9 @@ const frontload = lines.some(l => l.includes('auto-retrieved for this question')
 const get = (n) => toolCounts[n] || 0;
 const read = get('Read');
 const grep = get('Grep') + get('Bash') + get('Glob');
-const explore = get('mcp__codegraph__codegraph_explore');
-const cgAny = Object.keys(toolCounts).filter(k => /mcp__codegraph__/.test(k)).reduce((s, k) => s + toolCounts[k], 0);
+const explore = Object.entries(toolCounts)
+  .filter(([n]) => /codegraphV?_explore(?:_|$)/.test(n)).reduce((s, [, v]) => s + v, 0);
+const cgAny = Object.keys(toolCounts).filter(k => /^mcp__codegraphV?__/.test(k)).reduce((s, k) => s + toolCounts[k], 0);
 
 const out = {
   repo: args.repo, tier: args.tier, arm: args.arm, rep: Number(args.rep), question: args.q,
