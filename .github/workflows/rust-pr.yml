@@ -4,6 +4,11 @@
 # own tag/manual publishing path. `cargo fmt --check` and `clippy -D warnings` are deliberately
 # not gates yet: the existing formatting baseline still differs (audit A29), and adding them
 # here would make every PR red for pre-existing debt instead of the change under review.
+#
+# No macOS leg. `macos-15-intel` repeatedly went 15 minutes without a runner and was cancelled
+# with no steps started (PR #31, 2026-11-19), which left every PR blocked on capacity rather
+# than on its change. The release workflow still builds the macOS archive and its own test leg
+# runs on `macos-15-intel`, so macOS code is validated there, at release time.
 name: Rust PR
 
 on:
@@ -25,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15-intel, windows-latest]
+        os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
