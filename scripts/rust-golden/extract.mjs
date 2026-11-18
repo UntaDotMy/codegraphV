@@ -160,6 +160,26 @@ function compare(entry, idx, label) {
   const want = oracle[idx];
   if (!want) return 'skipped';
   const got = normResult(entry.result);
+
+  // Rust items a declarative macro writes are opaque to both engines: `pin_project! { pub struct
+  // Timeout<T> { .. } }` is a `macro_invocation` whose body tree-sitter reports as a `token_tree`,
+  // so the oracle never sees the `struct_item`. Native unwraps such a body when the grammar reads
+  // it, error-free, as a run of items (`crates/codegraph-extract/src/preparse/rustmac.rs`), and is
+  // therefore expected to hold MORE than the oracle — measured on tokio 1.52.3: 464 type names
+  // indexed before, 547 after, 0 of the file's declarations missing either way.
+  //
+  // The recovery is one-directional: native may add nodes, edges and refs the oracle lacks, and
+  // may never lose one or change one. A file showing a lost oracle row is a real failure, not
+  // divergence; so is an addition on a file whose source holds no brace-form macro at all.
+  const lost = onlyAdds(want, got);
+  if (f.language === 'rust' && lost.length === 0 && hasItemMacro(f.source)) {
+    const gained = onlyAdds(got, want);
+    if (gained.length) {
+      macroRecoveries.push({ file: f.rel, gained: gained.length });
+      return 'ok';
+    }
+  }
+
   let diff = false;
   for (const part of ['nodes', 'edges', 'refs', 'errors']) {
     const { onlyA, onlyB } = multisetDiff(want[part], got[part]);
@@ -169,6 +189,23 @@ function compare(entry, idx, label) {
     }
   }
   return diff ? 'diff' : 'ok';
+}
+
+const macroRecoveries = [];
+// Both engine sides of a comparison, in the same normalised shape `compare` uses.
+/**
+ * A source holding a brace-form macro invocation. `compare` requires one before it will accept an
+ * addition, so a file whose macros were never unwrapped may never gain a row.
+ */
+const hasItemMacro = (source) => /[A-Za-z_][A-Za-z0-9_]*\s*!\s*\{/.test(source);
+/** Rows `want` holds that `got` does not — an addition when called with the sides swapped. */
+function onlyAdds(want, got) {
+  const out = [];
+  for (const part of ['nodes', 'edges', 'refs', 'errors']) {
+    const { onlyA } = multisetDiff(want[part], got[part]);
+    out.push(...onlyA.map((row) => `${part}: ${row}`));
+  }
+  return out;
 }
 const tally = { ok: 0, diff: 0, deferred: 0, skipped: 0 };
 const perLang = new Map();
@@ -211,6 +248,10 @@ for (const [lang, s] of [...perLang].sort()) {
   console.log(`  ${lang.padEnd(11)} ok ${String(s.ok).padStart(5)}   diff ${String(s.diff).padStart(4)}   deferred(parse errors) ${s.deferred}`);
 }
 if (tolerant) console.log(`tolerant mode on the deferred files: ok ${tolerantTally.ok}, diff ${tolerantTally.diff}`);
+if (macroRecoveries.length) {
+  console.log(`\n${macroRecoveries.length} Rust file(s) gained items from an unwrapped macro body (documented divergence; nothing lost)`);
+  for (const r of macroRecoveries.slice(0, 10)) console.log(`  ${r.file}`);
+}
 for (const [kind, b] of [...buckets].sort((a, b) => b[1].count - a[1].count)) {
   console.log(`\n[${kind}] ${b.count} file(s)`);
   for (const s of b.samples) console.log('  ' + JSON.stringify(s).slice(0, 900));

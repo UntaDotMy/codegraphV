@@ -62,6 +62,31 @@ The inherited rows below remain the comparison inventory. These overrides record
 | perf rows | Runtime-specific | `d087b942`, `aaba9297`, `f76b4688`, `d54fc43a`, `fc7dd0d9`, `1b0e351d`, `fe783cb0`, `3b37fb01`, `3ee59947`, `1f188da1`, `afa1e147`, `15483713`, `4e96d759` tune the Node engine (regex-per-call, Map LRU, worker pools, compile cache); the native engine has none of those costs. Reasons are on each row below. | No native profile was taken to look for equivalent hotspots |
 | release blockers | Open | A22 viewer packaging, A24 SBOM/executed attestation, A26 parity baseline, A27 coverage/fuzz, A28 real-repo/agent measurement, A29 formatting, A31 arm64, A32 advisory scan, Linux/macOS and live-host runs. | |
 
+## Native fix with no upstream counterpart: Rust items inside a declarative macro
+
+The reference engine has the same gap, so nothing is inherited here. `pin_project! { pub struct
+Timeout<T> { .. } }`, tokio's `cfg_rt!` / `cfg_io_util!` wrappers and `lazy_static!`/`thread_local!`
+reach tree-sitter as a `macro_invocation` whose body is an opaque `token_tree`, so the walker never
+sees the `struct_item` inside and the declaration is absent from the index.
+
+`crates/codegraph-extract/src/preparse/rustmac.rs` blanks the invocation's name, `!` and two braces
+to spaces when the grammar reads the body, standalone and error-free, as a run of items declaring at
+least one type or function; the walker then parses the blanked text and still reads every name,
+signature and docstring from the file as written. Offsets, lines and columns are preserved by
+construction. `macro_rules!` bodies, expression macros, and macros inside a function body are
+refused by the grammar, not by a name list.
+
+Measured on tokio 1.52.3 (373 files): **464 type names indexed before, 547 after; 97 declarations
+missing before (all inside a macro body, 0 outside), 0 after.** `crates/codegraph-extract/tests/rust_items_in_macros.rs`
+(5 tests: `pin_project!`, `cfg_rt!`, `enum` in a macro, an attribute macro control, a
+`macro_rules!`-declares-nothing control); 3 failed before the change for the stated reason.
+`scripts/rust-golden/extract.mjs` gains a one-directional divergence class: a Rust file may gain
+rows the oracle lacks when its source holds a brace-form macro, and may never lose or change one —
+the gate is exit 1 with the class disabled on the same corpus and exit 0 with it (71 of 200 tokio
+files gain rows, none loses any). Extraction and this repository's own `crates/` Rust both stay at
+full parity otherwise (200/200 and 250/250). Not done: no agent A/B, and `codegraph-kernel` (the
+TypeScript build's accelerator) left unchanged, so the reference keeps the gap until it is retired.
+
 All other rows retain their inherited status; they have not been silently promoted based on titles or source resemblance. See [progress.md](progress.md) for native audit fixes and active gates.
 
 | Commit | Status | Change | Upstream regression / files |

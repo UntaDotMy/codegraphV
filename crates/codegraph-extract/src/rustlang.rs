@@ -133,10 +133,20 @@ pub struct Walker<'t> {
     value_scopes: Vec<ValueScope<'t>>,
 }
 
+/// Walk `source` as written — the entry the stack-budget tests use. Product extraction goes
+/// through [`extract_with_text`], which also blanks item-position macros first.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract(file_path: &str, source: &str) -> Result<EmitOut, String> {
+    extract_with_text(file_path, source, source)
+}
+
+/// `parse_text` is the file with Rust's item-position macros blanked (`preparse::rustmac`),
+/// and `source` is the file as written: offsets, lines and columns agree between them, and
+/// every name, signature and docstring is read from `source`.
+pub(crate) fn extract_with_text(file_path: &str, parse_text: &str, source: &str) -> Result<EmitOut, String> {
     let grammar = crate::langs::grammar_for("rust").ok_or("no rust grammar")?;
     let t0 = std::time::Instant::now();
-    let tree = crate::ts::parse(&grammar, "rust", source)?;
+    let tree = crate::ts::parse(&grammar, "rust", parse_text)?;
 
     let mut w = Walker {
         src: source,
