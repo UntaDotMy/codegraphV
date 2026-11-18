@@ -119,6 +119,36 @@ def read_lines(path: Path) -> list[str]:
         return []
 
 
+_HIT = re.compile(r'^(.*?):(\d+):(.*)$', re.S)
+
+
+def head_lines(text: str, limit: int = GREP_HEAD_LIMIT) -> list[str]:
+    """The first `limit` hits of an `rg` run, chosen by rank rather than by arrival order.
+
+    `rg` lists hits in directory-walk order, and its parallel walkers finish in a different
+    order on every run (measured: five runs of one query over this repository, five different
+    first-250 blocks, the same 15,389 hits in all). Keeping the raw prefix therefore measured a
+    different answer each time. Rank is the path, then the line number, so any two arrivals
+    orders keep the same lines.
+
+    Sorting here rather than with `rg --sort=path` keeps the arm's own wall time honest: that
+    flag costs about a second on this repository and is itself unstable (0.5–5.0 s measured),
+    while this runs inside the arm's read phase over text already captured.
+    """
+    lines = text.splitlines()
+    if len(lines) <= limit:
+        return lines
+
+    def rank(line: str) -> tuple[str, int, str]:
+        m = _HIT.match(line)
+        if not m:
+            return (line, 0, line)
+        path, num, rest = m.groups()
+        return (path.replace('\\', '/').removeprefix('./'), int(num), rest)
+
+    return sorted(lines, key=rank)[:limit]
+
+
 def find_definitions(root: Path, name: str, path_hint: str | None = None) -> list[tuple[str, int]]:
     """Definition sites of `name` as (posix relative path, 1-based line)."""
     sites = []
@@ -379,7 +409,7 @@ def run_rg_arm(repo: Path, q: str) -> tuple[Run, Coverage]:
     cov, opened = Coverage(), set()
     for ident in query_identifiers(q):
         r = measure(['rg', '-n', '-w', '--no-heading', '--color', 'never', '-g', '!.codegraph', '-g', '!.codegraphV', '--', ident, '.'], repo)
-        lines = r.stdout.splitlines()[:GREP_HEAD_LIMIT]
+        lines = head_lines(r.stdout)
         texts.append('\n'.join(lines))
         wall, cpu, peak, procs = wall + r.wall_ms, cpu + r.cpu_ms, max(peak, r.peak_rss_mb), procs + r.procs
         picked = {}  # path -> first declaration-looking hit line
@@ -564,6 +594,12 @@ def main(argv=None):
                         measured = [run_rg_arm(repo, q['q']) for _ in range(runs)]
                         text, cov = measured[0][0].stdout, measured[0][1]
                         row.update(median_run([m[0] for m in measured]))
+                        # Everything read must be the same text in every run, or `out_tokens` and
+                        # the score describe whichever run happened to be sampled first. The arm
+                        # is deterministic by construction (see `head_lines`); a mismatch means
+                        # that broke, so fail loudly instead of reporting a number.
+                        if len({m[0].stdout for m in measured}) > 1:
+                            raise RuntimeError(f'{len({m[0].stdout for m in measured})} different outputs over {runs} runs')
                     else:
                         repo = copies[arm]
                         cmd = ENGINES[arm]['explore'](q['q'])

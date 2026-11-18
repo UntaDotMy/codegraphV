@@ -63,6 +63,11 @@ Everything runs on your machine. The rewrite keeps:
   up on edits made while no session was running.
 - **The Claude Code prompt hook,** which adds codegraphV context to "how / where / trace"
   prompts.
+- **The Claude Code search guard** (new in codegraphV): in an indexed project, a Grep, Glob
+  or shell search for an indexed symbol is denied until the agent has asked codegraphV
+  about it this session, and the denial names the exact `codegraphV_explore` call to make.
+  Plain-text searches, pipe filters, reads and edits always pass. `install` and every
+  `upgrade` write it; `CODEGRAPHV_GUARD=0` in Claude Code's environment turns it off.
 - **The update notice and `codegraphV upgrade`.**
 
 ## Install
@@ -81,6 +86,8 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/codegraphV/rust-rewrite/i
 
 Both scripts download the release archive for your platform, check it against the release's
 `SHA256SUMS`, and delete their temporary files.
+There is no release archive for Apple Silicon Macs yet: `install-rust.sh` stops and prints the
+command to build from source.
 The Windows installer stages the replacement before switching executables and restores the
 previous executable if activation fails.
 
@@ -274,14 +281,14 @@ speed).
 
 ### Where Rust is not better
 
-- **Indexing a large repo uses more memory than v0.0.1 did.** On this repo the peak is
-  1.8 GB, against 1.1 GB for v0.0.1 (and 4.0 GB for TypeScript). To trade speed for memory,
+- **Indexing a large repo uses more memory than v0.0.1 did.** On this repo (2,053 files) the peak
+  with v0.0.12 is about 1.6 GB, against 1.1 GB for v0.0.1 (and 4.0 GB for TypeScript). To trade speed for memory,
   set `CODEGRAPHV_RESOLVE_WORKERS` and `CODEGRAPHV_PARSE_WORKERS` to a lower number.
 - **A tree of very large generated sources still needs a lot of memory.** Parsing now holds at
   most about 12 MB of source at a time, but a graph of two million symbols (12 generated 8 MB
   files) peaks near 1.5 GB while the synthesis passes run, and those files parse one after the
   other. Set `CODEGRAPHV_MAX_FILE_MB` lower to skip such files.
-- **The binary is large:** about 74 MB, because tree-sitter grammars for every language are
+- **The binary is large:** about 77 MB on Windows, because tree-sitter grammars for every language are
   compiled in, plus a WebAssembly runtime that loads the original's grammar files for some
   languages. The npm package downloads a full Node.js runtime instead, but that is no
   excuse: shrinking the binary is open work.
@@ -322,6 +329,7 @@ codegraphV index / sync         rebuild / reconcile        codegraphV explore "<
 codegraphV query <name>         search symbols             codegraphV node <symbol>
 codegraphV callers|callees <s>  relations                  codegraphV impact <symbol>
 codegraphV affected <files…>    files affected by a change codegraphV context "<task>"
+codegraphV implementations <t>  types implementing t       codegraphV cycles [path]   circular imports (exit 1)
 codegraphV install / uninstall  agent config               codegraphV upgrade [version] [--check]
 codegraphV serve --mcp          the MCP server agents run  codegraphV daemon [--stop]
 codegraphV migrate              move over from the original codegraph
@@ -353,12 +361,14 @@ come with character pages and a source hash that detects edits between pages.
 |---|---|
 | `CODEGRAPHV_NO_UPDATE_CHECK=1` / `DO_NOT_TRACK=1` | no daily release check |
 | `CODEGRAPHV_NO_PROMPT_HOOK=1` | the Claude prompt hook prints nothing |
+| `CODEGRAPHV_GUARD=0` | the Claude search guard allows everything |
 | `CODEGRAPHV_NO_WATCH=1` | no file watching in MCP sessions |
 | `CODEGRAPHV_DAEMON=0` | each session runs its own server instead of the shared one |
 | `CODEGRAPHV_PPID_POLL_MS` | how often (ms) a server checks that its agent is still there (default 5000, `0` = never) |
 | `CODEGRAPHV_DIR` | the per-project folder name (default `.codegraphV`) |
 | `CODEGRAPHV_PARSE_WORKERS` / `CODEGRAPHV_RESOLVE_WORKERS` | thread counts for indexing (default: parsing uses every hardware thread, resolving one per physical core) |
 | `CODEGRAPHV_MAX_FILE_MB` | largest source file indexed, in MB (default 10, `0` = no limit) |
+| `CODEGRAPHV_PARSE_TIMEOUT_MS` | how long one file may parse before it is recorded as a parse error, in ms (default 10000, plus as much again per MiB of source; `0` = no limit) |
 | `CODEGRAPHV_RESOLVER_CACHE_MB` | file text each resolve worker may cache, in MB (default 8) |
 | `CODEGRAPHV_INSTALL_DIR`, `CODEGRAPHV_VERSION` | install-script / upgrade location and version |
 

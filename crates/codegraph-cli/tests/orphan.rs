@@ -9,26 +9,62 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Start `codegraphV serve --mcp` through a shell that exits immediately, so the server's parent
-/// dies while this test still holds both of its pipes.
-fn orphaned_server(home: &Path, project: &Path, daemon: bool) -> (std::process::ChildStdin, mpsc::Receiver<Option<String>>) {
+/// The Windows shell that starts the server in this console and exits at once. Windows never
+/// reparents, so the server polls the launcher's liveness and needs no gate to wait on.
+#[cfg(windows)]
+fn launcher(exe: &str, _gate: &Path) -> Command {
+    let mut c = Command::new("cmd");
+    // `start /b` runs it in this console with the inherited handles; cmd then exits. A raw
+    // argument: cmd does not understand the `\"` escapes `arg` would add.
+    std::os::windows::process::CommandExt::raw_arg(&mut c, format!("/c start \"\" /b \"{exe}\" serve --mcp"));
+    c
+}
+
+/// The POSIX shell that starts the server as a background job and exits once `gate` exists.
+#[cfg(not(windows))]
+fn launcher(exe: &str, gate: &Path) -> Command {
+    let mut c = Command::new("sh");
+    // A background job's stdin is /dev/null unless redirected from a saved copy. The shell
+    // outlives the fork so the server starts as its child: POSIX signals parent death by
+    // reparenting, so a server that starts already reparented has no change to notice (as
+    // in the TypeScript watchdog, which also must not treat pid 1 itself as orphaning).
+    //
+    // It waits for `gate`, which the test writes once the server has answered `initialize`,
+    // rather than for a fixed time. Only the answer proves the server reached its watchdog,
+    // and the daemon proxy must cold-start a daemon before it can answer: a fixed 2 s window
+    // lost that race on a cold CI runner and killed the proxy before it replied.
+    c.arg("-c")
+        .arg(r#"exec 3<&0; "$1" serve --mcp <&3 & i=0; while [ ! -e "$2" ] && [ "$i" -lt 600 ]; do sleep 0.1; i=$((i+1)); done"#)
+        .arg("sh")
+        .arg(exe)
+        .arg(gate);
+    c
+}
+
+/// A server started through a launcher shell that is still alive.
+struct Orphaned {
+    stdin: std::process::ChildStdin,
+    lines: mpsc::Receiver<Option<String>>,
+    shell: std::process::Child,
+    gate: std::path::PathBuf,
+}
+
+impl Orphaned {
+    /// Let the launcher exit, so the server's parent dies while this test still holds both of
+    /// its pipes. Called only after the server has answered, so it is certainly running.
+    fn orphan(mut self) -> (std::process::ChildStdin, mpsc::Receiver<Option<String>>) {
+        std::fs::write(&self.gate, b"").expect("write the launcher's gate");
+        assert!(self.shell.wait().unwrap().success(), "the launcher shell exits once released");
+        (self.stdin, self.lines)
+    }
+}
+
+/// Start `codegraphV serve --mcp` through a launcher that exits once released, so the server's
+/// parent dies while this test still holds both of its pipes.
+fn orphaned_server(home: &Path, project: &Path, daemon: bool) -> Orphaned {
     let exe = env!("CARGO_BIN_EXE_codegraphV");
-    let mut shell = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        // `start /b` runs it in this console with the inherited handles; cmd then exits. A raw
-        // argument: cmd does not understand the `\"` escapes `arg` would add.
-        #[cfg(windows)]
-        std::os::windows::process::CommandExt::raw_arg(&mut c, format!("/c start \"\" /b \"{exe}\" serve --mcp"));
-        c
-    } else {
-        let mut c = Command::new("sh");
-        // A background job's stdin is /dev/null unless redirected from a saved copy. The shell
-        // lives on briefly so the server starts as its child: POSIX signals parent death by
-        // reparenting, so a server that starts already reparented has no change to notice (as
-        // in the TypeScript watchdog, which also must not treat pid 1 itself as orphaning).
-        c.arg("-c").arg(format!("exec 3<&0; '{exe}' serve --mcp <&3 & sleep 2"));
-        c
-    };
+    let gate = home.join("launcher-gate");
+    let mut shell = launcher(exe, &gate);
     shell
         .current_dir(project)
         .env("HOME", home)
@@ -44,7 +80,6 @@ fn orphaned_server(home: &Path, project: &Path, daemon: bool) -> (std::process::
     let mut child = shell.spawn().unwrap();
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
-    assert!(child.wait().unwrap().success(), "the launcher shell exits at once");
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -54,7 +89,7 @@ fn orphaned_server(home: &Path, project: &Path, daemon: bool) -> (std::process::
         }
         let _ = tx.send(None); // EOF: every holder of the server's stdout has exited
     });
-    (stdin, rx)
+    Orphaned { stdin, lines: rx, shell: child, gate }
 }
 
 fn exits_after_its_parent(daemon: bool) {
@@ -70,12 +105,14 @@ fn exits_after_its_parent(daemon: bool) {
         .output()
         .unwrap();
     assert!(init.status.success());
-    let (mut stdin, lines) = orphaned_server(home.path(), project.path(), daemon);
-    // It serves while orphaned: the stdin pipe is still open.
-    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"t","version":"1"}}}}}}"#).unwrap();
-    let first = lines.recv_timeout(Duration::from_secs(20)).expect("an initialize response");
+    let server = orphaned_server(home.path(), project.path(), daemon);
+    // It answers under a live launcher: the stdin pipe is still open.
+    writeln!(&server.stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"t","version":"1"}}}}}}"#).unwrap();
+    let first = server.lines.recv_timeout(Duration::from_secs(20)).expect("an initialize response");
     assert!(first.unwrap_or_default().contains("codegraphV"));
-    // ... and then notices its parent is gone and exits, closing its stdout.
+    // Now the launcher leaves. The stdin pipe stays open, so only the watchdog can end it.
+    let (stdin, lines) = server.orphan();
+    // It notices its parent is gone and exits, closing its stdout.
     let start = Instant::now();
     loop {
         match lines.recv_timeout(Duration::from_secs(5).saturating_sub(start.elapsed())) {

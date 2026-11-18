@@ -679,6 +679,138 @@ pub fn rust_type_lookup(
 
 // -- Reading a written type ----------------------------------------------------------------
 
+/// Where a written name is read from: its file, and the declaration offset (a `RustBinding`'s `at`, or
+/// the written type's own offset). Visibility is judged from there, so a `use` later in the block counts.
+pub struct RustOrigin {
+    pub file: String,
+    pub at: usize,
+}
+
+/// What a written name means at its origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameReading {
+    /// The standard type: no project type of that name is in sight at the origin.
+    Std,
+    /// A project type (or a dependency's) that the origin sees.
+    Project,
+    /// The origin cannot be read (a glob that leaves the project, an unreadable file): callers keep the
+    /// answer they gave before this reading existed.
+    Unknown,
+}
+
+/// What `name`, written under `path`, means at `origin`. Only a project type of the same name can change the
+/// answer, so this reads `Std` unless the project declares one. Then the project's type is in sight when the
+/// origin file declares it, imports it by name, or a glob brings it; a std-rooted path is `Std`.
+pub fn rust_name_reading(name: &str, path: &[String], origin: &RustOrigin, ctx: &Ctx) -> NameReading {
+    if !is_rust_project_named(name, ctx) {
+        return NameReading::Std;
+    }
+    let file = origin.file.as_str();
+    let at = Some(origin.at);
+    if !path.is_empty() {
+        let Some(root) = rust_written_root(path, file, at, ctx) else {
+            return NameReading::Unknown;
+        };
+        if is_std_root(&root) {
+            return NameReading::Std;
+        }
+        return reading_of_lookup(&rust_type_lookup(name, path, file, ctx, at), ctx);
+    }
+    if let Some(bound) = rust_use_path(name, file, at, ctx).filter(|b| b.len() > 1) {
+        if is_std_root(&bound[0]) {
+            return NameReading::Std;
+        }
+        return reading_of_lookup(&rust_type_lookup(name, &[], file, ctx, at), ctx);
+    }
+    let same: Vec<NodeRef> = ctx
+        .get_nodes_by_name(name)
+        .iter()
+        .filter(|n| {
+            n.language == Language::Rust
+                && n.name == name
+                && is_rust_declared_type_kind(n.kind)
+                && n.file_path == file
+        })
+        .cloned()
+        .collect();
+    if !same.is_empty() {
+        return reading_of_candidates(&same, ctx);
+    }
+    let uses = rust_uses_of(file, ctx);
+    if uses.external.contains(name) && !uses.bound.contains(name) {
+        return NameReading::Project;
+    }
+    match rust_glob_reach(name, file, ctx) {
+        GlobReach::Brings(items) => reading_of_candidates(&items, ctx),
+        GlobReach::Unknown => NameReading::Unknown,
+        GlobReach::Absent => NameReading::Std,
+    }
+}
+
+fn is_std_root(root: &str) -> bool {
+    matches!(root, "std" | "core" | "alloc")
+}
+
+/// The root of a written path once its first segment is expanded through the file's `use` bindings, as
+/// `rust_type_lookup` does: `io::Result` with `use std::io;` roots at `std`.
+fn rust_written_root(path: &[String], file: &str, at: Option<usize>, ctx: &Ctx) -> Option<String> {
+    let first = path.first()?;
+    match rust_use_path(first, file, at, ctx).filter(|h| !h.is_empty()) {
+        Some(head) => head.into_iter().next(),
+        None => Some(first.clone()),
+    }
+}
+
+/// A lookup's reading. Outside the project (std was read before, so this is a dependency) is `Project`.
+fn reading_of_lookup(lookup: &RustTypeLookup, ctx: &Ctx) -> NameReading {
+    if lookup.outside {
+        return NameReading::Project;
+    }
+    if lookup.nodes.is_empty() {
+        return NameReading::Unknown;
+    }
+    reading_of_candidates(&lookup.nodes, ctx)
+}
+
+/// A single candidate that is a `type` alias of `std::result::Result` is `Std`; any other project type is
+/// `Project`.
+fn reading_of_candidates(nodes: &[NodeRef], ctx: &Ctx) -> NameReading {
+    match nodes {
+        [only] if only.kind == NodeKind::TypeAlias && alias_is_std_result(only, ctx) => {
+            NameReading::Std
+        }
+        _ => NameReading::Project,
+    }
+}
+
+/// Whether a `type` alias is `std::result::Result` with its first parameter as the payload: the alias's first
+/// parameter is the first argument of the target, so `Alias<X>` is `Result<X, _>`.
+fn alias_is_std_result(alias: &Node, ctx: &Ctx) -> bool {
+    let Some(target) = super::calls::rust_alias_target(alias, ctx) else {
+        return false;
+    };
+    let Some(head) = rust_path_head(&target.text) else {
+        return false;
+    };
+    if head.name != "Result" || !head.segments.first().is_some_and(|root| is_std_root(root)) {
+        return false;
+    }
+    let alias_first = target.generics.as_deref().and_then(first_type_parameter);
+    let target_first = split_rust_top_level(&head.args, ',')
+        .first()
+        .map(|a| a.trim().to_string());
+    alias_first.is_some() && alias_first == target_first
+}
+
+/// The first type parameter of a generics list: lifetimes are skipped, bounds and defaults dropped.
+fn first_type_parameter(generics: &str) -> Option<String> {
+    split_rust_top_level(generics, ',')
+        .iter()
+        .map(|p| p.trim())
+        .find(|p| !p.is_empty() && !p.starts_with('\''))
+        .map(|p| p.split(|c| c == ':' || c == '=').next().unwrap_or("").trim().to_string())
+}
+
 /// The traits bounding generic `name` where `written` is written (`None` when it isn't a generic there).
 pub fn rust_generic_bounds(
     name: &str,
@@ -1043,6 +1175,11 @@ pub fn rust_value_type(
                 }
             }
             if re!(r"^[A-Z]").is_match(last) {
+                if let Some(wrapped) =
+                    std_variant_constructor(&segments, args, at, scopes, r, ctx, depth)
+                {
+                    return unwrapped(Some(wrapped));
+                }
                 if segments.len() == 1 && last == "Some" {
                     return unwrapped(local("Option<_>"));
                 }
@@ -1056,6 +1193,12 @@ pub fn rust_value_type(
                     return unwrapped(local(&segments[..segments.len() - 1].join("::")));
                 }
                 return unwrapped(local(&callee));
+            }
+            if last == "new" && unwraps == 0 {
+                if let Some(cell) = std_cell_constructor(&segments, args, at, scopes, r, ctx, depth)
+                {
+                    return Some(cell);
+                }
             }
             if segments.len() >= 2 && re!(r"^[A-Z]").is_match(segments[segments.len() - 2]) {
                 let owner: Vec<String> = segments[..segments.len() - 1]
@@ -1163,6 +1306,178 @@ pub fn rust_signature_offset(fn_: &Node, ctx: &Ctx) -> usize {
             .map(|f| f.from)
     });
     own.map_or(start, |from| from + 1)
+}
+
+/// `Some(x)`, `Ok(x)` or `Err(x)`, bare or under `Option::` / `Result::` (or a std path), with one
+/// argument of known type: written under its std path with that type kept, so `unwrap`, `unwrap_or`
+/// and an `if let` read it. A variant name imported from elsewhere in the crate is not the standard
+/// one, and an untyped argument keeps the untyped text the branch below gives. A payload built by
+/// `Box::new`, `Rc::new` or `Arc::new`, directly or through a binding, is not typed either: that wrapper
+/// is not written back into the text, so a method it has itself (`clone`) would link to the payload's.
+/// A declared `Arc<T>` parameter keeps its wrapper in the text. A variant brought in by a glob import
+/// (`use Outcome::*`) shadows the standard one (see `glob_brings_name`).
+fn std_variant_constructor(
+    segments: &[&str],
+    args: &str,
+    at: usize,
+    scopes: &RustScopes,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+    depth: u32,
+) -> Option<RustWrittenType> {
+    let variant = segments[segments.len() - 1];
+    let (owner, std_text) = match variant {
+        "Some" => ("Option", "std::option::Option"),
+        "Ok" | "Err" => ("Result", "std::result::Result"),
+        _ => return None,
+    };
+    if split_rust_top_level(args, ',').len() != 1 {
+        return None;
+    }
+    let standard = match segments.len() {
+        // Only an import shadows a prelude variant: a named `use`, or a visible glob that brings the name
+        // in. A project enum with an `Ok` variant that is not imported does not, so
+        // `is_rust_project_named` is deliberately not checked here.
+        1 => match rust_use_path(variant, &r.file_path, Some(at), ctx) {
+            None => !glob_brings_name(variant, &r.file_path, at, ctx),
+            Some(path) => matches!(
+                path.first().map(String::as_str),
+                Some("std" | "core" | "alloc")
+            ),
+        },
+        n => {
+            segments[n - 2] == owner && {
+                let head = (n > 2).then(|| segments[0]);
+                is_std_cell_type(head, owner, &r.file_path, Some(at), ctx)
+            }
+        }
+    };
+    if !standard {
+        return None;
+    }
+    // Not one level deeper: `args` is a strict part of this expression.
+    let held = rust_value_type(args, at, scopes, r, ctx, depth)?;
+    // Built by `Box::new`, `Rc::new` or `Arc::new`: that wrapper is not in the text, so `clone` would
+    // reach the payload.
+    if held.wrappers.as_deref().is_some_and(|w| !w.is_empty()) {
+        return None;
+    }
+    let text = match variant {
+        "Some" => format!("{std_text}<{}>", held.text),
+        "Ok" => format!("{std_text}<{}, _>", held.text),
+        _ => format!("{std_text}<_, {}>", held.text),
+    };
+    Some(RustWrittenType {
+        text,
+        wrappers: None,
+        opaque: None,
+        ..held
+    })
+}
+
+/// Whether a glob import visible at `at` brings `name` into scope, shadowing the prelude's variant of
+/// that name. A glob over a module counts when the module holds an item of that name; a glob over an
+/// enum counts when the enum has that variant. Still read as the standard one: a glob this walk cannot
+/// resolve; a dependency's glob (an `Outside` walk never shadows); and a child's `use super::*` over a
+/// parent whose `Ok` comes from an enum glob, since `rust_globbed_items` cannot see enum globs. A file
+/// the walk cannot balance keeps the standard reading.
+fn glob_brings_name(name: &str, file_path: &str, at: usize, ctx: &Ctx) -> bool {
+    let uses = rust_uses_of(file_path, ctx);
+    if !uses.balanced {
+        return false;
+    }
+    let here = rust_block_at(&uses.blocks, at);
+    uses.glob_paths.iter().any(|g| {
+        let visible = match g.scope {
+            None => rust_block_at(&uses.blocks, g.at) == here,
+            Some(s) => s.open < at && at < s.close,
+        };
+        visible && {
+            let mut segs = g.segs.clone();
+            segs.push(name.to_string());
+            rust_use_path_items(
+                &segs,
+                &rust_module_at(file_path, g.at, ctx),
+                ctx,
+                &mut HashSet::new(),
+            )
+            .is_some_and(|items| !items.is_empty())
+        }
+    })
+}
+
+/// `Mutex::new(x)`, `RwLock::new(x)` or `RefCell::new(x)` of the standard cell type (see
+/// `is_std_cell_type`): written by its std path and holding the type of `x`, so its accessor can read
+/// the value. The std path keeps a project namesake from switching the accessor off. Not when `x` is
+/// built by `Box::new`, `Rc::new` or `Arc::new`, directly or through a binding: that wrapper is not
+/// written into the type, so a method it has itself (`clone`) would link to the payload's, and the
+/// call falls through to the generic `Type::function` branch below. A declared `Arc<T>` parameter keeps
+/// its wrapper in the type and is not affected, and a wrapper around the cell (`Arc::new(Mutex::new(x))`)
+/// still reaches `x`.
+fn std_cell_constructor(
+    segments: &[&str],
+    args: &str,
+    at: usize,
+    scopes: &RustScopes,
+    r: &UnresolvedRef,
+    ctx: &Ctx,
+    depth: u32,
+) -> Option<RustWrittenType> {
+    if segments.len() < 2 || split_rust_top_level(args, ',').len() != 1 {
+        return None;
+    }
+    let owner = segments[segments.len() - 2];
+    let std_path = match owner {
+        "Mutex" => "std::sync::Mutex",
+        "RwLock" => "std::sync::RwLock",
+        "RefCell" => "std::cell::RefCell",
+        _ => return None,
+    };
+    let head = (segments.len() > 2).then(|| segments[0]);
+    if !is_std_cell_type(head, owner, &r.file_path, Some(at), ctx) {
+        return None;
+    }
+    // Not one level deeper: `args` is a part of this expression, so the recursion ends, and
+    // `Arc::new(Mutex::new(x))` must reach `x` at the depth `Arc::new(x)` does.
+    let held = rust_value_type(args, at, scopes, r, ctx, depth)?;
+    // Built by `Box::new`, `Rc::new` or `Arc::new`: that wrapper is not in the text, so `clone` would
+    // reach the payload.
+    if held.wrappers.as_deref().is_some_and(|w| !w.is_empty()) {
+        return None;
+    }
+    Some(RustWrittenType {
+        text: format!("{std_path}<{}>", held.text),
+        wrappers: None,
+        opaque: None,
+        ..held
+    })
+}
+
+/// Whether the std type `name` (`Mutex`, `RwLock`, `RefCell`, or `Option`/`Result` for a variant
+/// constructor), written under `head` (its first path segment, when it has a path) at `at` in
+/// `file`, is the standard one: rooted at `std`, `core` or `alloc`, or imported from there, and no
+/// project type of that name. A cell from another crate (`parking_lot::Mutex`) hands out its value
+/// without a `Result`, so its lock is not read as one.
+fn is_std_cell_type(
+    head: Option<&str>,
+    name: &str,
+    file: &str,
+    at: Option<usize>,
+    ctx: &Ctx,
+) -> bool {
+    if matches!(head, Some("std" | "core" | "alloc")) {
+        return true;
+    }
+    if is_rust_project_named(name, ctx) {
+        return false;
+    }
+    match rust_use_path(head.unwrap_or(name), file, at, ctx) {
+        Some(path) => matches!(
+            path.first().map(String::as_str),
+            Some("std" | "core" | "alloc")
+        ),
+        None => head.is_none(),
+    }
 }
 
 fn rust_associated_return(
@@ -1365,6 +1680,11 @@ fn read_rust_method_return(
         return None;
     }?;
     let read = rust_read_type(&written, r, ctx);
+    if awaits == 0 {
+        if let Some(held) = rust_std_accessor_result(&read, method, &written, ctx) {
+            return apply_unwraps(Some(held), unwraps);
+        }
+    }
     let result = match super::calls::rust_typed_method_call(&read, method, r, ctx, 0) {
         super::calls::CallRes::Hit(h) => h,
         _ => return None,
@@ -1386,10 +1706,67 @@ fn read_rust_method_return(
     if awaits == 1 && !is_async {
         made = made.and_then(|m| rust_future_output(&m));
     }
+    apply_unwraps(made, unwraps)
+}
+
+/// The `unwraps` a method result takes: through the `Option`/`Result` it holds, that many times.
+fn apply_unwraps(made: Option<RustWrittenType>, unwraps: u32) -> Option<RustWrittenType> {
     match made {
         Some(m) if unwraps > 0 => rust_unwrapped(&m, unwraps),
         other => other,
     }
+}
+
+/// What a method returns when a standard type is its receiver and no project declaration of
+/// that type answers. A receiver whose path is rooted at `std`, `core` or `alloc` is read as the
+/// standard type even when a project declares the same name, such as a `Result<T>` alias.
+/// A `RefCell` hands out the value it holds (`borrow`, `borrow_mut`); a `Mutex` or `RwLock`
+/// lock hands it out inside a result (`lock`, `try_lock`, `read`, `write`, `try_read`,
+/// `try_write`); an `Option` or `Result` `unwrap_or`, `unwrap_or_else` or `unwrap_or_default`
+/// hands out the value it holds. A deref wrapper (any of `RUST_DEREF_WRAPPERS`) is passed
+/// through to the type it holds, so `Rc<RefCell<T>>` reads as `RefCell<T>`.
+/// Not modelled: a file that imports `std::borrow::Borrow`, where `borrow` on a pointer is that
+/// trait's method. A bare project name that shadows a standard one (a `Result<T>` alias declared
+/// anywhere in the project) is left unread. A project module or crate named `core`, `std` or
+/// `alloc`, when written as a path root, is read as the standard one. Undefined for anything
+/// else, so every other receiver keeps the lookup it had.
+fn rust_std_accessor_result(
+    read: &RustTypeRead,
+    method: &str,
+    written: &RustWrittenType,
+    ctx: &Ctx,
+) -> Option<RustWrittenType> {
+    let RustTypeRead::Read(body) = read else {
+        return None;
+    };
+    let RustReadKind::Named { name, args, path } = &body.kind else {
+        return None;
+    };
+    let through_deref_only = body
+        .wrappers
+        .iter()
+        .all(|w| RUST_DEREF_WRAPPERS.contains(&w.as_str()));
+    // A std reading holds unless the written name can mean a project type here (`rust_name_reading`).
+    // `Unknown` keeps the block this gate always had.
+    let origin = RustOrigin {
+        file: written.file.clone(),
+        at: written.at,
+    };
+    if !through_deref_only || rust_name_reading(name, path, &origin, ctx) != NameReading::Std {
+        return None;
+    }
+    let held = split_rust_top_level(args, ',').into_iter().next()?;
+    let text = match (name.as_str(), method) {
+        ("RefCell", "borrow" | "borrow_mut") => held,
+        // Named by its std path, so a project `Result` alias cannot be read in its place.
+        ("Mutex", "lock" | "try_lock") | ("RwLock", "read" | "write" | "try_read" | "try_write") => {
+            format!("std::result::Result<{held}, _>")
+        }
+        ("Option" | "Result", "unwrap_or" | "unwrap_or_else" | "unwrap_or_default") => held,
+        _ => return None,
+    };
+    // The held value is not behind the receiver's wrappers: those were passed through to reach it.
+    Some(RustWrittenType { text, wrappers: None, opaque: None, ..written.clone() })
 }
 
 fn identifier_names(text: &str) -> Vec<String> {
@@ -1936,7 +2313,13 @@ fn rust_item_of(
         return None;
     }
     let head = rust_path_head(&t)?;
-    if !std_(&head.name) {
+    // A path rooted at std, core or alloc is the standard type, as in rust_std_accessor_result,
+    // so a project type of the same name does not switch the standard item read off.
+    let std_rooted = head
+        .segments
+        .first()
+        .is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"));
+    if !std_rooted && !std_(&head.name) {
         return None;
     }
     let args = type_args(&head.args);

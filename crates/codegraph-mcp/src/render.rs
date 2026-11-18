@@ -12,6 +12,7 @@ use codegraph_graph::{
 };
 use codegraph_types::*;
 use serde_json::{json, Value};
+use crate::explore::sections::{build_blast_radius_section, is_file_stale_on_disk, is_record_stale_under};
 use std::collections::{HashMap, HashSet};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -142,6 +143,56 @@ pub fn relation_data(cg: &CodeGraph, args: &Value, callers: bool) -> Result<Valu
     result[direction] = json!(out_rows);
     Ok(result)
 }
+/// A caveat naming the files in `data` (any `filePath` in it) that changed on disk after their
+/// last sync: the line numbers given for them are the index's and may be shifted (upstream
+/// #3260). None when every file is as indexed.
+pub fn drift_notice(cg: &CodeGraph, data: &Value) -> Option<String> {
+    fn collect<'v>(value: &'v Value, out: &mut indexmap::IndexSet<&'v str>) {
+        match value {
+            Value::Object(map) => {
+                for (key, v) in map {
+                    match (key.as_str(), v) {
+                        ("filePath", Value::String(path)) => {
+                            out.insert(path);
+                        }
+                        _ => collect(v, out),
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|v| collect(v, out)),
+            _ => {}
+        }
+    }
+    let mut files = indexmap::IndexSet::new();
+    collect(data, &mut files);
+    // One query for every record beats one per file once an answer names many files, and the
+    // stats (nearly all the cost, and slow on Windows) run on every core.
+    let drifted: Vec<&str> = if files.len() > 32 {
+        let records: HashMap<String, FileRecord> = cg.get_files().unwrap_or_default().into_iter().map(|r| (r.path.clone(), r)).collect();
+        let named: Vec<(&str, Option<&FileRecord>)> = files.into_iter().map(|f| (f, records.get(f))).collect();
+        let root = cg.project_root();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(named.len());
+        let chunk = named.len().div_ceil(threads);
+        let stale: Vec<bool> = std::thread::scope(|scope| {
+            let workers: Vec<_> = named
+                .chunks(chunk)
+                .map(|part| scope.spawn(move || part.iter().map(|(_, r)| r.is_some_and(|r| is_record_stale_under(root, r, None))).collect::<Vec<bool>>()))
+                .collect();
+            workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|p| std::panic::resume_unwind(p))).collect()
+        });
+        named.iter().zip(stale).filter(|(_, s)| *s).map(|((f, _), _)| *f).collect()
+    } else {
+        files.into_iter().filter(|f| is_file_stale_on_disk(cg, f, None)).collect()
+    };
+    (!drifted.is_empty()).then(|| {
+        format!(
+            "⚠ Changed on disk after the last index sync: {}. Line numbers for {} are as of that sync and may be shifted; `codegraphV sync` updates the index.",
+            drifted.join(", "),
+            if drifted.len() == 1 { "it" } else { "them" }
+        )
+    })
+}
+
 pub fn relations(cg: &CodeGraph, args: &Value, callers: bool) -> Result<String> {
     if let Err(e) = required(args, "symbol") {
         return Ok(e.message());
@@ -190,6 +241,10 @@ pub fn relations(cg: &CodeGraph, args: &Value, callers: bool) -> Result<String> 
         if definition["truncated"] == true {
             out.push_str("More relationships available; increase limit.\n");
         }
+        out.push('\n');
+    }
+    if let Some(notice) = drift_notice(cg, &data) {
+        out.push_str(&notice);
         out.push('\n');
     }
     Ok(out)
@@ -252,6 +307,11 @@ pub fn impact(cg: &CodeGraph, args: &Value) -> Result<String> {
     for n in data["affected"].as_array().unwrap() {
         let n: Node = serde_json::from_value(n.clone())?;
         out.push_str(&format!("- {}\n", location(&n)));
+    }
+    if let Some(notice) = drift_notice(cg, &data) {
+        out.push('\n');
+        out.push_str(&notice);
+        out.push('\n');
     }
     Ok(out)
 }
@@ -384,9 +444,16 @@ pub fn node(cg: &CodeGraph, args: &Value) -> Result<ToolResult> {
     }
     for &i in &chosen {
         let n = &nodes[i];
+        // Upstream #1474: a file edited since its last sync has indexed ranges that no longer
+        // match its bytes, so a slice at them can be another symbol's code under this name.
+        let stale = is_file_stale_on_disk(cg, &n.file_path, None);
         out.push_str(&format!(
-            "**{}** ({})\n\n**Location:** {}:{}\n",
-            n.name, n.kind, n.file_path, n.start_line
+            "**{}** ({})\n\n**Location:** {}:{}{}\n",
+            n.name,
+            n.kind,
+            n.file_path,
+            n.start_line,
+            if stale { " — ⚠ as of the last index sync; the file has changed on disk since, so this line may be shifted" } else { "" }
         ));
         if let Some(sig) = &n.signature {
             out.push_str(&format!("**Signature:** `{sig}`\n"));
@@ -397,7 +464,10 @@ pub fn node(cg: &CodeGraph, args: &Value) -> Result<ToolResult> {
                 out.push('\n');
             }
         }
-        if args["includeCode"].as_bool() == Some(true) {
+        if args["includeCode"].as_bool() == Some(true) && stale {
+            out.push('\n');
+            out.push_str(&stale_node_body(cg, n));
+        } else if args["includeCode"].as_bool() == Some(true) {
             if let Some(code) = cg.get_code(&n.id)? {
                 out.push_str(&format!(
                     "\n```{}\n{}\n```\n",
@@ -461,6 +531,29 @@ pub fn node(cg: &CodeGraph, args: &Value) -> Result<ToolResult> {
     }
     Ok(ToolResult::text(out))
 }
+/// Whole-file fallback caps for a drifted file: within them the file is shown whole and current.
+const STALE_WHOLE_FILE_MAX_LINES: usize = 300;
+const STALE_WHOLE_FILE_MAX_CHARS: usize = 12_000;
+
+/// `node`'s body for a symbol whose file changed after its last sync: the whole current file when
+/// it is small, else a notice. Never a slice at the indexed range.
+fn stale_node_body(cg: &CodeGraph, n: &Node) -> String {
+    let path = &n.file_path;
+    if !CONFIG_LEAF_LANGUAGES.contains(&n.language.as_str()) {
+        if let Some(source) = read_source(cg, path) {
+            let body = source.trim_end_matches(['\n', '\r']);
+            if body.chars().count() <= STALE_WHOLE_FILE_MAX_CHARS && body.split('\n').count() <= STALE_WHOLE_FILE_MAX_LINES {
+                return format!(
+                    "> ⚠ `{path}` changed on disk after it was last indexed, so the indexed line range for this symbol may no longer match. Showing the file's full current source instead (treat it as already Read):\n\n```{}\n{}\n```\n",
+                    n.language,
+                    number_lines(body, 1)
+                );
+            }
+        }
+    }
+    format!("> ⚠ `{path}` changed on disk after it was last indexed: the indexed line range no longer reliably matches, so its body is omitted rather than risk showing another symbol's code. Current content: codegraphV_node(file: {path:?}), with offset and limit to narrow it. The next index sync picks up the change.\n")
+}
+
 fn number_lines(source: &str, start: u32) -> String {
     source
         .split('\n')
@@ -926,6 +1019,20 @@ pub fn explore(
             out.push_str(&format!("{omitted_chains} further flow paths omitted; query their endpoints separately.\n\n"));
         }
     }
+    // Blast radius (upstream's always-on section): for the named symbols, who calls them and
+    // which tests cover them, so the agent knows what to update before editing. Locations only.
+    if !named.is_empty() {
+        let mut scope = graph.clone();
+        for n in named.values() {
+            scope.nodes.entry(n.id.clone()).or_insert_with(|| n.clone());
+        }
+        let leading: Vec<String> = named.values().map(|n| n.id.clone()).collect();
+        let blast = build_blast_radius_section(cg, &scope, &leading);
+        if !blast.is_empty() {
+            out.push_str(&blast);
+            out.push('\n');
+        }
+    }
     for anchor in &extracted.line_anchors {
         relevant.entry(anchor.file.clone()).or_default();
     }
@@ -940,6 +1047,8 @@ pub fn explore(
     }
     let max_files = number(args, "maxFiles", budget.files, 1, 20);
     let mut omitted = vec![];
+    // Files edited since their last sync (upstream #1474), for the line-number caveat at the end.
+    let mut drifted: Vec<String> = Vec::new();
     for (index, (file, (mut nodes, focus))) in relevant.into_iter().enumerate() {
         // Reserve complete metadata, a continuation containing the path twice,
         // and the response footer before admitting a file. Source has its own budget.
@@ -1052,13 +1161,30 @@ pub fn explore(
         let explicit_range = !anchored.is_empty();
         // A continuation is an exact range. Adding leading context here can spend
         // every page on the same lines and prevent a fresh CLI call from advancing.
-        let ranges: Vec<(u32, u32)> = if explicit_range {
+        let mut ranges: Vec<(u32, u32)> = if explicit_range {
             anchored.iter().map(|a| (a.start.max(1), a.end.min(last))).collect()
         } else if focus.is_empty() {
             vec![(1, last)]
         } else {
             focus.iter().map(|f| (f.start.saturating_sub(2).max(1), f.end.saturating_add(1).min(last))).collect()
         };
+        // A file edited since its last sync: its indexed ranges no longer match its bytes, and a
+        // slice at them can be another symbol's code under the asked name (upstream #1474). It is
+        // shown whole when it fits, else left out. An explicit range is current lines already.
+        if !explicit_range && is_file_stale_on_disk(cg, &file, Some(&source)) {
+            drifted.push(file.clone());
+            let whole: usize = lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| format!("{:>6}\t{}\n", i + 1, l.trim_end_matches('\r')).chars().count())
+                .sum();
+            let room = (budget.chars - 1000).saturating_sub(out.chars().count() + 32 + record.language.as_str().len() + notice_reserve);
+            if whole > budget.per_file || whole > room {
+                out.push_str(&format!("⚠ Changed on disk after the last index sync: source omitted, since its indexed line ranges no longer match its lines. Its current source: codegraphV_explore(query: \"{file}:1-{last}\").\n\n"));
+                continue;
+            }
+            ranges = vec![(1, last)];
+        }
         // Scope emission state to project, file, and current content. An edit must be shown again.
         use sha2::{Digest, Sha256};
         let key = format!(
@@ -1157,6 +1283,13 @@ pub fn explore(
             paths.push_str(&part);
         }
         out.push_str(&format!("Additional relevant files ({}): {paths}. Continue with another codegraphV_explore using their symbols or paths.\n", omitted.len()));
+    }
+    if !drifted.is_empty() {
+        out.push_str(&format!(
+            "> ⚠ Changed on disk after the last index sync: {}. Line numbers for {} elsewhere in this response (flow steps, symbol lists) may be shifted until the next sync.\n",
+            drifted.join(", "),
+            if drifted.len() == 1 { "it" } else { "them" }
+        ));
     }
     out.push_str(&format!(
         "\nTreat returned source as already Read. Explore budget for this project: {} call(s).",

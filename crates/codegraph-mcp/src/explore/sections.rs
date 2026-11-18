@@ -17,7 +17,7 @@ use codegraph_graph::type_hierarchy::count_implementers;
 use codegraph_jsre::re;
 use codegraph_search::query_utils::is_test_file;
 use codegraph_types::jscompat::utf16_len;
-use codegraph_types::paths::{validate_path_within_root, ValidateOptions};
+use codegraph_types::paths::{lexical_path_within_root, validate_path_within_root, ValidateOptions};
 use codegraph_types::{Edge, EdgeKind, Node, Provenance, SearchOptions, Subgraph};
 use indexmap::{IndexMap, IndexSet};
 use sha2::{Digest, Sha256};
@@ -687,6 +687,8 @@ pub fn build_blast_radius_section(cg: &CodeGraph, subgraph: &Subgraph, leading_i
         return String::new();
     }
     let mut entries: Vec<String> = Vec::new();
+    // Each caller file's lines, read at most once for the whole section.
+    let mut sources = HashMap::new();
     for root in roots {
         let callers = cg.get_callers(&root.id, 1).unwrap_or_default();
         let mut seen: HashSet<&str> = HashSet::new();
@@ -699,9 +701,13 @@ pub fn build_blast_radius_section(cg: &CodeGraph, subgraph: &Subgraph, leading_i
         if uniq.is_empty() {
             continue;
         }
-        let caller_files: Vec<String> = uniq.iter().map(|n| rel(&n.file_path)).collect::<IndexSet<_>>().into_iter().collect();
-        let test_files: Vec<&String> = caller_files.iter().filter(|f| is_test_file(f)).collect();
-        let non_test: Vec<&String> = caller_files.iter().filter(|f| !is_test_file(f)).collect();
+        // Per caller, not per file: an inline Rust test module shares its file with production
+        // code, and both are listed.
+        let (tests_of, prod_of): (Vec<&Node>, Vec<&Node>) = uniq.iter().partition(|n| is_test_caller(cg, n, &mut sources));
+        let test_files: Vec<String> = tests_of.iter().map(|n| rel(&n.file_path)).collect::<IndexSet<_>>().into_iter().collect();
+        let non_test: Vec<String> = prod_of.iter().map(|n| rel(&n.file_path)).collect::<IndexSet<_>>().into_iter().collect();
+        let test_files: Vec<&String> = test_files.iter().collect();
+        let non_test: Vec<&String> = non_test.iter().collect();
         let shown = non_test.iter().take(FILE_CAP).map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ");
         let more = if non_test.len() > FILE_CAP { format!(" +{} more", non_test.len() - FILE_CAP) } else { String::new() };
         let where_ = if non_test.is_empty() { String::new() } else { format!(" in {shown}{more}") };
@@ -710,7 +716,7 @@ pub fn build_blast_radius_section(cg: &CodeGraph, subgraph: &Subgraph, leading_i
             let more = if test_files.len() > FILE_CAP { format!(" +{}", test_files.len() - FILE_CAP) } else { String::new() };
             format!("; tests: {listed}{more}")
         } else {
-            indirect_test_note(cg, &uniq)
+            indirect_test_note(cg, &uniq, &mut sources)
         };
         entries.push(format!(
             "- `{}` ({}:{}) — {} caller{}{where_}{tests}",
@@ -781,8 +787,34 @@ pub fn build_copybook_section(copybooks: &[NamedCopybook]) -> String {
     blocks.join("\n")
 }
 
+/// A caller that is a test: a test file by its path, or a Rust function with a `#[test]`-style
+/// attribute (`#[test]`, `#[tokio::test]`, `#[rstest]`). Rust unit tests live in a `tests.rs`
+/// beside their module or in an inline `#[cfg(test)] mod`, which no path rule can see
+/// (upstream #3265). `sources` caches each file's lines across callers.
+fn is_test_caller(cg: &CodeGraph, n: &Node, sources: &mut HashMap<String, Option<Vec<String>>>) -> bool {
+    if is_test_file(&n.file_path.replace('\\', "/")) {
+        return true;
+    }
+    if n.language.as_str() != "rust" || n.start_line < 2 {
+        return false;
+    }
+    let lines = sources.entry(n.file_path.clone()).or_insert_with(|| {
+        let abs = codegraph_types::paths::lexical_path_within_root(cg.project_root(), &n.file_path)?;
+        std::fs::read_to_string(abs).ok().map(|t| t.lines().map(str::to_string).collect())
+    });
+    let Some(lines) = lines else { return false };
+    // The attributes and doc comments directly above the function, nearest first.
+    let attr = re!(r"^#\[\s*(?:[A-Za-z_][\w]*::)*(?:test|rstest)\b");
+    lines[..(n.start_line as usize - 1).min(lines.len())]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .take_while(|l| l.starts_with("#[") || l.starts_with("///") || l.starts_with("//"))
+        .any(|l| attr.is_match(l))
+}
+
 /// Test coverage up to two more caller hops for an entry no test calls directly.
-pub fn indirect_test_note(cg: &CodeGraph, direct_callers: &[&Node]) -> String {
+pub fn indirect_test_note(cg: &CodeGraph, direct_callers: &[&Node], sources: &mut HashMap<String, Option<Vec<String>>>) -> String {
     const MAX_HOPS: u32 = 3;
     const FILE_CAP: usize = 2;
     let mut budget: i64 = 64;
@@ -805,7 +837,7 @@ pub fn indirect_test_note(cg: &CodeGraph, direct_callers: &[&Node]) -> String {
                     continue;
                 }
                 let f = n.file_path.replace('\\', "/");
-                if is_test_file(&f) {
+                if is_test_caller(cg, &n, sources) {
                     found.insert(f);
                 } else {
                     next.push(n);
@@ -903,13 +935,30 @@ pub fn compute_graph_relevance(node_ids: &[String], edges: &[Edge], seed_ids: &I
 /// True when the file on disk differs from what was indexed (its line ranges are untrustworthy).
 pub fn is_file_stale_on_disk(cg: &CodeGraph, rel_path: &str, content: Option<&str>) -> bool {
     let Ok(Some(rec)) = cg.get_file(rel_path) else { return false };
-    let Some(abs) = validate_path_within_root(cg.project_root(), rel_path, ValidateOptions::default()) else {
-        return false;
-    };
-    let Some(st) = stat_of(&abs) else { return false };
+    is_record_stale_on_disk(cg, &rec, content)
+}
+
+/// [`is_file_stale_on_disk`] for a record already in hand (a caller checking many files loads
+/// them in one query).
+pub fn is_record_stale_on_disk(cg: &CodeGraph, rec: &codegraph_types::FileRecord, content: Option<&str>) -> bool {
+    is_record_stale_under(cg.project_root(), rec, content)
+}
+
+/// [`is_record_stale_on_disk`] given only the project root, so that many files can be checked on
+/// several threads at once.
+pub fn is_record_stale_under(root: &str, rec: &codegraph_types::FileRecord, content: Option<&str>) -> bool {
+    let rel_path = rec.path.as_str();
+    // Size and mtime first, behind the cheap lexical check: an unchanged file (nearly every one)
+    // never pays the symlink-aware validation, which resolves real paths. callers and impact
+    // check every file they name (upstream #3248 measured that per-file cost).
+    let Some(lexical) = lexical_path_within_root(root, rel_path) else { return false };
+    let Some(st) = stat_of(&lexical) else { return false };
     if st.size == rec.size && st.mtime_ms.floor() == (rec.modified_at as f64).floor() {
         return false;
     }
+    let Some(abs) = validate_path_within_root(root, rel_path, ValidateOptions::default()) else {
+        return false;
+    };
     // A read failure is not drift: the TypeScript catch reports "not stale".
     let mut unreadable = false;
     let data = codegraph_core::file_limits::indexed_hash_input(st.size, || match content {

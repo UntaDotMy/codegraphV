@@ -40,6 +40,24 @@ fn is_closer_body(body: &str) -> bool {
     re!(r"^(?:[A-Za-z_]\w*\s+)*\}(?:\s*\})*\s*;?$").is_match(body)
 }
 
+/// The files that can declare a namespace alias, as far as the project's aliases are read.
+fn is_namespace_alias_file(file: &str) -> bool {
+    re!(r"\.(?:h|hh|hpp|hxx|inl|c|cc|cpp|cxx)$", "i").is_match(file)
+}
+
+/// Add what a file declares. The first declaration of a name stands.
+fn add_namespace_aliases(file: &str, source: &str, aliases: &mut IndexMap<String, String>) {
+    if !is_namespace_alias_file(file) || !source.contains("namespace") {
+        return;
+    }
+    for m in re!(r"^[ \t]*namespace[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*(?:::)?([A-Za-z_][\w:]*)[ \t]*;", "gm").captures_iter(source) {
+        let name = m.text(1).unwrap_or("");
+        if !aliases.contains_key(name) {
+            aliases.insert(name.to_string(), m.text(2).unwrap_or("").to_string());
+        }
+    }
+}
+
 /// `namespace x = a::b;` aliases written in any C/C++ file (the first wins).
 pub fn cpp_namespace_aliases(ctx: &Ctx) -> Rc<IndexMap<String, String>> {
     let memo = ctx.memo::<AliasesMemo>();
@@ -48,23 +66,41 @@ pub fn cpp_namespace_aliases(ctx: &Ctx) -> Rc<IndexMap<String, String>> {
     }
     let mut aliases: IndexMap<String, String> = IndexMap::new();
     for file in ctx.get_all_files() {
-        if !re!(r"\.(?:h|hh|hpp|hxx|inl|c|cc|cpp|cxx)$", "i").is_match(&file) {
+        if !is_namespace_alias_file(&file) {
             continue;
         }
-        let Some(source) = ctx.read_file(&file) else { continue };
-        if source.is_empty() || !source.contains("namespace") {
-            continue;
-        }
-        for m in re!(r"^[ \t]*namespace[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*(?:::)?([A-Za-z_][\w:]*)[ \t]*;", "gm").captures_iter(&source) {
-            let name = m.text(1).unwrap_or("");
-            if !aliases.contains_key(name) {
-                aliases.insert(name.to_string(), m.text(2).unwrap_or("").to_string());
-            }
+        if let Some(source) = ctx.read_file(&file) {
+            add_namespace_aliases(&file, &source, &mut aliases);
         }
     }
     let aliases = Rc::new(aliases);
     *memo.0.borrow_mut() = Some(Rc::clone(&aliases));
     aliases
+}
+
+/// The project's namespace aliases, read by a walk over `get_all_files` in its order that holds
+/// every file's text anyway, so that nothing reads every file for them again
+/// (`cppNamespaceAliasWalk`).
+pub struct CppNamespaceAliasWalk {
+    aliases: IndexMap<String, String>,
+}
+
+impl CppNamespaceAliasWalk {
+    pub fn add(&mut self, file: &str, source: &str) {
+        add_namespace_aliases(file, source, &mut self.aliases);
+    }
+
+    pub fn finish(self, ctx: &Ctx) {
+        *ctx.memo::<AliasesMemo>().0.borrow_mut() = Some(Rc::new(self.aliases));
+    }
+}
+
+/// A walk that reads the aliases, or `None` when they are known.
+pub fn cpp_namespace_alias_walk(ctx: &Ctx) -> Option<CppNamespaceAliasWalk> {
+    if ctx.memo::<AliasesMemo>().0.borrow().is_some() {
+        return None;
+    }
+    Some(CppNamespaceAliasWalk { aliases: IndexMap::new() })
 }
 
 fn cpp_namespace_macros(ctx: &Ctx) -> Rc<NamespaceMacros> {

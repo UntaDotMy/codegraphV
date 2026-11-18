@@ -811,6 +811,88 @@ pub fn cpp_template_parameters(node: &Node, ctx: &Ctx) -> Rc<HashSet<String>> {
     template_parameters_around(node, ctx)
 }
 
+/// One parameter of a C++ `template <…>` head, in order: an unnamed one holds its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CppTemplateParameter {
+    pub name: Option<String>,
+    /// `typename... Ts`: every argument from here on.
+    pub pack: bool,
+    /// Its default, as written: `TcParser` of `typename Parser = TcParser`.
+    pub fallback: Option<String>,
+}
+
+/// One item of a `template <…>` head.
+fn template_parameter(item: &str) -> CppTemplateParameter {
+    let declared = strip_cpp_template_arguments(item);
+    let at = declared.find('=');
+    let name = re!(r"([A-Za-z_]\w*)\s*$").captures(&declared[..at.unwrap_or(declared.len())]).and_then(|m| m.text(1).map(String::from));
+    // (A default can hold a `=` of its own, so it is read from the item as written.)
+    let eq = item.find('=');
+    CppTemplateParameter {
+        name: name.filter(|n| n != "typename" && n != "class"),
+        pack: declared.contains("..."),
+        fallback: match (at, eq) {
+            (Some(_), Some(eq)) => Some(js_trim(&item[eq + 1..]).to_string()),
+            _ => None,
+        },
+    }
+}
+
+/// The parameters of a `template <…>` head, from what its brackets hold.
+pub fn cpp_template_parameters_in(inner: &str) -> Vec<CppTemplateParameter> {
+    if js_trim(inner).is_empty() {
+        return Vec::new();
+    }
+    split_top_level(inner).iter().map(|item| template_parameter(item)).collect()
+}
+
+/// The `template <…>` heads right before a declaration, outermost first, each with its
+/// parameters in order: one for a template, none for anything else, and two for a member
+/// template defined outside its class template (`template <class T> template <class U> void
+/// C<T>::f()`).
+pub fn cpp_template_heads(node: &Node, ctx: &Ctx) -> Vec<Vec<CppTemplateParameter>> {
+    let Some(lines) = lines_of(&node.file_path, ctx) else { return Vec::new() };
+    let start_line = node.start_line as usize;
+    let from = start_line.saturating_sub(13);
+    let mut before: Vec<String> = lines.iter().take(start_line.saturating_sub(1)).skip(from).cloned().collect();
+    before.push(utf16_slice(lines.get(start_line.wrapping_sub(1)).map(String::as_str).unwrap_or(""), 0, node.start_column as usize).to_string());
+    let before = before.join("\n");
+    let units: Vec<u16> = before.encode_utf16().collect();
+    let starts: Vec<(usize, usize)> =
+        re!(r"\btemplate\s*<", "g").captures_iter(&before).filter_map(|m| m.get(0)).map(|m| (m.utf16_start(), m.as_str().len())).collect();
+    let mut heads = Vec::new();
+    let mut end = units.len();
+    for &(start, len) in starts.iter().rev() {
+        let open = start + len - 1;
+        let Some(close) = template_header_end(&units, open) else { break };
+        if close >= end || !re!(r"^(?:\s*(?:\[\[[^\]]*\]\]|(?:static|inline|constexpr|consteval|virtual|explicit|friend|extern)\b|[A-Z][A-Z0-9]*_[A-Z0-9_]*\b(?:\s*\([^()]*\))?))*\s*$")
+            .is_match(&String::from_utf16_lossy(&units[close + 1..end]))
+        {
+            break;
+        }
+        heads.insert(0, cpp_template_parameters_in(&String::from_utf16_lossy(&units[open + 1..close])));
+        end = start;
+    }
+    heads
+}
+
+/// The type an alias in scope where `r` is made declares, as written, with the alias when the
+/// index holds one: `typename TypeParam::KeyGen` for `using KeyGen = typename
+/// TypeParam::KeyGen;` in the calling function, or an alias of the calling function's class.
+/// `None` when no such alias has that name.
+pub fn cpp_alias_written_at(name: &str, r: &UnresolvedRef, ctx: &Ctx) -> Option<(String, Option<NodeRef>)> {
+    let caller = ctx.node_by_id(&r.from_node_id);
+    match local_aliased_type(name, caller.as_ref(), r, ctx) {
+        Tri::Undefined => {}
+        Tri::Null => return None,
+        Tri::Value(text) => return Some((text, None)),
+    }
+    let Some(Declared::Alias(alias)) = lookup_unqualified(name, false, &scopes_within(&caller_scope(caller.as_ref())), r, ctx, None) else { return None };
+    let text = declaration_text(&alias, ctx)?;
+    let written = aliased_type_in(&text, &alias.name)?;
+    Some((written, Some(alias)))
+}
+
 fn lookup_segments(
     name: &TypeName,
     scopes: &[String],

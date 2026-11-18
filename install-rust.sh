@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install codegraphV (the Rust rewrite of codegraph) from a GitHub Release (Linux x64, macOS arm64 / x64).
+# Install codegraphV (the Rust rewrite of codegraph) from a GitHub Release (Linux x64, macOS x64).
 #
 #   curl -fsSL https://raw.githubusercontent.com/UntaDotMy/codegraphV/rust-rewrite/install-rust.sh | sh
 #
@@ -22,6 +22,10 @@ case "$(uname -m)" in
 esac
 if [ "$os-$arch" = linux-arm64 ]; then
   echo "No Linux arm64 build yet; build from source with: cargo build --release -p codegraph-cli" >&2
+  exit 1
+fi
+if [ "$os-$arch" = macos-arm64 ]; then
+  echo "No Apple Silicon (arm64) build yet; build from source with: cargo build --release -p codegraph-cli" >&2
   exit 1
 fi
 

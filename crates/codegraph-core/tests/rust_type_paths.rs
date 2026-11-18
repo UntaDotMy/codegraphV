@@ -38,7 +38,7 @@ fn describe(cg: &CodeGraph, id: &str) -> String {
 fn calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
     let nodes = cg.get_nodes_by_file(file).unwrap();
     let Some(caller) = nodes.iter().find(|n| n.name == name && n.kind == NodeKind::Function) else {
-        return vec![format!("<no function {name} in {file}>")];
+        panic!("no function {name} in {file}");
     };
     let mut out = Vec::new();
     for edge in cg.get_outgoing_edges(&caller.id).unwrap() {
@@ -54,7 +54,7 @@ fn calls_of(cg: &CodeGraph, file: &str, name: &str) -> Vec<String> {
 fn incoming(cg: &CodeGraph, file: &str, qualified: &str, kind: EdgeKind) -> Vec<String> {
     let nodes = cg.get_nodes_by_file(file).unwrap();
     let Some(target) = nodes.iter().find(|n| n.qualified_name == qualified) else {
-        return vec![format!("<no {qualified} in {file}>")];
+        panic!("no node {qualified} in {file}");
     };
     let mut out = Vec::new();
     for edge in cg.get_incoming_edges(&target.id).unwrap() {
@@ -73,16 +73,19 @@ fn incoming(cg: &CodeGraph, file: &str, qualified: &str, kind: EdgeKind) -> Vec<
 /// Every `file:qualifiedName` with any edge into a node named `Handle` or `new`.
 fn touches(cg: &CodeGraph, file: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut named = 0;
     for node in cg.get_nodes_by_file(file).unwrap() {
         if node.name != "Handle" && node.name != "new" {
             continue;
         }
+        named += 1;
         for edge in cg.get_incoming_edges(&node.id).unwrap() {
             if let Some(src) = cg.get_node(&edge.source).unwrap() {
                 out.push(format!("{}:{}", src.file_path, src.qualified_name));
             }
         }
     }
+    assert!(named > 0, "no Handle or new node in {file}");
     out.sort();
     out.dedup();
     out
@@ -148,6 +151,33 @@ fn calls_through_a_type_a_path_or_a_use_names() {
         &["method Codec::encode src/codec.rs:2"],
     );
     c.is("HashMap::new and Value::from link nothing", calls_of(&f.cg, "src/user.rs", "outside"), &[]);
+    c.finish();
+}
+
+/// A `type` alias with a default parameter (`M = ()`) still names its target. HEAD's alias pattern rejected `=` in the
+/// generics, so such an alias had no target at all. Two routes read the target: a binding typed by the alias, and an
+/// `impl` written on the alias that a receiver of the target type calls. A second `only_on_alias` on another type makes
+/// a name-only match ambiguous, so the link comes from the alias route.
+#[test]
+fn calls_through_an_alias_with_a_default_parameter() {
+    let f = index(&[
+        ("src/lib.rs", "pub mod driver;\npub mod other;\npub mod alias;\npub mod user;\n"),
+        ("src/driver.rs", "pub struct Handle;\n\nimpl Handle {\n    pub fn current() -> Handle {\n        Handle\n    }\n\n    pub fn ping(&self) -> bool {\n        true\n    }\n}\n"),
+        ("src/other.rs", "pub struct Other;\n\nimpl Other {\n    pub fn only_on_alias(&self) -> bool {\n        false\n    }\n}\n"),
+        ("src/alias.rs", "pub type Defaulted<M = ()> = crate::driver::Handle;\n\nimpl Defaulted {\n    pub fn only_on_alias(&self) -> bool {\n        true\n    }\n}\n"),
+        ("src/user.rs", "use crate::alias::Defaulted;\nuse crate::driver::Handle;\n\npub fn through_binding(h: Defaulted) -> bool {\n    h.ping()\n}\n\npub fn through_alias_impl(h: Handle) -> bool {\n    h.only_on_alias()\n}\n"),
+    ]);
+    let mut c = Checks::default();
+    c.is(
+        "h.ping on a binding typed Defaulted reaches Handle::ping",
+        calls_of(&f.cg, "src/user.rs", "through_binding"),
+        &["method Handle::ping src/driver.rs:8"],
+    );
+    c.is(
+        "h.only_on_alias on a Handle reaches the impl written on the alias",
+        calls_of(&f.cg, "src/user.rs", "through_alias_impl"),
+        &["method Defaulted::only_on_alias src/alias.rs:4"],
+    );
     c.finish();
 }
 
@@ -405,4 +435,25 @@ fn cross_crate_paths_link_the_named_item() {
     );
 
     c.finish();
+}
+
+#[test]
+#[should_panic(expected = "no function absent in src/lib.rs")]
+fn a_missing_function_fails_the_calls_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = calls_of(&f.cg, "src/lib.rs", "absent");
+}
+
+#[test]
+#[should_panic(expected = "no node absent in src/lib.rs")]
+fn a_missing_node_fails_the_incoming_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = incoming(&f.cg, "src/lib.rs", "absent", EdgeKind::Imports);
+}
+
+#[test]
+#[should_panic(expected = "no Handle or new node in src/lib.rs")]
+fn a_file_without_the_named_nodes_fails_the_touches_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = touches(&f.cg, "src/lib.rs");
 }

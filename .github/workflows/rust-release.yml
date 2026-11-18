@@ -4,12 +4,10 @@
 # (or a manual run naming one) does the same, then publishes the archives with SHA256SUMS.
 # It never publishes to npm; the upstream `release.yml` is the TypeScript package's flow.
 #
-# A release waits on every leg. Hosted macOS arm64 runners are short on this repository: v0.0.10
-# shipped without macOS (none assigned 2026-11-10 to 2026-11-13), and for v0.0.11 jobs needing
-# one were cancelled unstarted in four attempts while one macOS job at a time still got through.
-# So the release has no macOS test leg (rust-pr.yml still tests macOS) and builds only the
-# macos-x64 archive. Once macOS jobs start reliably again, restore `macos-15` in the test matrix
-# and the `{ os: macos-15, target: aarch64-apple-darwin, name: macos-arm64 }` build row.
+# A release waits on every leg. The arm64 macOS labels (`macos-15`, `macos-latest`) queued without
+# a runner on 2026-11-16 (UTC) and were cancelled with no steps, so the macOS x64 archive builds on
+# `macos-15-intel`, which started on both attempts of that day. There is no Apple Silicon archive
+# and no macOS test leg here (rust-pr.yml tests macOS on `macos-15-intel`).
 name: Rust release
 
 on:
@@ -39,7 +37,7 @@ jobs:
         os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - run: rustup toolchain install stable --profile minimal && rustup default stable
@@ -48,6 +46,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: ./scripts/test-install-rust.ps1
+      - name: install-rust.sh platform checks
+        if: runner.os != 'Windows'
+        run: sh scripts/test-install-rust-sh.sh
 
   build:
     strategy:
@@ -56,10 +57,10 @@ jobs:
         include:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x64 }
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, name: linux-x64 }
-          - { os: macos-15, target: x86_64-apple-darwin, name: macos-x64 }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, name: macos-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup target add ${{ matrix.target }}
@@ -74,7 +75,7 @@ jobs:
         run: |
           exe=codegraphV; [ "${{ runner.os }}" = "Windows" ] && exe=codegraphV.exe
           bin="target/${{ matrix.target }}/release/$exe"
-          if [[ "$TAG" == v* && "${{ matrix.target }}" != "x86_64-apple-darwin" ]]; then
+          if [[ "$TAG" == v* ]]; then
             version="$("$bin" --version)"
             [ "$version" = "codegraphV ${TAG#v}" ] || { echo "binary says '$version', tag is $TAG"; exit 1; }
           fi
@@ -86,7 +87,7 @@ jobs:
           else
             tar -czf "$dir.tar.gz" "$dir"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
@@ -99,10 +100,10 @@ jobs:
     if: startsWith(inputs.tag || github.ref_name, 'v')
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

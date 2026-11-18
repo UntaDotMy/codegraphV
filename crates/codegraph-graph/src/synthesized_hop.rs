@@ -129,6 +129,8 @@ pub fn describe_synthesized_hop(edge: Option<&Edge>) -> Option<SynthesizedHop> {
             }
         }
         "const-alias" => format!("const alias of {}", quoted("via", "a function")),
+        // C++: a call through a template parameter; the wiring site writes the argument.
+        "cpp-template-argument" => format!("template argument {} for {}", quoted("argument", "a class"), quoted("via", "a parameter")),
         "go-func-field" => format!(
             "func field {}{}",
             quoted("field", "a func field"),

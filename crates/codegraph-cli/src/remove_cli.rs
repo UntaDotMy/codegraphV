@@ -70,6 +70,7 @@ pub fn default_install_dir(env: &dyn Fn(&str) -> Option<String>, home: &Path) ->
 
 /// A `;`-separated PATH value without `dir` (case-insensitive, trailing separators ignored), or
 /// None when `dir` is not on it.
+#[cfg(any(windows, test))] // its only caller is the Windows PATH edit
 pub fn path_without(value: &str, dir: &str) -> Option<String> {
     let norm = |s: &str| s.trim().trim_end_matches(['\\', '/']).to_lowercase();
     let want = norm(dir);
@@ -89,6 +90,7 @@ fn powershell(script: &str) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim_end_matches(['\r', '\n']).to_string())
 }
 
+#[cfg(windows)]
 fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }

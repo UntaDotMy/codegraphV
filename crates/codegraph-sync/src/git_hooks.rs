@@ -11,6 +11,24 @@ const BEGIN: &str = "# >>> codegraphV sync hook >>>";
 const END: &str = "# <<< codegraphV sync hook <<<";
 const ROOT_PREFIX: &str = "# codegraphV-root: ";
 
+/// The markers the original `codegraph` wrote, and the root line it used. A project that ran it
+/// keeps its hook, so an upgrade has to adopt that block — replacing it in place — instead of
+/// leaving it beside ours, which would run both engines' sync on every commit.
+const LEGACY_BEGIN: &str = "# >>> codegraph sync hook >>>";
+const LEGACY_END: &str = "# <<< codegraph sync hook <<<";
+const LEGACY_ROOT_PREFIX: &str = "# codegraph-root: ";
+
+/// One engine's marker pair.
+#[derive(Clone, Copy)]
+struct Markers {
+    begin: &'static str,
+    end: &'static str,
+}
+const MARKERS: [Markers; 2] = [
+    Markers { begin: BEGIN, end: END },
+    Markers { begin: LEGACY_BEGIN, end: LEGACY_END },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GitHookName {
@@ -116,24 +134,44 @@ impl<'a> Owner<'a> {
     }
 }
 
+/// The marker pair `line` opens, if any.
+fn markers_opened_by(line: &str) -> Option<Markers> {
+    MARKERS.into_iter().find(|m| line == m.begin)
+}
+
+/// A block's root line, which both prefixes name. A line carries one prefix as easily across
+/// prefixes (`# codegraph-root: x` also `strip_prefix`es `# codegraphV`), so the pair decides.
+fn root_named_by(line: &str) -> Option<&str> {
+    line.strip_prefix(ROOT_PREFIX)
+        .or_else(|| line.strip_prefix(LEGACY_ROOT_PREFIX))
+}
+
+/// Where the block opened at `from` ends: the index of its closing marker, or the last line when
+/// the file has none.
+fn block_end(lines: &[&str], from: usize, markers: Markers) -> usize {
+    let mut end = from;
+    while end < lines.len() && js_trim(lines[end]) != markers.end {
+        end += 1;
+    }
+    end
+}
+
 fn block_roots(content: &str) -> Vec<Option<&str>> {
+    let lines: Vec<&str> = content.split('\n').map(js_trim).collect();
     let mut roots = Vec::new();
-    let mut current: Option<Option<&str>> = None;
-    for line in content.split('\n').map(js_trim) {
-        if line == BEGIN {
-            current = Some(None);
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(markers) = markers_opened_by(lines[i]) else {
+            i += 1;
             continue;
+        };
+        let end = block_end(&lines, i, markers);
+        let root = lines[i..end.min(lines.len())].iter().find_map(|l| root_named_by(l));
+        // Only a closed block counts, as before: an unterminated one names nothing.
+        if end < lines.len() {
+            roots.push(root);
         }
-        if current.is_none() {
-            continue;
-        }
-        if let Some(root) = line.strip_prefix(ROOT_PREFIX) {
-            current = Some(Some(root));
-            continue;
-        }
-        if line == END {
-            roots.push(current.take().unwrap());
-        }
+        i = end + 1;
     }
     roots
 }
@@ -142,19 +180,14 @@ fn strip_blocks(content: &str, owner: &Owner<'_>) -> String {
     let mut kept = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if js_trim(lines[i]) != BEGIN {
+        let Some(markers) = markers_opened_by(js_trim(lines[i])) else {
             kept.push(lines[i]);
             i += 1;
             continue;
-        }
-        let mut end = i;
-        while end < lines.len() && js_trim(lines[end]) != END {
-            end += 1;
-        }
+        };
+        let mut end = block_end(&lines, i, markers);
         let block = &lines[i..(end + 1).min(lines.len())];
-        let root = block
-            .iter()
-            .find_map(|l| js_trim(l).strip_prefix(ROOT_PREFIX));
+        let root = block.iter().find_map(|l| root_named_by(js_trim(l)));
         if owner.owns(root) {
             if lines.get(end + 1).is_some_and(|l| js_trim(l).is_empty()) {
                 end += 1;

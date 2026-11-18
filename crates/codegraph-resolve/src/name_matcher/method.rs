@@ -29,10 +29,10 @@ use super::python_scope::{is_python_outside_module_receiver, python_fixture_retu
 use super::reach::{is_anonymous_member, is_lexically_reachable};
 use super::ruby::{ruby_constant_qn, ruby_instance_method_of, ruby_methods_of_kind_first, ruby_scope_at, RubyMethodKind};
 use super::rust::{
-    is_rust_declared_type_kind, is_rust_project_named, is_rust_trait_impl_method,
+    is_rust_declared_type_kind, is_rust_trait_impl_method,
     match_rust_generic_path, match_rust_pinned_call, match_rust_self_call,
     match_rust_self_field_call, match_rust_self_path, match_rust_typed_receiver_call,
-    match_rust_typed_self_field_call,
+    match_rust_typed_self_field_call, rust_pin_is_std,
 };
 use super::std_methods::is_std_method_name;
 use super::ts_fields::{
@@ -1059,7 +1059,7 @@ pub fn match_method_call(r: &UnresolvedRef, ctx: &Ctx) -> Option<ResolvedRef> {
         }
         if r.language == Language::Rust
             && inferred_type.as_deref() == Some("Pin")
-            && !is_rust_project_named("Pin", ctx)
+            && rust_pin_is_std(&object_or_class, r, ctx)
         {
             return match_rust_pinned_call(&object_or_class, &method_name, r, ctx);
         }

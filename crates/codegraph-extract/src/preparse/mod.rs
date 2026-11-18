@@ -21,6 +21,7 @@ mod conly;
 mod cpp;
 mod cshared;
 pub(crate) mod jsre;
+pub(crate) mod rustmac;
 pub(crate) mod shadow;
 mod small;
 
@@ -66,6 +67,46 @@ pub fn pre_parse(file_path: &str, source: &str, language: Language) -> String {
         _ => source.to_string(),
     }
 }
+
+/// The Rust source with every item-position macro whose body the grammar reads as items
+/// blanked out, so the walker sees the declarations inside it (see `rustmac.rs`).
+///
+/// The blanked text is what the walker *parses*; its own slices still come from the file as
+/// written, so a recovered item's name, signature and docstring are the real text.
+///
+/// Nesting takes more than one pass: a body's own macros are only siblings of the items that
+/// existed before, so a `static` beside a nested `cfg_io_driver! { pub struct .. }` (tokio's
+/// `linked_list.rs`) needs the outer body unwrapped before the inner one is at item position.
+pub fn rust_source_for_walk(source: &str) -> String {
+    let Some(grammar) = crate::langs::grammar_for("rust") else { return source.to_string() };
+    let parse = |text: &str| crate::ts::parse(&grammar, "rust", text).ok();
+    let mut tree = match parse(source) {
+        Some(tree) => tree,
+        None => return source.to_string(),
+    };
+    let mut out = source.to_string();
+    for _ in 0..MAX_UNWRAP_PASSES {
+        let spans = rustmac::item_macro_spans(&tree, &out, &grammar);
+        if spans.is_empty() {
+            break;
+        }
+        let blanked = rustmac::blank_spans(&out, &spans);
+        // A blanked file must still parse cleanly: if it does not, those items were not at item
+        // position after all, and the file is walked as it stands at this point.
+        match parse(&blanked) {
+            Some(after) if !after.root_node().has_error() => {
+                out = blanked;
+                tree = after;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+/// Bounds re-parsing on a pathologically nested file. Each pass unwraps at least one macro body,
+/// and real nesting is two or three deep (tokio's deepest is `cfg_rt!` > `cfg_net!` > `pin_project!`).
+const MAX_UNWRAP_PASSES: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Stage timing (a profiling aid for the example binaries)

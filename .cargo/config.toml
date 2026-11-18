@@ -3,3 +3,8 @@
 # ships 10.39) rejects \p{ID_Start}/\p{ID_Continue}, which the ported JS regexes use, and a
 # dynamically linked one would make the release binary depend on the user's distro.
 PCRE2_SYS_STATIC = "1"
+# Windows: tree-sitter compiles against wasmtime's C headers, which declare the wasm API
+# __declspec(dllimport) unless these macros are defined empty. Its objects then import symbols
+# that the Rust side defines, and the MSVC linker warns LNK4217 in every binary and test. Empty
+# macros match the Rust definitions. cc reads CFLAGS_<target>, so only the MSVC target sees it.
+CFLAGS_x86_64_pc_windows_msvc = "-DWASM_API_EXTERN= -DWASI_API_EXTERN="

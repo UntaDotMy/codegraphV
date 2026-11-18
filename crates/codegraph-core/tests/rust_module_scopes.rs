@@ -53,7 +53,7 @@ impl Fixture {
     /// What the function `name` in `file` calls (the first node of that name, as upstream's).
     fn calls(&self, file: &str, name: &str) -> Vec<String> {
         let nodes = self.cg.get_nodes_by_file(file).unwrap();
-        let Some(caller) = nodes.iter().find(|n| n.name == name) else { return vec![format!("<no node {name} in {file}>")] };
+        let Some(caller) = nodes.iter().find(|n| n.name == name) else { panic!("no node {name} in {file}") };
         self.targets(&[caller.id.clone()], EdgeKind::Calls)
     }
 
@@ -61,7 +61,7 @@ impl Fixture {
     fn takes(&self, file: &str, name: &str) -> Vec<String> {
         let nodes = self.cg.get_nodes_by_file(file).unwrap();
         let Some(caller) = nodes.iter().find(|n| n.name == name && n.kind == NodeKind::Function) else {
-            return vec![format!("<no function {name} in {file}>")];
+            panic!("no function {name} in {file}");
         };
         let mut files: Vec<String> = self
             .cg
@@ -420,4 +420,18 @@ fn crate_starts_from_the_root_the_manifest_places() {
     c.is("a binary placed with a path: its own module", bin.calls("crates/core/main.rs", "main"), &["function errored crates/core/messages.rs:1"]);
     c.is("a name written after an array", member.imports("core-lib/src/body.rs"), &["struct Body core-lib/src/body.rs:1"]);
     c.finish("rust-crate-roots");
+}
+
+#[test]
+#[should_panic(expected = "no node absent in src/lib.rs")]
+fn a_missing_function_fails_the_calls_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = f.calls("src/lib.rs", "absent");
+}
+
+#[test]
+#[should_panic(expected = "no function absent in src/lib.rs")]
+fn a_missing_function_fails_the_takes_helper() {
+    let f = index(&[("src/lib.rs", "pub fn present() {}\n")]);
+    let _ = f.takes("src/lib.rs", "absent");
 }

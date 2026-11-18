@@ -8,7 +8,7 @@
 use codegraph_core::{
     directory::plan_frontload,
     prompt_hook::{
-        cap_prompt_hook_injection_default, extract_code_tokens, has_structural_keyword, is_agent_message,
+        cap_prompt_hook_injection_default, extract_code_tokens, has_structural_keyword, is_agent_message, is_turn_taking_reply,
         is_cross_session_message, is_task_notification, strip_system_reminders,
     },
     CodeGraph, OpenOptions,
@@ -31,7 +31,12 @@ pub fn frontload(cwd: &str, prompt: &str) -> Option<String> {
     let prompt = strip_system_reminders(prompt);
     // Task notifications, subagent hand-backs, cross-session messages and nothing at all are
     // not user prompts.
-    if prompt.is_empty() || is_task_notification(&prompt) || is_agent_message(&prompt) || is_cross_session_message(&prompt) {
+    if prompt.is_empty()
+        || is_task_notification(&prompt)
+        || is_agent_message(&prompt)
+        || is_cross_session_message(&prompt)
+        || is_turn_taking_reply(&prompt)
+    {
         return None;
     }
     // HIGH: a structural keyword, or a code-shaped token verified in the index → explore.

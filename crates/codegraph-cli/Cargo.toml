@@ -26,6 +26,7 @@ serde.workspace = true
 regex.workspace = true
 indexmap.workspace = true
 clap = { version = "4", features = ["derive"] }
+globset = "0.4"
 ctrlc = "3"
 mimalloc = { version = "0.1", default-features = false }
 time = { version = "0.3", features = ["formatting"] }

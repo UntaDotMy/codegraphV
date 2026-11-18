@@ -60,7 +60,7 @@ memo_map!(LuaMemberMemo, String, Tri<NodeRef>);
 
 pub fn lua_alias_target(r: &UnresolvedRef, ctx: &Ctx) -> Tri<ResolvedRef> {
     let Some(decl) = lua_local_decl(&r.reference_name, &r.file_path, r.line, ctx) else { return Tri::Undefined };
-    match lua_alias_of(&decl, ctx, 0) {
+    match lua_alias_of(&decl, ctx) {
         Tri::Undefined => Tri::Undefined,
         Tri::Null => Tri::Null,
         Tri::Value(target) => Tri::Value(ResolvedRef::new(r, target.id.clone(), 0.9, ResolvedBy::Import)),
@@ -111,18 +111,53 @@ fn lua_local_decl(name: &str, file: &str, line: u32, ctx: &Ctx) -> Option<NodeRe
     best
 }
 
-fn lua_alias_of(decl: &Node, ctx: &Ctx, depth: u32) -> Tri<NodeRef> {
+fn lua_alias_of(decl: &Node, ctx: &Ctx) -> Tri<NodeRef> {
+    lua_follow(lua_alias_of_step(decl, ctx), ctx)
+}
+
+fn lua_alias_of_step(decl: &Node, ctx: &Ctx) -> LuaStep {
     let signature = decl.signature.as_deref().unwrap_or("");
     let rhs = re!(r"^\s*=\s*").replace_first(signature, |_| String::new());
     let site = LuaSite { file: decl.file_path.clone(), line: decl.start_line, name: decl.name.clone(), node: Rc::new(decl.clone()) };
-    lua_alias_expr(rhs.trim(), &site, ctx, depth)
+    lua_alias_step(rhs.trim(), &site, ctx)
 }
 
-fn lua_alias_expr(rhs: &str, site: &LuaSite, ctx: &Ctx, depth: u32) -> Tri<NodeRef> {
-    if let Some(req) = Re::cached(LUA_REQUIRE_ALIAS, "").captures(rhs) {
-        return lua_module_member(req.text(2).unwrap_or(""), &lua_members(req.text(3).unwrap_or("")), &site.node, ctx, depth);
+/// One step of a Lua alias: what it names, or the module member it leads to, which the walk in
+/// [`lua_module_member`] takes next. Steps rather than calls keep a chain of re-exports from taking
+/// a stack frame per module (upstream 329dd12: 2,000 modules overflowed).
+enum LuaStep {
+    Done(Tri<NodeRef>),
+    Member { name: String, path: Vec<String>, decl: NodeRef },
+}
+
+impl LuaStep {
+    fn is_no_step(&self) -> bool {
+        matches!(self, LuaStep::Done(t) if t.is_undefined())
     }
-    let Some(named) = Re::cached(LUA_NAME_ALIAS, "").captures(rhs) else { return Tri::Undefined };
+}
+
+fn lua_follow(step: LuaStep, ctx: &Ctx) -> Tri<NodeRef> {
+    match step {
+        LuaStep::Done(t) => t,
+        LuaStep::Member { name, path, decl } => lua_module_member(&name, path, &decl, ctx),
+    }
+}
+
+/// `require(name)` from `decl`'s file, then `path`: a member to walk to, or, with no path, the
+/// module itself.
+fn lua_member_step(name: &str, path: Vec<String>, decl: &NodeRef, ctx: &Ctx) -> LuaStep {
+    // `require "kong.conf_loader"` called directly: the module's returned value.
+    if path.is_empty() {
+        return LuaStep::Done(if lua_module_file(name, decl, ctx).is_some() { Tri::Undefined } else { Tri::Null });
+    }
+    LuaStep::Member { name: name.to_owned(), path, decl: decl.clone() }
+}
+
+fn lua_alias_step(rhs: &str, site: &LuaSite, ctx: &Ctx) -> LuaStep {
+    if let Some(req) = Re::cached(LUA_REQUIRE_ALIAS, "").captures(rhs) {
+        return lua_member_step(req.text(2).unwrap_or(""), lua_members(req.text(3).unwrap_or("")), &site.node, ctx);
+    }
+    let Some(named) = Re::cached(LUA_NAME_ALIAS, "").captures(rhs) else { return LuaStep::Done(Tri::Undefined) };
     let root = named.text(1).unwrap_or("").to_string();
     let path = lua_members(named.text(2).unwrap_or(""));
     let root_decl = if root == site.name { None } else { lua_local_decl(&root, &site.file, site.line.saturating_sub(1), ctx) };
@@ -133,11 +168,18 @@ fn lua_alias_expr(rhs: &str, site: &LuaSite, ctx: &Ctx, depth: u32) -> Tri<NodeR
             if !path.is_empty() {
                 let mut members = lua_members(module.text(3).unwrap_or(""));
                 members.extend(path);
-                return lua_module_member(module.text(2).unwrap_or(""), &members, &root_decl, ctx, depth);
+                return lua_member_step(module.text(2).unwrap_or(""), members, &root_decl, ctx);
             }
         }
-        return Tri::Undefined;
+        return LuaStep::Done(Tri::Undefined);
     }
+    LuaStep::Done(lua_global_alias(&root, &path, site, ctx))
+}
+
+/// An alias of a name no local in reach holds: a host table's method, a library function the
+/// project patches, or nothing of the project's.
+fn lua_global_alias(root: &str, path: &[String], site: &LuaSite, ctx: &Ctx) -> Tri<NodeRef> {
+    let root = root.to_string();
     if path.is_empty() {
         return if LUA_GLOBAL_FUNCTIONS.contains(root.as_str()) { Tri::Null } else { Tri::Undefined };
     }
@@ -177,24 +219,47 @@ fn lua_alias_expr(rhs: &str, site: &LuaSite, ctx: &Ctx, depth: u32) -> Tri<NodeR
     }
 }
 
-fn lua_module_member(name: &str, path: &[String], decl: &Node, ctx: &Ctx, depth: u32) -> Tri<NodeRef> {
-    let Some(file) = lua_module_file(name, decl, ctx) else { return Tri::Null };
-    if path.is_empty() {
-        return Tri::Undefined;
+/// `member` of the module `require(name)` returns, from `decl`'s file: its function of that name.
+/// A member a module re-exports from another is followed to its end, in a loop: each module leads
+/// to one place, so a chain has one answer wherever it is entered, which every module the walk
+/// passes gets, and a chain that comes back to itself has none.
+fn lua_module_member(name: &str, path: Vec<String>, decl: &NodeRef, ctx: &Ctx) -> Tri<NodeRef> {
+    let mut walked: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut at = Some((name.to_owned(), path, decl.clone()));
+    let mut found = Tri::Null;
+    while let Some((name, path, decl)) = at.take() {
+        let Some(file) = lua_module_file(&name, &decl, ctx) else {
+            found = Tri::Null;
+            break;
+        };
+        if path.is_empty() {
+            found = Tri::Undefined;
+            break;
+        }
+        let key = format!("{file}\0{}", path.join("."));
+        if let Some(hit) = super::util::MemoMap::lookup(&*ctx.memo::<LuaMemberMemo>(), &key) {
+            found = hit;
+            break;
+        }
+        if !seen.insert(key.clone()) {
+            found = Tri::Null;
+            break;
+        }
+        walked.push(key);
+        match lua_member_in(&file, &path, ctx) {
+            LuaStep::Member { name, path, decl } => at = Some((name, path, decl)),
+            LuaStep::Done(t) => found = t,
+        }
     }
-    let key = format!("{file}\0{}", path.join("."));
-    let memo = ctx.memo::<LuaMemberMemo>();
-    if let Some(hit) = super::util::MemoMap::lookup(&*memo, &key) {
-        return hit;
+    for key in walked {
+        super::util::MemoMap::store(&*ctx.memo::<LuaMemberMemo>(), key, found.clone());
     }
-    // A cycle of re-exports names nothing.
-    super::util::MemoMap::store(&*memo, key.clone(), Tri::Null);
-    let found = lua_member_in(&file, path, ctx, depth);
-    super::util::MemoMap::store(&*memo, key, found.clone());
     found
 }
 
-fn lua_member_in(file: &str, path: &[String], ctx: &Ctx, depth: u32) -> Tri<NodeRef> {
+/// What module `file` has as `path`: a function of its own, or the step to where it re-exports it from.
+fn lua_member_in(file: &str, path: &[String], ctx: &Ctx) -> LuaStep {
     let member = &path[path.len() - 1];
     let nodes = ctx.get_nodes_in_file(file);
     let in_file: Vec<&NodeRef> = nodes.iter().filter(|n| &n.name == member).collect();
@@ -203,10 +268,7 @@ fn lua_member_in(file: &str, path: &[String], ctx: &Ctx, depth: u32) -> Tri<Node
         let owner = if path.len() > 1 { Some(path[path.len() - 2].as_str()) } else { None };
         let owned = fns.iter().find(|n| owner.is_some_and(|o| n.qualified_name.ends_with(&format!("{o}::{member}"))));
         let chosen = owned.or_else(|| fns.iter().find(|n| n.kind == NodeKind::Method)).unwrap_or(&fns[0]);
-        return Tri::Value((*chosen).clone());
-    }
-    if depth >= 3 {
-        return Tri::Null;
+        return LuaStep::Done(Tri::Value((*chosen).clone()));
     }
     let raw = ctx.read_file(file).unwrap_or_default();
     let no_block = re!(r"--\[(=*)\[[\s\S]*?\]\1\]", "g").replace_all(&raw, |m| Some(m.text(0).unwrap_or("").chars().filter(|c| *c == '\n').collect::<String>()));
@@ -223,29 +285,31 @@ fn lua_member_in(file: &str, path: &[String], ctx: &Ctx, depth: u32) -> Tri<Node
             let line = source[..start].split('\n').count() as u32 + 1;
             if re!(r"^[A-Za-z_]\w*$").is_match(&rhs) {
                 if let Some(func) = nodes.iter().find(|n| n.name == rhs && matches!(n.kind, NodeKind::Function | NodeKind::Method)) {
-                    return Tri::Value(func.clone());
+                    return LuaStep::Done(Tri::Value(func.clone()));
                 }
             }
             let at = nodes.iter().find(|n| n.kind == NodeKind::File).or_else(|| nodes.first());
+            // A member to walk to always ends in an answer: only no step at all falls through.
             let next = match at {
-                Some(at) => lua_alias_expr(&rhs, &LuaSite { file: file.to_string(), line, name: member.clone(), node: at.clone() }, ctx, depth + 1),
-                None => Tri::Undefined,
+                Some(at) => lua_alias_step(&rhs, &LuaSite { file: file.to_string(), line, name: member.clone(), node: at.clone() }, ctx),
+                None => LuaStep::Done(Tri::Undefined),
             };
-            if !next.is_undefined() {
+            if !next.is_no_step() {
                 return next;
             }
         }
     }
+    // The module re-exports an alias of its own (`local splitn = require(…).splitn`).
     if let Some(alias) = in_file.iter().find(|n| n.kind == NodeKind::Variable && n.signature.as_deref().is_some_and(|s| !s.is_empty()) && is_lua_local(n, ctx)) {
-        let next = lua_alias_of(alias, ctx, depth + 1);
-        if !next.is_undefined() {
+        let next = lua_alias_of_step(alias, ctx);
+        if !next.is_no_step() {
             return next;
         }
     }
-    match in_file.iter().find(|n| n.kind == NodeKind::Variable && !is_lua_local(n, ctx)) {
+    LuaStep::Done(match in_file.iter().find(|n| n.kind == NodeKind::Variable && !is_lua_local(n, ctx)) {
         Some(global) => Tri::Value((*global).clone()),
         None => Tri::Null,
-    }
+    })
 }
 
 fn lua_module_file(name: &str, decl: &Node, ctx: &Ctx) -> Option<String> {

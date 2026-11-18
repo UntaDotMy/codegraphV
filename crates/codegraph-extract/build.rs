@@ -23,6 +23,10 @@ fn compile(root: &PathBuf, name: &str, c11: bool, silence_unused_function: bool)
     c.flag_if_supported("-Wno-unused-parameter");
     c.flag_if_supported("-Wno-unused-but-set-variable");
     c.flag_if_supported("-Wno-trigraphs");
+    // Warnings in upstream scanner code that we vendor unchanged: scala's `array_pop` macro
+    // (unused-value) and swift's `ws_result` (maybe-uninitialized).
+    c.flag_if_supported("-Wno-unused-value");
+    c.flag_if_supported("-Wno-maybe-uninitialized");
     if silence_unused_function {
         c.flag_if_supported("-Wno-unused-function");
     }

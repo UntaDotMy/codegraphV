@@ -71,6 +71,18 @@ function familyOf(name) {
   if (name === 'Bash' || name === 'BashOutput') return 'bash';
   return 'other';
 }
+/**
+ * Is this tool `explore`? Matched on SHAPE, never on the full literal name: the
+ * Rust rewrite renamed the server and the tool (`mcp__codegraphV__codegraphV_explore`),
+ * and a `/codegraph_explore/` test silently matched neither name, so a run against
+ * a Rust build reported "no answered explore calls" and no allocation while its
+ * explores were answering — sufficiency and allocation both reading zero. The
+ * `V?` covers both spellings; the trailing `(?:_|$)` keeps `explore_something`
+ * out.
+ */
+export function isExploreTool(name) {
+  return /codegraphV?_explore(?:_|$)/.test(String(name ?? ''));
+}
 const FAMILIES = ['codegraph', 'read', 'search', 'bash', 'other'];
 // The without-arm's way of getting the same bytes: reading and searching files.
 const FILE_ACCESS = ['read', 'search', 'bash'];
@@ -118,6 +130,11 @@ export function parseSession(files) {
   let initTools = null, result = null, raced = false, cliCalls = 0, cliContaminated = 0;
   const results = [];  // one `result` event per session segment (multi-turn)
   let compactions = 0;
+  // A backend can serve a run with `usage: {input_tokens: 0, output_tokens: 0}` on
+  // every assistant event (seen through one inference gateway). Every occupancy
+  // figure then computes as 0 — indistinguishable from "nothing was resident".
+  // Record whether ANY usage arrived, so the printer can say "not measured".
+  let usageSeen = false;
   // Raw codegraph_explore response text, in call order. Feeds the envelope view
   // (see formatEnvelope) — kept here rather than re-parsed from the log later so
   // a multi-segment session's responses stay in one ordered list.
@@ -145,6 +162,7 @@ export function parseSession(files) {
         seenMsgIds.add(id);
         const u = ev.message.usage || {};
         const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        if (ctx > 0 || (u.output_tokens || 0) > 0) usageSeen = true;
         timeline.push({ kind: 'req', ctx, out: u.output_tokens || 0 });
       }
       for (const b of ev.message.content || []) {
@@ -181,7 +199,7 @@ export function parseSession(files) {
             // by the binary being genuinely absent) and put nothing in context.
             if (cliById.has(b.tool_use_id) && !b.is_error) cliContaminated++;
             const name = nameById.get(b.tool_use_id) || '';
-            if (/codegraph_explore/.test(name) && !b.is_error) exploreTexts.push(t);
+            if (isExploreTool(name) && !b.is_error) exploreTexts.push(t);
             timeline.push({ kind: 'add', family: familyOf(name), chars: t.length, tool: name });
           } else {
             timeline.push({ kind: 'add', family: null, chars: textOf([b]).length });
@@ -345,6 +363,9 @@ export function parseSession(files) {
     processed,
     occupancy: {
       ctxFinal, ctxBase, windowTokens: WINDOW_TOKENS,
+      // false = the host reported no token usage, so every figure below is zero
+      // because nothing was MEASURED, not because nothing was resident.
+      measured: usageSeen,
       charsPerToken, calibrated, compactions, dispersion, evicted: Math.round(evicted),
       residual: Object.fromEntries(FAMILIES.map((f) => [f, Math.round(residual[f])])),
       contributed: Object.fromEntries(FAMILIES.map((f) => [f, Math.round(contributed[f])])),
@@ -360,6 +381,22 @@ export function parseSession(files) {
 export function formatOccupancy(s, indent = '  ') {
   const o = s.occupancy;
   const n = (x) => x.toLocaleString('en-US');
+  // A column of zeros from an unmeasured run reads as "nothing was resident" —
+  // the opposite of the truth. Say so instead, and still show what WAS counted
+  // from the transcript (chars and result counts are measured either way).
+  if (o.measured === false) {
+    return [
+      `${indent}Residual context occupancy: NOT MEASURED — the host reported no token usage`,
+      `${indent}  (every assistant event carried input_tokens:0 / output_tokens:0, so no ctx figure is meaningful).`,
+      `${indent}  What the transcript still records:`,
+      `${indent}  ${'codegraph'.padEnd(18)}${'— tok'.padStart(12)}   (${n(o.chars.codegraph)} chars, ${o.results.codegraph} result${o.results.codegraph === 1 ? '' : 's'})`,
+      `${indent}  ${'Read'.padEnd(18)}${'— tok'.padStart(12)}   (${n(o.chars.read)} chars, ${o.results.read} result${o.results.read === 1 ? '' : 's'})`,
+      `${indent}  ${'Grep/Glob'.padEnd(18)}${'— tok'.padStart(12)}   (${n(o.chars.search)} chars, ${o.results.search} result${o.results.search === 1 ? '' : 's'})`,
+      `${indent}  ${'Bash'.padEnd(18)}${'— tok'.padStart(12)}   (${n(o.chars.bash)} chars, ${o.results.bash} result${o.results.bash === 1 ? '' : 's'})`,
+      `${indent}  ${'→ file-access'.padEnd(18)}${'— tok'.padStart(12)}   (${n(o.charsFileAccess)} chars, ${o.results.read + o.results.search + o.results.bash} result${o.results.read + o.results.search + o.results.bash === 1 ? '' : 's'})`,
+      `${indent}  measure: turns ${s.turns} · compactions ${o.compactions} · token occupancy unavailable`,
+    ].join('\n');
+  }
   const pctCtx = (t) => (o.ctxFinal > 0 ? ((t / o.ctxFinal) * 100).toFixed(1) : '0.0');
   const pctWin = (t) => ((t / o.windowTokens) * 100).toFixed(1);
   const rows = [];
@@ -418,22 +455,37 @@ const DEFINING_KINDS = new Set([
 ]);
 export function parseExploreCall(text) {
   const src = String(text ?? '');
-  const re = /^\*\*`([^`]+)`\*\*(.*)$/gm;
+  // Two renderers write this block. TypeScript: `**`path`** — send(function), …` —
+  // path in backticks, symbols inline. Rust (render.rs:1060): `**path**` then one
+  // `- name (kind) :start–end` line per symbol. Accept both, and require the bold
+  // span to look like a path so `**Blast radius — …**` is never mistaken for a file.
+  const PATHY = /^[\w@.+~/-]+$/;
   const marks = [];
-  let m;
-  while ((m = re.exec(src)) !== null) marks.push({ path: m[1], header: m[2] || '', at: m.index });
+  for (const m of src.matchAll(/^\*\*(`?)([^\n*]+?)\1\*\*([^\n]*)$/gm)) {
+    const path = m[2].trim();
+    if (!PATHY.test(path) || !/\.[A-Za-z]\w*$/.test(path)) continue;
+    marks.push({ path, header: m[3] || '', at: m.index, bodyStart: m.index + m[0].length });
+  }
   if (!marks.length) return { envelope: 0, files: [] };
   // Sections run to the next header, or to the trailing guidance quote.
   const tail = src.indexOf('\n> ', marks[marks.length - 1].at);
   const end = tail === -1 ? src.length : tail;
-  const files = marks.map((mark, i) => ({
-    path: mark.path,
-    chars: (i + 1 < marks.length ? marks[i + 1].at : end) - mark.at,
-    // `mutateElement(calls), onFinished(variable), +32 more` → the defined ones.
-    symbols: [...mark.header.matchAll(/([A-Za-z_$][\w$.]*)\(([a-z_]+)\)/g)]
-      .filter((s) => DEFINING_KINDS.has(s[2]))
-      .map((s) => ({ name: s[1], kind: s[2] })),
-  }));
+  const files = marks.map((mark, i) => {
+    const stop = i + 1 < marks.length ? marks[i + 1].at : end;
+    // Symbols: inline header (`send(function)`) or the following `- send (function) :1–2` lines.
+    const region = src.slice(mark.bodyStart, stop);
+    const syms = [
+      ...[...mark.header.matchAll(/([A-Za-z_$][\w$.]*)\(([a-z_]+)\)/g)],
+      ...[...region.matchAll(/^-\s+([A-Za-z_$][\w$.]*)\s+\(([a-z_]+)\)/gm)],
+    ];
+    return {
+      path: mark.path,
+      chars: stop - mark.at,
+      symbols: syms
+        .filter((s) => DEFINING_KINDS.has(s[2]))
+        .map((s) => ({ name: s[1], kind: s[2] })),
+    };
+  });
   return { envelope: files.reduce((s, f) => s + f.chars, 0), files };
 }
 
@@ -664,7 +716,7 @@ export function collectExploreTexts(events) {
     for (const b of content) {
       if (b.type === 'tool_use') nameById.set(b.id, b.name);
       else if (b.type === 'tool_result' && !b.is_error
-        && /codegraph_explore/.test(nameById.get(b.tool_use_id) || '')) texts.push(textOf(b.content));
+        && isExploreTool(nameById.get(b.tool_use_id))) texts.push(textOf(b.content));
     }
   }
   return texts;
@@ -797,13 +849,14 @@ function samePath(a, b) {
 }
 
 /**
- * The files whose SOURCE an explore response returned — its per-file sections,
- * which start with the unique ``**` `` marker (FILE_SECTION_PREFIX in
- * src/mcp/tools.ts). formatEnvelope keys off the same marker; it needs the byte
- * offsets too, which is why it re-scans rather than calling this.
+ * The files whose SOURCE an explore response returned — its per-file sections.
+ * Delegates to parseExploreCall so BOTH section shapes are recognized (the
+ * TypeScript `**`path`**` and the Rust `**path**`). The old local regex knew only
+ * the first, so every Rust explore read as "0 files returned" and every following
+ * Read was misclassified as a recall miss ("file never surfaced").
  */
 export function exploreReturnedFiles(text) {
-  return [...String(text ?? '').matchAll(/^\*\*`([^`]+)`\*\*/gm)].map((m) => m[1]);
+  return parseExploreCall(text).files.map((f) => f.path);
 }
 
 // Every path-shaped token anywhere in a response — flow steps, blast radius,
@@ -874,7 +927,7 @@ export function classifySufficiency(events) {
       for (const b of content) {
         if (b.type !== 'tool_result') continue;
         const name = nameById.get(b.tool_use_id) || '';
-        if (/codegraph_explore/.test(name) && !b.is_error) textById.set(b.tool_use_id, textOf(b.content));
+        if (isExploreTool(name) && !b.is_error) textById.set(b.tool_use_id, textOf(b.content));
       }
     }
   }
@@ -894,7 +947,7 @@ export function classifySufficiency(events) {
     const earlier = [];  // files previous explores in THIS thread already shipped
     for (let i = 0; i < actions.length; i++) {
       const a = actions[i];
-      if (!/codegraph_explore/.test(a.name)) continue;
+      if (!isExploreTool(a.name)) continue;
       const text = textById.get(a.id);
       // No response text = the call errored, or the run ended before it
       // returned. Nothing to judge the sufficiency of; count it and move on.
@@ -1348,6 +1401,103 @@ function selftest() {
   checkIs('  …and the block renders', /efficiency\s+50\.\d%/.test(formatAllocation(s)), true);
   checkIs('a run with no explore says so',
     formatAllocation({ allocation: computeAllocation([], 'answer') }).includes('no codegraph_explore responses'), true);
+
+  // ---- 7. The Rust rewrite renamed the tool: mcp__codegraphV__codegraphV_explore.
+  // The classifier matched the OLD literal name, so a run against a Rust build
+  // reported "no answered explore calls" and no allocation while its explores were
+  // answering — two of the three feedback metrics silently dead. Match the SHAPE.
+  const EXPLORE_V = 'mcp__codegraphV__codegraphV_explore';
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', EXPLORE_V, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...req(12000, 'm2', [use('r1', 'Read', { file_path: '/t/lib/response.js' })]),
+    res('r1', 100),
+    done(),
+  ]);
+  checkIs('codegraphV_explore is classified (Rust tool name)', sf.answered, 1);
+  checkIs('  …and bucketed like the old name', sf.calls[0].bucket, 'read_returned');
+  checkIs('explore matcher accepts both names, rejects others',
+    [EXPLORE, EXPLORE_V, 'mcp__codegraph__codegraph_search'].map(isExploreTool).join(','),
+    'true,true,false');
+
+  // The allocation gate (exploreTexts) must see the Rust name too.
+  f = write('alloc-v.jsonl', [
+    ...req(10000, 'm1', [use('e1', EXPLORE_V, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...req(12000, 'm2', [{ type: 'text', text: 'done' }]),
+    JSON.stringify({ type: 'result', subtype: 'success', duration_ms: 1000, total_cost_usd: 0.1, usage: {}, result: 'It is `lib/response.js`.' }),
+  ]);
+  s = parseSession([f]);
+  check('allocation sees the Rust tool name', round(s.allocation.efficiency), 100, 0.6);
+
+  // ---- 9. The Rust renderer writes a file section as `**src/io/read_buf.rs**`
+  // with its symbols on FOLLOWING `- name (kind) :start–end` lines (render.rs:1060);
+  // the TypeScript renderer wrote `**`path`** — name(kind), …` on one backticked
+  // line. parseExploreCall only knew the second, so every Rust explore parsed to
+  // zero files and allocation reported "no responses with source sections".
+  // Both shapes must parse; a bold non-path heading must never become a file.
+  const rustSection = (path, symbols, body) =>
+    `**${path}**\n${symbols.map(([n, k, a, b]) => `- ${n} (${k}) :${a}–${b}\n`).join('')}\n\n` +
+    '```rust\n' + 'x'.repeat(body) + '\n```\n\n';
+  const rustText = '**Explore: q**\n\n**Blast radius — what depends on these**\n\n- `Foo` (src/a.rs:1) — 2 callers\n\n'
+    + rustSection('src/a.rs', [['Foo', 'struct', 3, 9], ['run', 'function', 12, 20]], 4000)
+    + rustSection('src/b.rs', [['Bar', 'trait', 1, 5]], 4000);
+  const parsed = parseExploreCall(rustText);
+  checkIs('Rust file sections parse (bold path, no backticks)', parsed.files.map((f) => f.path).join(','), 'src/a.rs,src/b.rs');
+  checkIs('  …symbols come from the following - lines', parsed.files[0].symbols.map((x) => x.name).join(','), 'Foo,run');
+  checkIs('  …a bold prose heading is not a file',
+    parsed.files.some((f) => /Blast radius/.test(f.path)), false);
+  checkIs('  …envelope counts both sections', parsed.envelope > 7900, true);
+
+  // The TypeScript shape still parses — this measures both arms of an A/B.
+  const tsParsed = parseExploreCall('**`lib/response.js`** — send(function), util(constant)\n\n'
+    + 'x'.repeat(4000) + '\n\n> guidance\n');
+  checkIs('the TypeScript section shape still parses', tsParsed.files[0].path, 'lib/response.js');
+  checkIs('  …with its header symbols', tsParsed.files[0].symbols.map((x) => x.name).join(','), 'send,util');
+
+  // ---- 10. exploreReturnedFiles feeds the recall buckets. It carried its own
+  // copy of the backticked-only regex, so on a Rust response it returned NO
+  // files and every following Read was scored "file never surfaced" — a 100%
+  // recall-miss artefact that reads as a catastrophic retrieval bug.
+  checkIs('returned files come from a Rust response',
+    exploreReturnedFiles(rustText).join(','), 'src/a.rs,src/b.rs');
+  sf = suff([
+    ...req(10000, 'm1', [use('e1', 'mcp__codegraphV__codegraphV_explore', { query: 'q' })]),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'e1',
+      content: [{ type: 'text', text: rustText }] }] } }),
+    ...req(12000, 'm2', [use('r1', 'Read', { file_path: '/t/src/a.rs' })]),
+    res('r1', 100),
+    done(),
+  ]);
+  checkIs('  …so a Read of a returned file is an allocation miss, not a recall miss',
+    sf.calls[0].bucket, 'read_returned');
+
+  // ---- 8. A backend that reports no usage. One gateway sent
+  // input_tokens:0 / output_tokens:0 on every assistant event, so the occupancy
+  // table printed a column of zeros — which READS as "nothing was resident" when
+  // in truth nothing was measured. Zero and unmeasured must not look alike.
+  // `req` always writes output_tokens:2, so build these events by hand.
+  const reqZero = (id, blocks) => blocks.map((b) => JSON.stringify({
+    type: 'assistant',
+    message: { id, content: [b], usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 } },
+  }));
+  f = write('nousage.jsonl', [
+    ...reqZero('n1', [use('e1', EXPLORE, { query: 'q' })]),
+    exploreRes('e1', ['lib/response.js']),
+    ...reqZero('n2', [{ type: 'text', text: 'done' }]),
+    done(),
+  ]);
+  s = parseSession([f]);
+  checkIs('a usage-less run is flagged unmeasured', s.occupancy.measured, false);
+  checkIs('  …and the block says so instead of printing zeros',
+    /not measured/i.test(formatOccupancy(s)), true);
+  checkIs('a run with usage is measured',
+    parseSession([write('meas.jsonl', [
+      ...req(10000, 'm1', [use('t1', EXPLORE)]),
+      res('t1', 1000),
+      ...req(11000, 'm2', [{ type: 'text', text: 'done' }]),
+      done(),
+    ])]).occupancy.measured, true);
 
   console.log(`\n${n - failures}/${n} checks passed`);
   return failures;

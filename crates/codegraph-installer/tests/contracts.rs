@@ -11,11 +11,17 @@ fn audit_refresh_preserves_permission_opt_out_and_narrow_permissions() {
         let original = serde_json::json!({"permissions": {"allow": allow}}).to_string();
         fs::write(&path, &original).unwrap();
         env.apply("claude", Location::Global, InstallOptions { preserve_permissions: true, ..InstallOptions::default() }, false).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        // A refresh keeps the permissions exactly; the one thing it adds is the guard hook.
+        let mut refreshed: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(guard_hooks(&path).len(), 1);
+        refreshed.as_object_mut().unwrap().remove("hooks");
+        assert_eq!(refreshed.to_string(), original);
         env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("mcp__codegraphV__*"));
         env.apply("claude", Location::Global, InstallOptions { auto_allow: false, ..InstallOptions::default() }, false).unwrap();
-        assert!(!fs::read_to_string(&path).unwrap_or_default().contains("mcp__codegraphV__"));
+        let data: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let allow = data["permissions"]["allow"].as_array().cloned().unwrap_or_default();
+        assert!(!allow.iter().any(|p| p.as_str().is_some_and(|p| p.starts_with("mcp__codegraphV__"))), "{data}");
     }
 }
 
@@ -149,10 +155,18 @@ fn audit_exec_hook_paths_are_literal_and_extra_arguments_are_not_owned() {
         assert_eq!(hook["command"], executable);
         assert_eq!(hook["args"], serde_json::json!(["prompt-hook"]));
         hook["args"] = serde_json::json!(["prompt-hook", "user-extension"]);
+        // A project's settings never get the guard's per-machine path.
+        assert!(data["hooks"].get("PreToolUse").is_none(), "{data}");
         fs::write(&path, data.to_string()).unwrap();
         env.apply("claude", Location::Local, InstallOptions::default(), true).unwrap();
         let after: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(after["hooks"], data["hooks"]);
+        // The global install writes it with the executable's literal path.
+        env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
+        let global = env.home.join(".claude/settings.json");
+        let guard = &guard_hooks(&global)[0]["hooks"][0];
+        assert_eq!(guard["command"], executable);
+        assert_eq!(guard["args"], serde_json::json!(["guard-hook"]));
     }
 }
 
@@ -405,8 +419,9 @@ fn claude_prompt_hook_is_added_idempotent_and_removed_without_touching_siblings(
     assert!(!left.contains("UserPromptSubmit"), "{left}");
 }
 
-/// A refresh (`install --refresh`, run by `upgrade`) never adds a hook and never rewrites the
-/// original codegraph's: replacing those is `migrate`'s job, on request.
+/// A refresh (`install --refresh`, run by `upgrade`) never adds a prompt hook and never rewrites
+/// the original codegraph's: replacing those is `migrate`'s job, on request. (It does add the
+/// search guard: see `claude_refresh_adds_the_guard_and_updates_its_path`.)
 #[test]
 fn claude_refresh_leaves_the_originals_hooks_and_never_adds_one() {
     let refresh = InstallOptions { prompt_hook: None, ..InstallOptions::default() };
@@ -483,4 +498,84 @@ fn the_originals_hooks_in_every_spelling() {
     assert_eq!(env.claude_settings_as(&original::ORIGINAL, Location::Global), (false, true));
     env.remove_as(&original::ORIGINAL, "claude", Location::Global, false).unwrap();
     assert_eq!(hook_commands(&settings), vec!["my-own", "codegraph-helper prompt-hook"]);
+}
+
+/// The search-first guard (`codegraphV guard-hook`): Claude's PreToolUse entries that are ours.
+fn guard_hooks(p: &std::path::Path) -> Vec<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).unwrap_or_else(|_| "{}".into())).unwrap();
+    v["hooks"]["PreToolUse"].as_array().into_iter().flatten()
+        .filter(|g| g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["args"] == serde_json::json!(["guard-hook"]))))
+        .cloned()
+        .collect()
+}
+const GUARD_GROUP: &str = r#"{"matcher":"^(Grep|Glob|Bash|PowerShell|mcp__codegraphV__.*)$","hooks":[{"type":"command","command":"C:\\codegraphV native\\codegraphV.exe","args":["guard-hook"],"timeout":10}]}"#;
+
+/// The guard is on by default: install and every refresh (what `upgrade` runs) write it once,
+/// beside the user's own PreToolUse hooks; uninstall takes it and the keys it emptied.
+#[test]
+fn claude_guard_is_installed_by_default_refreshed_idempotent_and_removed() {
+    let expected: serde_json::Value = serde_json::from_str(GUARD_GROUP).unwrap();
+    for options in [InstallOptions::default(), InstallOptions { prompt_hook: Some(false), ..InstallOptions::default() }] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(&dir);
+        let settings = env.home.join(".claude").join("settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let mine = r#"{"matcher":"Bash","hooks":[{"type":"command","command":"my-own"}]}"#;
+        fs::write(&settings, format!(r#"{{"hooks":{{"PreToolUse":[{mine}]}},"model":"x"}}"#)).unwrap();
+        env.apply("claude", Location::Global, options, false).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["PreToolUse"], serde_json::json!([serde_json::from_str::<serde_json::Value>(mine).unwrap(), expected]));
+        assert_eq!(v["model"], "x");
+        let first = fs::read_to_string(&settings).unwrap();
+        let again = env.apply("claude", Location::Global, options, false).unwrap();
+        assert!(again.files.iter().all(|f| f.action == "unchanged"), "{again:?}");
+        assert_eq!(fs::read_to_string(&settings).unwrap(), first);
+        env.apply("claude", Location::Global, InstallOptions::default(), true).unwrap();
+        let left = fs::read_to_string(&settings).unwrap();
+        assert!(guard_hooks(&settings).is_empty(), "{left}");
+        assert!(!left.contains("mcp__codegraphV__.*"), "no emptied group is left behind: {left}");
+        assert!(left.contains("my-own"), "{left}");
+    }
+}
+
+/// A refresh adds the guard to a setup written before it existed, and moves an entry that runs
+/// another copy of codegraphV to this one, in place.
+#[test]
+fn claude_refresh_adds_the_guard_and_updates_its_path() {
+    let refresh = InstallOptions { prompt_hook: None, preserve_permissions: true, ..InstallOptions::default() };
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir);
+    let settings = env.home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, r#"{"permissions":{"allow":["mcp__codegraphV__*"]}}"#).unwrap();
+    env.apply("claude", Location::Global, refresh, false).unwrap();
+    assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
+
+    let old = GUARD_GROUP.replace(r"C:\\codegraphV native\\codegraphV.exe","D:/old place/codegraphV.exe");
+    fs::write(&settings, format!(r#"{{"hooks":{{"PreToolUse":[{old}]}}}}"#)).unwrap();
+    env.apply("claude", Location::Global, refresh, false).unwrap();
+    assert_eq!(guard_hooks(&settings), vec![serde_json::from_str::<serde_json::Value>(GUARD_GROUP).unwrap()]);
+}
+
+/// Upstream #3234: from the home folder, a "local" setup's files are the global ones
+/// (`~/.codex/config.toml`, `~/.claude/settings.json`), and its instructions file is the user's
+/// own `~/AGENTS.md`. A local install there is refused and counts as not configured, so
+/// `upgrade`'s local refresh never writes `~/AGENTS.md` or strips the global guard.
+#[test]
+fn a_local_setup_from_the_home_folder_is_refused_and_never_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(&dir);
+    env.apply("codex", Location::Global, InstallOptions::default(), false).unwrap();
+    env.apply("claude", Location::Global, InstallOptions::default(), false).unwrap();
+    env.project = env.home.clone();
+    let settings = env.home.join(".claude/settings.json");
+    let before = snapshot(&env.home);
+    for id in ["codex", "claude"] {
+        assert!(!env.configured(id, Location::Local), "{id}");
+        let refused = env.apply(id, Location::Local, InstallOptions { prompt_hook: None, preserve_permissions: true, ..InstallOptions::default() }, false);
+        assert!(refused.is_err_and(|e| e.to_string().contains("home folder")), "{id}");
+    }
+    assert!(!env.home.join("AGENTS.md").exists());
+    assert_eq!(guard_hooks(&settings).len(), 1);
+    assert_eq!(snapshot(&env.home), before);
 }

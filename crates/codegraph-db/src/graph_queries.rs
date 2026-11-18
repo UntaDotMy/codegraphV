@@ -212,12 +212,15 @@ fn low_value_file(path: &str, generated: &HashSet<String>) -> bool {
 }
 
 impl Store {
-    /// Only imports form file dependency cycles; calls and navigation are not imports.
-    pub fn get_file_import_pairs(&self) -> crate::Result<Vec<(String, String)>> {
+    /// Every cross-file dependency edge, which is what `get_dependency_file_paths` follows for one
+    /// file: any kind but `contains`, whose targets are the file's own symbols. A file's
+    /// `imports` edges point at its own import declarations, so they never appear here; the
+    /// cross-file dependency a reader cares about is the resolved call or reference.
+    pub fn get_file_dependency_pairs(&self) -> crate::Result<Vec<(String, String)>> {
         let mut statement = self.conn().prepare_cached(
             "SELECT DISTINCT sn.file_path, tn.file_path FROM edges e \
              JOIN nodes sn ON sn.id = e.source JOIN nodes tn ON tn.id = e.target \
-             WHERE e.kind = 'imports' AND sn.file_path <> tn.file_path")?;
+             WHERE e.kind != 'contains' AND sn.file_path <> tn.file_path")?;
         let pairs = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pairs)

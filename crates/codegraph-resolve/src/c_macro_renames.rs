@@ -7,15 +7,17 @@
 //! node, so only the source says what one does.
 //!
 //! Headers are read once per resolver, in one pass over their `#define`s, into an index by
-//! macro name: a name no header renames costs one lookup, however many files write it. A
-//! vendor's register maps can run to hundreds of megabytes, so the pass stops at a budget,
-//! past which a name is left as written. A source file is read when a name in it is asked
-//! about. A rename counts where the translation unit from the asking file has certainly
-//! defined it ([`is_cpp_macro_defined_at`]): a macro under a flag no file sets, or written
-//! further down, renames nothing. Two renames of one name that disagree (`#ifdef` arms)
-//! say nothing either.
+//! macro name: a name no header renames costs one lookup, however many files write it. So are
+//! the source files something includes (`#include "impl.c"`), which reach their includers as a
+//! header does. A vendor's register maps can run to hundreds of megabytes, so the pass stops at
+//! a budget, past which a name is left as written. Any other source file reaches itself alone,
+//! so it is read when a name in it is asked about, for its own answers: the index is fixed once
+//! built, and no answer depends on which files have asked (upstream 329dd12). A rename counts
+//! where the translation unit from the asking file has certainly defined it
+//! ([`is_cpp_macro_defined_at`]): a macro under a flag no file sets, or written further down,
+//! renames nothing. Two renames of one name that disagree (`#ifdef` arms) say nothing either.
 
-use crate::cpp_includers::cpp_includers;
+use crate::cpp_includers::{cpp_included_sources, cpp_includers};
 use crate::cpp_macro_visibility::{directive_lines, is_cpp_macro_defined_at};
 use crate::ctx::Ctx;
 use codegraph_jsre::re;
@@ -27,10 +29,10 @@ use std::collections::{HashMap, HashSet};
 struct Memo {
     /// Whether the one-time header scan has run.
     initialized: bool,
-    /// Macro name -> the files with a `#define` of it to one name.
+    /// Macro name -> the headers and included source files with a `#define` of it to one name.
     by_name: HashMap<String, Vec<String>>,
-    /// The source files read so far.
-    sources: HashSet<String>,
+    /// A source file asked about -> the names it renames itself.
+    own: HashMap<String, std::rc::Rc<HashSet<String>>>,
     /// `file\0name` -> what the name is renamed to there (None: nothing).
     answers: HashMap<String, Option<String>>,
 }
@@ -38,8 +40,8 @@ struct Memo {
 #[derive(Default)]
 struct MemoCell(RefCell<Memo>);
 
-/// Characters of headers one resolver reads for renames: redis has 2 MB, rocksdb 9 MB,
-/// betaflight 109 MB.
+/// Characters of the index one resolver reads for renames: redis has 2 MB of headers, rocksdb
+/// 9 MB, betaflight 109 MB.
 const HEADER_SCAN_BUDGET: usize = 16_000_000;
 
 fn is_header(file: &str) -> bool {
@@ -73,6 +75,18 @@ fn index(file: &str, source: &str, by_name: &mut HashMap<String, Vec<String>>) {
     }
 }
 
+/// What the source file `file` renames itself.
+fn own_renames(file: &str, memo: &MemoCell, ctx: &Ctx) -> std::rc::Rc<HashSet<String>> {
+    if let Some(hit) = memo.0.borrow().own.get(file) {
+        return hit.clone();
+    }
+    let mut names = HashMap::new();
+    index(file, &ctx.read_file(file).unwrap_or_default(), &mut names);
+    let own = std::rc::Rc::new(names.into_keys().collect::<HashSet<String>>());
+    memo.0.borrow_mut().own.insert(file.to_string(), own.clone());
+    own
+}
+
 fn memo_for(ctx: &Ctx) -> std::rc::Rc<MemoCell> {
     let memo = ctx.memo::<MemoCell>();
     if memo.0.borrow().initialized {
@@ -80,16 +94,27 @@ fn memo_for(ctx: &Ctx) -> std::rc::Rc<MemoCell> {
     }
     let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
     let mut budget = HEADER_SCAN_BUDGET;
+    let mut read = |file: &str, budget: &mut usize| {
+        if let Some(source) = ctx.read_file(file) {
+            index(file, &source, &mut by_name);
+            *budget = budget.saturating_sub(source.len());
+        }
+    };
     for file in ctx.get_all_files() {
         if budget == 0 {
             break;
         }
-        if !is_header(&file) {
-            continue;
+        if is_header(&file) {
+            read(&file, &mut budget);
         }
-        let Some(source) = ctx.read_file(&file) else { continue };
-        index(&file, &source, &mut by_name);
-        budget = budget.saturating_sub(source.len());
+    }
+    for file in cpp_included_sources(ctx) {
+        if budget == 0 {
+            break;
+        }
+        if !is_header(&file) {
+            read(&file, &mut budget);
+        }
     }
     {
         let mut state = memo.0.borrow_mut();
@@ -105,13 +130,16 @@ fn memo_for(ctx: &Ctx) -> std::rc::Rc<MemoCell> {
 /// includes.
 pub fn c_macro_rename(name: &str, file: &str, line: usize, language: Language, ctx: &Ctx) -> Option<String> {
     let memo = memo_for(ctx);
-    if !is_header(file) && !memo.0.borrow().sources.contains(file) {
-        let source = ctx.read_file(file).unwrap_or_default();
-        let mut state = memo.0.borrow_mut();
-        state.sources.insert(file.to_string());
-        index(file, &source, &mut state.by_name);
+    let indexed = memo.0.borrow().by_name.get(name).cloned().unwrap_or_default();
+    let own = !is_header(file) && own_renames(file, &memo, ctx).contains(name);
+    if !own && indexed.is_empty() {
+        return None;
     }
-    let files = memo.0.borrow().by_name.get(name).cloned()?;
+    let files = if own && !indexed.iter().any(|f| f == file) {
+        std::iter::once(file.to_string()).chain(indexed).collect()
+    } else {
+        indexed
+    };
     let key = format!("{file}\0{name}");
     let cached = memo.0.borrow().answers.get(&key).cloned();
     let renamed = match cached {

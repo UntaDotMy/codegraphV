@@ -5,7 +5,10 @@ use super::{hash_content, ExtractionOrchestrator};
 use crate::file_limits::{oversize_stamp, read_bounded_source};
 use codegraph_extract::languages::{has_mpeg_ts_extension, is_mpeg_transport_stream, is_source_file, MPEG_TS_SNIFF_BYTES};
 use codegraph_extract::scan::config::load_extension_overrides;
-use codegraph_extract::scan::{can_trust_git_fast_path, get_git_changed_files, get_git_head_sha, scan_directory, INDEXED_AT_COMMIT_KEY};
+use codegraph_extract::scan::{
+    can_trust_git_fast_path, collect_included_files_for_root, get_git_changed_files, get_git_head_sha, load_include_matcher, scan_directory,
+    INDEXED_AT_COMMIT_KEY,
+};
 use codegraph_types::log::log_debug;
 use indexmap::IndexSet;
 use serde_json::{json, Value};
@@ -176,6 +179,17 @@ impl ExtractionOrchestrator {
                 let mut changed: Vec<_> = scanned.symmetric_difference(&indexed).cloned().collect();
                 changed.sort();
                 candidates.extend(changed);
+            }
+            // Source `include` forces in despite `.gitignore` is indexed, but git status never
+            // reports an ignored path (upstream #3086): the included files on disk now, and the
+            // indexed ones the include still selects (a deletion), are candidates too.
+            if let Some(include) = load_include_matcher(root) {
+                candidates.extend(collect_included_files_for_root(root).map_err(crate::errors::CodeGraphError::other)?);
+                for file in self.store.get_all_files()? {
+                    if include.ignores(&file.path).unwrap_or(false) {
+                        candidates.insert(file.path);
+                    }
+                }
             }
             let scope = self.scoped_sync_matcher();
             let overrides = load_extension_overrides(root);

@@ -87,7 +87,9 @@ console.log('arm      rep | subAg | MAIN(sonnet) tok / $ | SUB(haiku) tok / $   
 for (const arm of ARMS) for (const r of byArm[arm]) {
   const mC = cost(r.main), sC = cost(r.sub), mT = tot(r.main), sT = tot(r.sub);
   const reads = r.tools['Read'] || 0, grep = (r.tools['Grep']||0)+(r.tools['Bash']||0)+(r.tools['Glob']||0);
-  const explore = r.tools['mcp__codegraph__codegraph_explore'] || 0;
+  // Both spellings: the Rust rewrite renamed the server and the tool.
+  const explore = Object.entries(r.tools).filter(([n]) => /codegraphV?_explore(?:_|$)/.test(n))
+    .reduce((s, [, v]) => s + v, 0);
   const delta = (mC + sC) - (r.ccTotal || 0); // should be ~0
   console.log(
     `${arm.padEnd(8)} #${r.rep} | ${String(r.subagents).padStart(2)}    | ${k(mT)} ${d(mC).padStart(7)}     | ${k(sT)} ${d(sC).padStart(7)}     | ${k(mT+sT)} ${d(mC+sC).padStart(7)} | ${d(r.ccTotal||0).padStart(7)} ${(delta>=0?'+':'')+delta.toFixed(4)} | ${String(r.durationSec).padStart(5)} r=${reads} g=${grep} x=${explore}`
